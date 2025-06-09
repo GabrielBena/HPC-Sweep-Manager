@@ -1,0 +1,32 @@
+# HPC Sweep Manager - Sweep Configuration
+# Generated on {{ timestamp }}
+
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:  # Parameters to combine in all possible ways
+    {% for param_name, values in grid_params.items() %}
+    {{ param_name }}: {{ values }}
+    {% endfor %}
+  
+  {% if paired_params %}
+  paired:  # Parameters that vary together
+    {% for group_name, group_params in paired_params.items() %}
+    - {{ group_name }}:
+        {% for param_name, values in group_params.items() %}
+        {{ param_name }}: {{ values }}
+        {% endfor %}
+    {% endfor %}
+  {% endif %}
+
+metadata:
+  description: "{{ description | default('Hyperparameter sweep') }}"
+  {% if wandb_project %}
+  wandb_project: "{{ wandb_project }}"
+  {% endif %}
+  {% if tags %}
+  tags: {{ tags }}
+  {% endif %}
+  created_by: "HSM (HPC Sweep Manager)"
+  created_at: "{{ timestamp }}" 

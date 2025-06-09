@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hpc-sweep-manager"
+version = "0.1.0"
+description = "Automated hyperparameter sweeps on HPC systems using Hydra configs and W&B tracking"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Gabriel Bena", email = "gabriel.bena@gmail.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+keywords = ["hpc", "hyperparameter", "sweep", "hydra", "wandb", "machine-learning"]
+requires-python = ">=3.8"
+dependencies = [
+    "click>=8.0.0",
+    "pyyaml>=6.0",
+    "jinja2>=3.0.0",
+    "rich>=12.0.0",
+    "textual>=0.20.0",
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0",
+    "wandb>=0.15.0",
+    "pandas>=1.5.0",
+    "numpy>=1.21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "isort>=5.0.0",
+    "flake8>=5.0.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+docs = [
+    "sphinx>=5.0.0",
+    "sphinx-rtd-theme>=1.2.0",
+    "myst-parser>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/hpc-sweep-manager"
+Documentation = "https://hpc-sweep-manager.readthedocs.io"
+Repository = "https://github.com/yourusername/hpc-sweep-manager"
+Changelog = "https://github.com/yourusername/hpc-sweep-manager/blob/main/CHANGELOG.md"
+
+[project.scripts]
+hsm = "hpc_sweep_manager.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hpc_sweep_manager = ["templates/*.j2"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--cov=hpc_sweep_manager",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-fail-under=80"
+] 

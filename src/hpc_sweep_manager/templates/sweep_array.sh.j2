@@ -1,0 +1,115 @@
+#!/bin/bash
+#PBS -N {{ sweep_id }}
+#PBS -J 1-{{ num_jobs }}
+#PBS -l walltime={{ walltime }}
+#PBS -l {{ resources }}
+#PBS -o {{ sweep_dir }}/logs/
+#PBS -e {{ sweep_dir }}/logs/
+
+# Create logs directory
+mkdir -p {{ sweep_dir }}/logs
+
+# Array job wrapper
+set -e
+
+echo "Array job task: $PBS_ARRAY_INDEX"
+echo "Job started at: $(date)"
+echo "Running on node: $(hostname)"
+echo "Working directory: $(pwd)"
+
+# Validate PBS_ARRAY_INDEX
+if [[ -z "$PBS_ARRAY_INDEX" ]]; then
+    echo "Error: PBS_ARRAY_INDEX not set. This script should only run as part of an array job."
+    exit 1
+fi
+
+# Extract parameters for this array index
+PARAMS_FILE="{{ sweep_dir }}/parameter_combinations.json"
+if [[ ! -f "$PARAMS_FILE" ]]; then
+    echo "Error: Parameter combinations file not found: $PARAMS_FILE"
+    exit 1
+fi
+
+# Extract parameters using Python
+PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
+import json
+import sys
+import os
+
+params_file = "{{ sweep_dir }}/parameter_combinations.json"
+array_index = int(os.environ['PBS_ARRAY_INDEX'])
+
+try:
+    with open(params_file, 'r') as f:
+        all_combinations = json.load(f)
+    
+    # Find the combination with matching index
+    matching_combo = None
+    for combo in all_combinations:
+        if combo['index'] == array_index:
+            matching_combo = combo
+            break
+    
+    if matching_combo is None:
+        print(f"Error: No parameter combination found for index {array_index}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Convert parameters to command line format
+    params = matching_combo['params']
+    param_strs = []
+    for key, value in params.items():
+        param_strs.append(f'"{key}={value}"')
+    
+    print(' '.join(param_strs))
+    
+except Exception as e:
+    print(f"Error processing parameters: {e}", file=sys.stderr)
+    sys.exit(1)
+PYTHON_EOF
+)
+
+if [[ $? -ne 0 ]]; then
+    echo "Error extracting parameters for array index $PBS_ARRAY_INDEX"
+    exit 1
+fi
+
+echo "Parameters: $PARAMS_JSON"
+
+# Change to project directory
+cd {{ project_dir }}
+
+# Create a unique output directory for this task
+TASK_OUTPUT_DIR="{{ sweep_dir }}/task_${PBS_ARRAY_INDEX}"
+mkdir -p "$TASK_OUTPUT_DIR"
+
+# Save task info
+echo "Array Index: $PBS_ARRAY_INDEX" > "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Parameters: $PARAMS_JSON" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Started: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Node: $(hostname)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+
+# Construct and run the training command
+{% if wandb_group %}
+WANDB_GROUP="{{ wandb_group }}"
+{% else %}
+WANDB_GROUP="{{ sweep_id }}"
+{% endif %}
+
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP"
+
+echo "Executing: $COMMAND"
+echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
+
+# Run the training script
+if eval "$COMMAND"; then
+    echo "Task completed successfully at: $(date)"
+    echo "Completed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
+else
+    exit_code=$?
+    echo "Task failed with exit code: $exit_code at: $(date)"
+    echo "Failed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: FAILED" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Exit Code: $exit_code" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    exit $exit_code
+fi 

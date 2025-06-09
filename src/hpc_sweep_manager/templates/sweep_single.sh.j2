@@ -1,0 +1,54 @@
+#!/bin/bash
+#PBS -N {{ job_name }}
+#PBS -l walltime={{ walltime }}
+#PBS -l {{ resources }}
+#PBS -o {{ sweep_dir }}/logs/
+#PBS -e {{ sweep_dir }}/logs/
+
+# Create logs directory
+mkdir -p {{ sweep_dir }}/logs
+
+# Job information
+echo "Job: {{ job_name }}"
+echo "Started at: $(date)"
+echo "Running on node: $(hostname)"
+echo "Working directory: $(pwd)"
+
+# Create task output directory
+TASK_OUTPUT_DIR="{{ sweep_dir }}/{{ job_name }}"
+mkdir -p "$TASK_OUTPUT_DIR"
+
+# Save task info
+echo "Job Name: {{ job_name }}" > "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Parameters: {{ parameters }}" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Started: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Node: $(hostname)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+
+# Change to project directory
+cd {{ project_dir }}
+
+# Construct and run the training command
+{% if wandb_group %}
+WANDB_GROUP="{{ wandb_group }}"
+{% else %}
+WANDB_GROUP="{{ sweep_id }}"
+{% endif %}
+
+COMMAND="{{ python_path }} {{ script_path }}{% for key, value in params.items() %} \"{{ key }}={{ value }}\"{% endfor %} wandb.group=$WANDB_GROUP"
+
+echo "Executing: $COMMAND"
+echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
+
+# Run the training script
+if eval "$COMMAND"; then
+    echo "Task completed successfully at: $(date)"
+    echo "Completed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
+else
+    exit_code=$?
+    echo "Task failed with exit code: $exit_code at: $(date)"
+    echo "Failed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: FAILED" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Exit Code: $exit_code" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    exit $exit_code
+fi 

@@ -1,0 +1,12 @@
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    seed: [1, 2, 3]
+    model.hidden_size: [128, 256]
+    optimizer.lr: [0.001, 0.01]
+
+metadata:
+  description: "Test sweep for CLI"
+  tags: ["test"] 
