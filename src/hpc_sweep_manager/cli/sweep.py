@@ -75,13 +75,42 @@ def run_sweep(
 
         console.print(f"\n[bold]Total combinations to run: {len(combinations)}[/bold]")
 
+        # Create job manager with project configuration (needed for both dry run and actual run)
+        from ..core.path_detector import PathDetector
+
+        detector = PathDetector()
+
+        # Try to get paths from project config or auto-detect
+        python_path = detector.detect_python_path()
+        script_path = detector.detect_train_script()
+        project_dir = str(Path.cwd())
+
+        job_manager = JobManager.auto_detect(
+            walltime=walltime,
+            resources=resources,
+            python_path=python_path,
+            script_path=script_path,
+            project_dir=project_dir,
+        )
+        console.print(f"Detected HPC system: {job_manager.system_type}")
+
         if dry_run:
             console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
 
-            # Show first few combinations
+            # Show first few combinations with their command lines
             console.print("\n[bold]First 3 parameter combinations:[/bold]")
             for i, combo in enumerate(combinations[:3], 1):
                 console.print(f"  {i}. {combo}")
+
+                # Generate the command line that would be executed
+                params_str = job_manager._params_to_string(combo)
+                wandb_group_str = f"wandb.group={group or 'sweep'}"
+                full_command = (
+                    f"{python_path} {script_path} {params_str} {wandb_group_str}"
+                )
+
+                console.print(f"     [dim]Command: {full_command}[/dim]")
+                console.print()  # Add spacing between combinations
 
             return
 
@@ -110,25 +139,6 @@ def run_sweep(
         import shutil
 
         shutil.copy2(config_path, config_backup)
-
-        # Create job manager with project configuration
-        from ..core.path_detector import PathDetector
-
-        detector = PathDetector()
-
-        # Try to get paths from project config or auto-detect
-        python_path = detector.detect_python_path()
-        script_path = detector.detect_train_script()
-        project_dir = str(Path.cwd())
-
-        job_manager = JobManager.auto_detect(
-            walltime=walltime,
-            resources=resources,
-            python_path=python_path,
-            script_path=script_path,
-            project_dir=project_dir,
-        )
-        console.print(f"Detected HPC system: {job_manager.system_type}")
 
         # Submit jobs
         console.print(
