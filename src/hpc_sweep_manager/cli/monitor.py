@@ -961,12 +961,28 @@ def delete_sweep_jobs(
                     should_include = False
 
             if should_include:
+                # Determine if this is an array job and extract details
+                is_array_job = "[" in job_full_id and "]" in job_full_id
+                array_index = None
+                parent_job_id = job_id
+
+                if is_array_job:
+                    # Extract parent job ID and array index
+                    if "[" in job_full_id:
+                        parent_job_id = job_full_id.split("[")[0]
+                        array_part = job_full_id.split("[")[1].split("]")[0]
+                        if array_part.strip():  # Only if there's an actual index
+                            array_index = array_part
+
                 jobs_to_delete.append(
                     {
                         "job_id": job_full_id,
                         "name": job_name,
                         "state": job_state,
-                        "base_job_id": job_id,  # For array jobs
+                        "base_job_id": job_id,
+                        "parent_job_id": parent_job_id,
+                        "array_index": array_index,
+                        "is_array_job": is_array_job,
                     }
                 )
 
@@ -974,16 +990,26 @@ def delete_sweep_jobs(
         console.print("[yellow]No jobs found matching the specified criteria.[/yellow]")
         return
 
-    # Display what will be deleted
+    # Display what will be deleted with array job info
     table = Table(title=f"Jobs to Delete from {sweep_id}")
     table.add_column("Job ID", style="cyan")
+    table.add_column("Type", style="magenta")
     table.add_column("Name", style="blue")
     table.add_column("State", style="yellow")
 
     for job in jobs_to_delete:
         state_color = _get_state_color(job["state"])
+        job_type = (
+            "Array SubJob" if job["is_array_job"] and job["array_index"] else "Regular"
+        )
+        if job["is_array_job"] and not job["array_index"]:
+            job_type = "Array Parent"
+
         table.add_row(
-            job["job_id"], job["name"], f"[{state_color}]{job['state']}[/{state_color}]"
+            job["job_id"],
+            job_type,
+            job["name"],
+            f"[{state_color}]{job['state']}[/{state_color}]",
         )
 
     console.print(table)
@@ -1008,49 +1034,137 @@ def delete_sweep_jobs(
     deleted_jobs = []
     failed_jobs = []
 
-    # Group by base job ID to handle array jobs efficiently
-    job_groups = {}
-    for job in jobs_to_delete:
-        base_id = job["base_job_id"]
-        if base_id not in job_groups:
-            job_groups[base_id] = []
-        job_groups[base_id].append(job)
+    # Group jobs by deletion strategy
+    array_parents_to_delete = set()  # Parent job IDs for entire array deletion
+    individual_subjobs_to_delete = []  # Individual subjobs to delete
+    regular_jobs_to_delete = []  # Regular non-array jobs
 
-    for base_job_id, job_group in job_groups.items():
-        try:
-            # For array jobs, we might want to delete the entire array or specific sub-jobs
-            if "[" in base_job_id and "]" in base_job_id:
-                # Array job - delete the entire array
-                clean_job_id = base_job_id.split("[")[0]
-                result = subprocess.run(
-                    ["qdel", clean_job_id], capture_output=True, text=True, timeout=10
-                )
+    for job in jobs_to_delete:
+        if job["is_array_job"]:
+            if job["array_index"]:
+                # This is a specific array subjob
+                individual_subjobs_to_delete.append(job)
             else:
-                # Regular job
-                result = subprocess.run(
-                    ["qdel", base_job_id], capture_output=True, text=True, timeout=10
-                )
+                # This is an array parent - mark for entire array deletion
+                array_parents_to_delete.add(job["parent_job_id"])
+        else:
+            # Regular job
+            regular_jobs_to_delete.append(job)
+
+    # 1. Delete entire arrays (parent jobs)
+    for parent_job_id in array_parents_to_delete:
+        try:
+            result = subprocess.run(
+                ["qdel", parent_job_id], capture_output=True, text=True, timeout=10
+            )
 
             if result.returncode == 0:
-                deleted_jobs.extend(job_group)
+                # Mark all related jobs as deleted
+                related_jobs = [
+                    j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
+                ]
+                deleted_jobs.extend(related_jobs)
+                console.print(
+                    f"[green]Deleted entire array job: {parent_job_id}[/green]"
+                )
             else:
-                for job in job_group:
-                    failed_jobs.append((job["job_id"], result.stderr))
+                # Mark all related jobs as failed
+                related_jobs = [
+                    j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
+                ]
+                for job in related_jobs:
+                    failed_jobs.append(
+                        (job["job_id"], f"Array deletion failed: {result.stderr}")
+                    )
+                console.print(
+                    f"[red]Failed to delete array job {parent_job_id}: {result.stderr}[/red]"
+                )
 
         except subprocess.TimeoutExpired:
-            for job in job_group:
+            related_jobs = [
+                j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
+            ]
+            for job in related_jobs:
                 failed_jobs.append((job["job_id"], "Timeout"))
         except Exception as e:
-            for job in job_group:
+            related_jobs = [
+                j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
+            ]
+            for job in related_jobs:
                 failed_jobs.append((job["job_id"], str(e)))
+
+    # 2. Delete individual array subjobs (only if their parent wasn't already deleted)
+    for job in individual_subjobs_to_delete:
+        if job["parent_job_id"] not in array_parents_to_delete:
+            try:
+                # Delete specific array subjob using the full job ID (e.g., "12345[3]")
+                result = subprocess.run(
+                    ["qdel", job["job_id"]], capture_output=True, text=True, timeout=10
+                )
+
+                if result.returncode == 0:
+                    deleted_jobs.append(job)
+                    console.print(
+                        f"[green]Deleted array subjob: {job['job_id']}[/green]"
+                    )
+                else:
+                    failed_jobs.append((job["job_id"], result.stderr))
+                    console.print(
+                        f"[red]Failed to delete subjob {job['job_id']}: {result.stderr}[/red]"
+                    )
+
+            except subprocess.TimeoutExpired:
+                failed_jobs.append((job["job_id"], "Timeout"))
+            except Exception as e:
+                failed_jobs.append((job["job_id"], str(e)))
+
+    # 3. Delete regular jobs
+    for job in regular_jobs_to_delete:
+        try:
+            result = subprocess.run(
+                ["qdel", job["job_id"]], capture_output=True, text=True, timeout=10
+            )
+
+            if result.returncode == 0:
+                deleted_jobs.append(job)
+            else:
+                failed_jobs.append((job["job_id"], result.stderr))
+
+        except subprocess.TimeoutExpired:
+            failed_jobs.append((job["job_id"], "Timeout"))
+        except Exception as e:
+            failed_jobs.append((job["job_id"], str(e)))
 
     # Report results
     if deleted_jobs:
         console.print(
             f"\n[green]Successfully deleted {len(deleted_jobs)} job(s):[/green]"
         )
-        for job in deleted_jobs[:5]:  # Show first 5
-            console.print(f"  - {job['job_id']} ({job['name']})")
+
+        # Group results for better reporting
+        array_deletions = len(array_parents_to_delete)
+        subjob_deletions = len(
+            [
+                j
+                for j in deleted_jobs
+                if j["is_array_job"]
+                and j["array_index"]
+                and j["parent_job_id"] not in array_parents_to_delete
+            ]
+        )
+        regular_deletions = len([j for j in deleted_jobs if not j["is_array_job"]])
+
+        if array_deletions > 0:
+            console.print(f"  - {array_deletions} entire array job(s)")
+        if subjob_deletions > 0:
+            console.print(f"  - {subjob_deletions} individual array subjob(s)")
+        if regular_deletions > 0:
+            console.print(f"  - {regular_deletions} regular job(s)")
+
+        # Show first few individual job IDs
+        for job in deleted_jobs[:5]:
+            job_type = "array" if job["is_array_job"] else "regular"
+            console.print(f"  - {job['job_id']} ({job_type}: {job['name']})")
         if len(deleted_jobs) > 5:
             console.print(f"  ... and {len(deleted_jobs) - 5} more")
 
@@ -1062,7 +1176,8 @@ def delete_sweep_jobs(
             console.print(f"  ... and {len(failed_jobs) - 3} more errors")
 
     logger.info(
-        f"Job deletion completed for sweep {sweep_id}. Deleted: {len(deleted_jobs)}, Failed: {len(failed_jobs)}"
+        f"Job deletion completed for sweep {sweep_id}. Deleted: {len(deleted_jobs)}, Failed: {len(failed_jobs)}. "
+        f"Array parents: {len(array_parents_to_delete)}, Individual subjobs: {len(individual_subjobs_to_delete)}, Regular: {len(regular_jobs_to_delete)}"
     )
 
 

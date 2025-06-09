@@ -221,6 +221,10 @@ class PBSJobManager(JobManager):
         logs_dir.mkdir(parents=True, exist_ok=True)
         pbs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create tasks directory for organized task outputs
+        tasks_dir = sweep_dir / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+
         # Save parameter combinations to JSON file
         params_file = sweep_dir / "parameter_combinations.json"
         indexed_combinations = [
@@ -240,6 +244,7 @@ class PBSJobManager(JobManager):
             resources=self.resources,
             sweep_dir=str(sweep_dir),
             logs_dir=str(logs_dir),
+            tasks_dir=str(tasks_dir),
             python_path=self.python_path,
             script_path=self.script_path,
             project_dir=self.project_dir,
@@ -361,6 +366,10 @@ cd {self.project_dir}
         logs_dir.mkdir(parents=True, exist_ok=True)
         pbs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create tasks directory for organized task outputs
+        tasks_dir = sweep_dir / "tasks"
+        tasks_dir.mkdir(parents=True, exist_ok=True)
+
         # Save parameter combinations to JSON file
         params_file = sweep_dir / "parameter_combinations.json"
         indexed_combinations = [
@@ -380,6 +389,7 @@ cd {self.project_dir}
             resources=self.resources,
             sweep_dir=str(sweep_dir),
             logs_dir=str(logs_dir),
+            tasks_dir=str(tasks_dir),
             python_path=self.python_path,
             script_path=self.script_path,
             project_dir=self.project_dir,

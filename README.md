@@ -16,6 +16,7 @@ HPC Sweep Manager (`hsm`) solves the common problem of managing large-scale hype
 
 ## 📁 Project Structure
 
+### Package Structure
 ```
 hpc-sweep-manager/
 ├── pyproject.toml                 # Modern Python packaging
@@ -41,7 +42,8 @@ hpc-sweep-manager/
 │   └── templates/                # Jinja2 templates for scripts
 │       ├── sweep.yaml.j2         # Sweep config template
 │       ├── sweep_single.sh.j2    # Individual job template
-│       └── sweep_array.sh.j2     # Array job template
+│       ├── sweep_array.sh.j2     # Array job template (PBS)
+│       └── slurm_array.sh.j2     # Array job template (Slurm)
 ├── tests/                        # Comprehensive test suite
 │   ├── test_core.py              # Core functionality tests
 │   ├── test_full_functionality.py # Integration tests
@@ -50,6 +52,62 @@ hpc-sweep-manager/
 │   └── test_sweep.yaml           # Test configuration
 └── examples/                     # Example configurations
 ```
+
+### Sweep Directory Structure
+
+When you run sweeps, HSM creates an organized directory structure to keep everything clean:
+
+#### Individual Job Mode
+```
+your-project/
+├── sweeps/
+│   ├── sweep.yaml                # Your sweep configuration
+│   ├── hsm_config.yaml          # HSM project configuration
+│   └── outputs/
+│       └── sweep_20240315_143022/
+│           ├── pbs_files/        # Job scripts (pbs_files/ or slurm_files/)
+│           │   ├── sweep_20240315_143022_job_001.pbs
+│           │   ├── sweep_20240315_143022_job_002.pbs
+│           │   └── ...
+│           ├── logs/             # Job output/error logs
+│           │   ├── job_001.out
+│           │   ├── job_001.err
+│           │   └── ...
+│           ├── parameter_combinations.json
+│           └── submission_summary.txt
+```
+
+#### Array Job Mode (Recommended for Large Sweeps)
+```
+your-project/
+├── sweeps/
+│   ├── sweep.yaml                # Your sweep configuration
+│   ├── hsm_config.yaml          # HSM project configuration
+│   └── outputs/
+│       └── sweep_20240315_143022/
+│           ├── tasks/            # ✨ Organized task outputs
+│           │   ├── task_1/       # Each array subjob gets its own folder
+│           │   │   ├── task_info.txt      # Task metadata and status
+│           │   │   ├── command.txt        # Executed command
+│           │   │   └── [your_outputs]/    # Model checkpoints, logs, etc.
+│           │   ├── task_2/
+│           │   ├── task_3/
+│           │   └── task_N/
+│           ├── pbs_files/        # Job scripts (pbs_files/ or slurm_files/)
+│           │   └── sweep_20240315_143022_array.pbs
+│           ├── logs/             # HPC system logs
+│           │   ├── array_job.out
+│           │   └── array_job.err
+│           ├── parameter_combinations.json
+│           └── submission_summary.txt
+```
+
+**Key Benefits of This Structure:**
+- **Clean Organization**: Task outputs are contained in individual `task_X/` folders
+- **No Directory Pollution**: Main sweep directory stays organized
+- **Easy Debugging**: Each task's info, command, and outputs are co-located
+- **Scalable**: Works efficiently for any number of array subjobs (1 to 10,000+)
+- **HPC System Agnostic**: Same structure for PBS, Slurm, or other systems
 
 ## 🚀 Installation & Setup
 
@@ -127,19 +185,19 @@ hsm delete-jobs SWEEP_ID --pattern "*_001"  # Delete jobs matching pattern
 hsm cleanup --days 7           # Clean up old completed jobs
 
 # Results & analysis
-hsm results SWEEP_ID            # Collect and summarize results
+hsm results SWEEP_ID            # Collect and summarize results from tasks/ folder
 ```
 
 ### Advanced Monitoring Features
 
-The package includes comprehensive monitoring capabilities:
+The package includes comprehensive monitoring capabilities with full array job support:
 
 ```bash
 # Real-time sweep monitoring with detailed job status
 hsm monitor sweep_20240101_143022 --watch --refresh 10
 
 # Show all sweeps with array job subjob breakdown
-hsm monitor --detailed
+hsm monitor --detailed                              # Shows individual task status
 
 # Queue status with automatic refresh
 hsm queue --watch --refresh 30
@@ -147,10 +205,17 @@ hsm queue --watch --refresh 30
 # Recent sweeps with filtering
 hsm recent --days 14 --watch
 
-# Targeted job cleanup
-hsm delete-jobs sweep_20240101_143022 --state F --force  # Delete failed jobs
-hsm cleanup --days 30 --states C,F --dry-run            # Preview old job cleanup
+# Targeted job cleanup with array job support
+hsm delete-jobs sweep_20240101_143022 --state F --force    # Delete failed subjobs
+hsm delete-jobs sweep_20240101_143022 --pattern "task_*"   # Delete specific tasks
+hsm cleanup --days 30 --states C,F --dry-run              # Preview old job cleanup
 ```
+
+**Array Job Monitoring Features:**
+- **Individual Task Tracking**: Monitor each `task_X/` folder independently
+- **Smart Deletion**: Delete entire arrays or specific subjobs
+- **Task Status Files**: Each task folder contains execution info and status
+- **Organized Output Collection**: Results grouped by task for easy analysis
 
 ### Sweep Command Options
 
@@ -250,18 +315,21 @@ hsm sweep --dry-run --count
 # 4. Submit as array job
 hsm sweep --array --max-runs 50
 # Output: Submitted array job 12345.pbs with 50 tasks
+# Creates organized tasks/ folder with task_1/, task_2/, etc.
 
 # 5. Monitor progress with real-time updates
 hsm monitor 12345.pbs --watch
-# Shows job status, completion rate, failed jobs, etc.
+# Shows job status, completion rate, failed jobs, and task organization
 
-# 6. Check queue status
+# 6. Check queue status and individual task progress
 hsm queue --watch
 # Real-time view of all your jobs in the queue
+# Each task folder contains task_info.txt with status updates
 
 # 7. Clean up completed jobs
 hsm cleanup --days 7 --states C
 # Remove completed jobs older than 7 days
+# Preserves tasks/ folder structure for result analysis
 ```
 
 ### Advanced Monitoring Workflow

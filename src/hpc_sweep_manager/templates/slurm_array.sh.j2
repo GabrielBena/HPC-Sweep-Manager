@@ -9,6 +9,9 @@
 # Create logs directory
 mkdir -p {{ sweep_dir }}/logs
 
+# Create tasks directory for organized task outputs
+mkdir -p {{ tasks_dir }}
+
 # Array job wrapper
 set -e
 
@@ -79,7 +82,7 @@ echo "Parameters: $PARAMS_JSON"
 cd {{ project_dir }}
 
 # Create a unique output directory for this task
-TASK_OUTPUT_DIR="{{ sweep_dir }}/task_${SLURM_ARRAY_TASK_ID}"
+TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${SLURM_ARRAY_TASK_ID}"
 mkdir -p "$TASK_OUTPUT_DIR"
 
 # Save task info

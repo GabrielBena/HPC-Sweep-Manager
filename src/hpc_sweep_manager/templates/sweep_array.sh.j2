@@ -9,6 +9,9 @@
 # Create logs directory
 mkdir -p {{ sweep_dir }}/logs
 
+# Create tasks directory for organized task outputs
+mkdir -p {{ tasks_dir }}
+
 # Array job wrapper
 set -e
 
@@ -84,7 +87,7 @@ fi
 echo "Parameters: $PARAMS_JSON"
 
 # Create a unique output directory for this task
-TASK_OUTPUT_DIR="{{ sweep_dir }}/task_${PBS_ARRAY_INDEX}"
+TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${PBS_ARRAY_INDEX}"
 mkdir -p "$TASK_OUTPUT_DIR"
 
 # Save task info
