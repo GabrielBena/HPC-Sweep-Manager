@@ -140,12 +140,20 @@ def sweep_cmd(
     default=30,
     help="Refresh interval in seconds for watch mode",
 )
+@click.option(
+    "--detailed",
+    "-d",
+    is_flag=True,
+    help="Show detailed array job subjob status breakdown",
+)
 @click.pass_context
-def monitor_cmd(ctx, sweep_id: str, watch: bool, refresh: int):
+def monitor_cmd(ctx, sweep_id: str, watch: bool, refresh: int, detailed: bool):
     """Monitor sweep progress."""
     from .monitor import monitor_sweep
 
-    monitor_sweep(sweep_id, watch, refresh, ctx.obj["console"], ctx.obj["logger"])
+    monitor_sweep(
+        sweep_id, watch, refresh, detailed, ctx.obj["console"], ctx.obj["logger"]
+    )
 
 
 @cli.command()

@@ -129,12 +129,18 @@ class SweepMonitor:
             # Query job status using qstat
             for job_id in job_ids:
                 try:
-                    # For array jobs, query the main job ID
-                    base_job_id = job_id.split("[")[0] if "[" in job_id else job_id
+                    # For array jobs, we need to handle PBS format like 512429[].pbs-7
+                    # Extract the base job ID properly
+                    if "[" in job_id and "]" in job_id:
+                        # For PBS array jobs like 512429[].pbs-7, we use the full job ID
+                        base_job_id = job_id
+                    else:
+                        base_job_id = job_id
 
-                    # Check if it's an array job
+                    # Check if it's an array job (includes both [1-N] and [] formats)
                     if "[" in job_id and "]" in job_id:
                         # Array job - use qstat -t to get sub-job details
+                        # For PBS, we can use the full job ID including the suffix
                         result = subprocess.run(
                             ["qstat", "-t", base_job_id],
                             capture_output=True,
@@ -170,13 +176,13 @@ class SweepMonitor:
                                     state = detail.get("state", "unknown").lower()
                                     self._categorize_job_state(state, status_info)
                             else:
-                                # Job not found - likely completed or failed
-                                status_info["unknown"] += 1
+                                # Job not found - finished (completed or failed)
+                                status_info["completed"] += 1
                                 status_info["details"][job_id] = [
                                     {
                                         "state": "not_found",
                                         "job_id": job_id,
-                                        "note": "Job not in queue (completed or failed)",
+                                        "note": "Job finished (not in PBS queue)",
                                     }
                                 ]
                     else:
@@ -199,13 +205,13 @@ class SweepMonitor:
                                 state = detail.get("state", "unknown").lower()
                                 self._categorize_job_state(state, status_info)
                         else:
-                            # Job not found in queue - likely completed or failed
-                            status_info["unknown"] += 1
+                            # Job not found in queue - finished (completed or failed)
+                            status_info["completed"] += 1
                             status_info["details"][job_id] = [
                                 {
                                     "state": "not_found",
                                     "job_id": job_id,
-                                    "note": "Job not in queue (completed or failed)",
+                                    "note": "Job finished (not in PBS queue)",
                                 }
                             ]
 
@@ -233,6 +239,8 @@ class SweepMonitor:
             status_info["failed"] += 1
         elif state in ["b"]:  # Array job begun (some sub-jobs running)
             status_info["running"] += 1
+        elif state in ["not_found"]:  # Job not in PBS system anymore (finished)
+            status_info["completed"] += 1
         else:
             status_info["unknown"] += 1
 
@@ -274,7 +282,13 @@ class SweepMonitor:
                     array_index = job_info["job_id"].split("[")[1].split("]")[0]
                     job_info["array_index"] = array_index
 
-                jobs.append(job_info)
+                    # Only include sub-jobs with actual array indices, not the main array job
+                    # Main array job has empty brackets [] while sub-jobs have [1], [2], etc.
+                    if array_index.strip():  # Only include if array_index is not empty
+                        jobs.append(job_info)
+                else:
+                    # Regular job (not array), include it
+                    jobs.append(job_info)
 
         return jobs
 
@@ -317,7 +331,7 @@ class SweepMonitor:
 
         return jobs
 
-    def create_status_table(self, sweeps: List[Dict]) -> Table:
+    def create_status_table(self, sweeps: List[Dict], detailed: bool = False) -> Table:
         """Create a rich table showing sweep status."""
         table = Table(title="Recent Sweeps Status")
         table.add_column("Sweep ID", style="cyan", no_wrap=True)
@@ -326,6 +340,9 @@ class SweepMonitor:
         table.add_column("Jobs", style="green")
         table.add_column("Status", style="yellow")
         table.add_column("Progress", style="bright_blue")
+
+        if detailed:
+            table.add_column("Array Jobs Detail", style="dim")
 
         for sweep in sweeps:
             # Calculate age
@@ -373,14 +390,47 @@ class SweepMonitor:
             else:
                 progress_str = "N/A"
 
-            table.add_row(
-                sweep["sweep_id"],
-                age_str,
-                sweep["mode"] or "Unknown",
-                str(total_jobs),
-                status_str,
-                progress_str,
-            )
+            # Array job detail for detailed view
+            array_detail = ""
+            if detailed:
+                for job_id, job_details in status_info["details"].items():
+                    if "[" in job_id and "]" in job_id and job_details:  # Array job
+                        # Group subjobs by state
+                        state_counts = {}
+                        for detail in job_details:
+                            state = detail.get("state", "unknown").upper()
+                            state_counts[state] = state_counts.get(state, 0) + 1
+
+                        # Format state summary
+                        state_parts = []
+                        for state, count in sorted(state_counts.items()):
+                            color = _get_state_color(state)
+                            state_parts.append(f"[{color}]{count} {state}[/{color}]")
+
+                        if state_parts:
+                            array_detail = ", ".join(state_parts)
+                        break  # Only show first array job detail to keep table readable
+
+            # Add row with or without array detail
+            if detailed:
+                table.add_row(
+                    sweep["sweep_id"],
+                    age_str,
+                    sweep["mode"] or "Unknown",
+                    str(total_jobs),
+                    status_str,
+                    progress_str,
+                    array_detail,
+                )
+            else:
+                table.add_row(
+                    sweep["sweep_id"],
+                    age_str,
+                    sweep["mode"] or "Unknown",
+                    str(total_jobs),
+                    status_str,
+                    progress_str,
+                )
 
         return table
 
@@ -389,6 +439,7 @@ def monitor_sweep(
     sweep_id: Optional[str],
     watch: bool,
     refresh: int,
+    detailed: bool,
     console: Console,
     logger: logging.Logger,
 ):
@@ -436,12 +487,12 @@ def monitor_sweep(
         try:
             while True:
                 console.clear()
-                _display_all_sweeps_status(monitor, console)
+                _display_all_sweeps_status(monitor, console, detailed)
                 time.sleep(refresh)
         except KeyboardInterrupt:
             console.print("\n[yellow]Monitoring stopped.[/yellow]")
     else:
-        _display_all_sweeps_status(monitor, console)
+        _display_all_sweeps_status(monitor, console, detailed)
 
 
 def _display_single_sweep_status(
@@ -529,6 +580,10 @@ def _display_single_sweep_status(
                         state_display = f"[red]{state}[/red] (Failed/Aborted)"
                     elif state.lower() == "b":
                         state_display = f"[magenta]{state}[/magenta] (Array Begun)"
+                    elif state.lower() == "not_found":
+                        state_display = (
+                            f"[blue]{state}[/blue] (Finished - not in PBS queue)"
+                        )
                     else:
                         state_display = state
 
@@ -554,7 +609,9 @@ def _display_single_sweep_status(
         console.print(f"[green]{progress_bar}[/green] {progress_pct:.1f}%")
 
 
-def _display_all_sweeps_status(monitor: SweepMonitor, console: Console):
+def _display_all_sweeps_status(
+    monitor: SweepMonitor, console: Console, detailed: bool = False
+):
     """Display status for all recent sweeps."""
     console.print("\n[bold blue]Recent Sweeps Monitor[/bold blue]")
 
@@ -564,18 +621,26 @@ def _display_all_sweeps_status(monitor: SweepMonitor, console: Console):
         console.print("[yellow]No recent sweeps found in the last 7 days.[/yellow]")
         return
 
-    table = monitor.create_status_table(sweeps)
+    table = monitor.create_status_table(sweeps, detailed=detailed)
     console.print(table)
 
-    console.print(
-        f"\n[dim]Found {len(sweeps)} recent sweeps. Last updated: {datetime.now().strftime('%H:%M:%S')}[/dim]"
-    )
+    if detailed:
+        console.print(
+            f"\n[dim]Found {len(sweeps)} recent sweeps with array job details. Last updated: {datetime.now().strftime('%H:%M:%S')}[/dim]"
+        )
+    else:
+        console.print(
+            f"\n[dim]Found {len(sweeps)} recent sweeps. Last updated: {datetime.now().strftime('%H:%M:%S')}[/dim]"
+        )
+        console.print(
+            "[dim]Use --detailed flag to see array job subjob breakdown[/dim]"
+        )
 
 
 def show_status(console: Console, logger: logging.Logger):
     """Show status of all active sweeps."""
     monitor = SweepMonitor(console, logger)
-    _display_all_sweeps_status(monitor, console)
+    _display_all_sweeps_status(monitor, console, detailed=False)
 
 
 def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.Logger):
@@ -685,7 +750,7 @@ def show_recent_sweeps(
                         f"[yellow]No sweeps found in the last {days} days.[/yellow]"
                     )
                 else:
-                    table = monitor.create_status_table(sweeps)
+                    table = monitor.create_status_table(sweeps, detailed=False)
                     console.print(table)
 
                 console.print(
@@ -702,7 +767,7 @@ def show_recent_sweeps(
         if not sweeps:
             console.print(f"[yellow]No sweeps found in the last {days} days.[/yellow]")
         else:
-            table = monitor.create_status_table(sweeps)
+            table = monitor.create_status_table(sweeps, detailed=False)
             console.print(table)
             console.print(f"\n[dim]Found {len(sweeps)} sweeps.[/dim]")
 
@@ -1170,5 +1235,7 @@ def _get_state_color(state: str) -> str:
         return "red"
     elif state_lower == "h":
         return "magenta"
+    elif state_lower == "not_found":
+        return "blue"  # Same as completed since they're finished
     else:
         return "white"

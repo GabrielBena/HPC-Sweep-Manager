@@ -10,7 +10,8 @@ HPC Sweep Manager (`hsm`) solves the common problem of managing large-scale hype
 - **Interactive configuration building** from existing Hydra configs
 - **Unified job submission** for both individual and array jobs
 - **Automatic path detection** and environment setup
-- **Built-in monitoring** and result tracking
+- **Comprehensive monitoring** and job management
+- **Built-in cleanup** and maintenance tools
 - **Multi-HPC system support** (PBS/Torque, Slurm, etc.)
 
 ## 📁 Project Structure
@@ -20,15 +21,16 @@ hpc-sweep-manager/
 ├── pyproject.toml                 # Modern Python packaging
 ├── README.md
 ├── LICENSE
+├── requirements.txt
 ├── src/hpc_sweep_manager/
 │   ├── __init__.py
 │   ├── cli/                       # Command-line interface
 │   │   ├── __init__.py
-│   │   ├── main.py               # Entry point with subcommands
+│   │   ├── main.py               # Entry point with all subcommands
 │   │   ├── init.py               # Project initialization
 │   │   ├── configure.py          # Interactive config builder
 │   │   ├── sweep.py              # Sweep execution
-│   │   └── monitor.py            # Job monitoring
+│   │   └── monitor.py            # Comprehensive job monitoring
 │   ├── core/                     # Shared business logic
 │   │   ├── __init__.py
 │   │   ├── config_parser.py      # YAML parsing, validation
@@ -40,15 +42,13 @@ hpc-sweep-manager/
 │       ├── sweep.yaml.j2         # Sweep config template
 │       ├── sweep_single.sh.j2    # Individual job template
 │       └── sweep_array.sh.j2     # Array job template
-├── tests/
-│   ├── test_config_parser.py
-│   ├── test_param_generator.py
-│   ├── test_job_manager.py
-│   └── fixtures/
-└── examples/
-    ├── basic_sweep/
-    ├── neural_network/
-    └── multi_objective/
+├── tests/                        # Comprehensive test suite
+│   ├── test_core.py              # Core functionality tests
+│   ├── test_full_functionality.py # Integration tests
+│   ├── test_count.py             # Parameter counting tests
+│   ├── test_sweep_direct.py      # Direct sweep tests
+│   └── test_sweep.yaml           # Test configuration
+└── examples/                     # Example configurations
 ```
 
 ## 🚀 Installation & Setup
@@ -110,11 +110,46 @@ hsm sweep --individual          # Submit individual jobs
 hsm sweep --count               # Count total combinations
 hsm sweep --max-runs N          # Limit number of runs
 
-# Monitoring & management
-hsm monitor [SWEEP_ID]           # Monitor active sweeps
-hsm status                       # Show all active sweeps
+# Monitoring & status
+hsm monitor [SWEEP_ID]           # Monitor specific sweep with real-time updates
+hsm monitor --watch             # Continuous monitoring mode
+hsm monitor --detailed          # Show array job subjob breakdown
+hsm status                      # Show all active sweeps
+hsm recent --days 7             # Show recent sweeps from last N days
+hsm queue                       # Show current PBS/Slurm queue status
+hsm queue --watch               # Real-time queue monitoring
+
+# Job management
 hsm cancel SWEEP_ID             # Cancel running sweep
+hsm delete-jobs SWEEP_ID        # Delete specific jobs with filters
+hsm delete-jobs SWEEP_ID --state Q  # Delete only queued jobs
+hsm delete-jobs SWEEP_ID --pattern "*_001"  # Delete jobs matching pattern
+hsm cleanup --days 7           # Clean up old completed jobs
+
+# Results & analysis
 hsm results SWEEP_ID            # Collect and summarize results
+```
+
+### Advanced Monitoring Features
+
+The package includes comprehensive monitoring capabilities:
+
+```bash
+# Real-time sweep monitoring with detailed job status
+hsm monitor sweep_20240101_143022 --watch --refresh 10
+
+# Show all sweeps with array job subjob breakdown
+hsm monitor --detailed
+
+# Queue status with automatic refresh
+hsm queue --watch --refresh 30
+
+# Recent sweeps with filtering
+hsm recent --days 14 --watch
+
+# Targeted job cleanup
+hsm delete-jobs sweep_20240101_143022 --state F --force  # Delete failed jobs
+hsm cleanup --days 30 --states C,F --dry-run            # Preview old job cleanup
 ```
 
 ### Sweep Command Options
@@ -216,168 +251,153 @@ hsm sweep --dry-run --count
 hsm sweep --array --max-runs 50
 # Output: Submitted array job 12345.pbs with 50 tasks
 
-# 5. Monitor progress
-hsm monitor 12345.pbs
+# 5. Monitor progress with real-time updates
+hsm monitor 12345.pbs --watch
 # Shows job status, completion rate, failed jobs, etc.
 
-# 6. Collect results
-hsm results 12345.pbs
-# Aggregates results, generates summary plots
+# 6. Check queue status
+hsm queue --watch
+# Real-time view of all your jobs in the queue
+
+# 7. Clean up completed jobs
+hsm cleanup --days 7 --states C
+# Remove completed jobs older than 7 days
 ```
 
-### Advanced Usage
+### Advanced Monitoring Workflow
 
 ```bash
-# Custom sweep config
-hsm sweep --config experiments/ablation_study.yaml --array
+# Monitor all recent sweeps
+hsm recent --days 14 --watch
 
-# Limited resource sweep
-hsm sweep --individual --max-runs 10 --walltime 02:00:00
+# Detailed monitoring of specific sweep
+hsm monitor sweep_20240315_143022 --watch --refresh 15
 
-# High priority jobs
-hsm sweep --array --priority 100 --resources "select=1:ncpus=8:mem=32gb"
+# Cancel problematic jobs from a sweep
+hsm delete-jobs sweep_20240315_143022 --state H --force  # Delete held jobs
 
-# Interactive configuration from specific Hydra config
-hsm configure --from-file configs/experiment/neural_network.yaml
+# Clean up old sweeps comprehensively
+hsm cleanup --days 30 --dry-run  # Preview what would be cleaned
+hsm cleanup --days 30 --force    # Actually clean up
+```
+
+### Array Job Management
+
+```bash
+# Submit large parameter sweep as array job
+hsm sweep --array --max-runs 1000 --walltime 12:00:00
+
+# Monitor array job progress with sub-job details
+hsm monitor sweep_20240315_143022 --watch
+
+# Manage problematic array sub-jobs
+hsm delete-jobs sweep_20240315_143022 --state F  # Remove failed sub-jobs
+hsm queue --watch  # Monitor remaining jobs
 ```
 
 ## 🔧 Interactive Configuration Builder
 
-The `hsm configure` command provides an interactive TUI for building sweep configurations:
+The `hsm configure` command provides an interactive CLI for building sweep configurations by scanning your Hydra configs:
 
 ```
-┌─── HPC Sweep Manager - Configuration Builder ───┐
-│                                                   │
-│ Detected Hydra configs:                          │
-│ ✓ configs/model/cnn.yaml                         │
-│ ✓ configs/optimizer/adam.yaml                    │
-│ ✓ configs/data/cifar10.yaml                      │
-│                                                   │
-│ Available parameters:                             │
-│ [x] model.hidden_size: [128, 256, 512]          │
-│ [x] optimizer.lr: [0.001, 0.01]                 │
-│ [ ] data.batch_size: [32, 64, 128]              │
-│ [ ] training.epochs: [10, 20, 50]               │
-│                                                   │
-│ Parameter grouping:                               │
-│ ○ Grid (all combinations)                        │
-│ ○ Paired (vary together)                         │
-│                                                   │
-│ [Generate Config] [Preview] [Cancel]              │
-└───────────────────────────────────────────────────┘
+HPC Sweep Manager - Interactive Configuration Builder
+
+Project: PVR
+Config directory: /rds/general/user/gb21/home/PhD/INI/PVR/configs
+
+Scanning for parameters...
+Found 30 config files
+Found 138 potential parameters:
+
+┌─────────────────────────┬───────┬────────────┬─────────────────────────────────┐
+│ Parameter               │ Type  │ Default    │ Source                          │
+├─────────────────────────┼───────┼────────────┼─────────────────────────────────┤
+│ seed                    │ str   │ ${seed}    │ data/encoded/base_encoder.yaml  │
+│ device                  │ str   │ cpu        │ config.yaml                     │
+│ wandb_enabled           │ bool  │ True       │ jupyter_config.yaml             │
+│ mode                    │ str   │ online     │ wandb/default.yaml              │
+│ factor                  │ float │ 0.1        │ scheduler/reduce_lr_on_plateau  │
+│ patience                │ int   │ 10         │ scheduler/reduce_lr_on_plateau  │
+│ verbose                 │ bool  │ False      │ scheduler/step_lr.yaml          │
+│ threshold               │ float │ 0.0001     │ scheduler/reduce_lr_on_plateau  │
+│ threshold_mode          │ str   │ rel        │ scheduler/reduce_lr_on_plateau  │
+│ cooldown                │ int   │ 0          │ scheduler/reduce_lr_on_plateau  │
+│ min_lr                  │ int   │ 0          │ scheduler/reduce_lr_on_plateau  │
+│ eps                     │ str   │ 1e-8       │ optimizer/rmsprop.yaml          │
+│ T_max                   │ str   │ ${training │ scheduler/cosine_annealing_lr   │
+│ eta_min                 │ str   │ 1e-5       │ scheduler/cosine_annealing_lr   │
+│ step_size               │ int   │ 10         │ scheduler/step_lr.yaml          │
+│ gamma                   │ float │ 0.1        │ scheduler/step_lr.yaml          │
+│ l1                      │ str   │ 1e-4       │ deepr/adam.yaml                 │
+│ connectivity_lr_scale   │ float │ 1.0        │ deepr/adam.yaml                 │
+│ ...                     │ ...   │ ...        │ and 118 more                    │
+└─────────────────────────┴───────┴────────────┴─────────────────────────────────┘
+
+Select parameters for sweep:
+
+Parameter selection menu:
+1. Add grid parameter (all combinations)
+2. Add paired parameters (vary together)
+3. Review current selection
+4. Finish configuration
+Choose option [1/2/3/4] (1): 
 ```
 
-## 🏗️ Core Architecture
-
-### Parameter Generation Engine
-
-```python
-from hpc_sweep_manager.core import ParameterGenerator, SweepConfig
-
-# Load sweep config
-config = SweepConfig.from_yaml("sweeps/sweep.yaml")
-
-# Generate parameter combinations
-generator = ParameterGenerator(config)
-combinations = generator.generate_combinations(max_runs=100)
-
-# Each combination is a flat dict like:
-# {"model.hidden_size": 256, "optimizer.lr": 0.01, "seed": 42}
-```
-
-### Job Management Abstraction
-
-```python
-from hpc_sweep_manager.core import JobManager
-
-# Auto-detect HPC system
-job_manager = JobManager.auto_detect()
-
-# Submit jobs
-if args.array:
-    job_id = job_manager.submit_array_job(combinations, "my_sweep")
-else:
-    job_ids = job_manager.submit_individual_jobs(combinations)
-```
-
-### Path Detection
-
-```python
-from hpc_sweep_manager.core import PathDetector
-
-detector = PathDetector(project_root="/path/to/project")
-
-# Auto-detect project structure
-python_path = detector.detect_python_path()
-train_script = detector.detect_train_script()  
-config_dir = detector.detect_config_dir()
-```
+**Features:**
+- **Auto-detection**: Scans your Hydra config directory and finds all parameters
+- **Smart suggestions**: Provides intelligent default values for common parameters (lr, batch_size, etc.)
+- **Grid vs Paired**: Choose between grid search (all combinations) or paired parameters (vary together)
+- **Type inference**: Automatically detects parameter types (int, float, bool, str)
+- **Interactive selection**: Menu-driven interface for easy parameter selection
+- **Real-time validation**: Shows total combinations and validates paired parameter lengths
 
 ## 🎯 Key Features
 
-### ✅ **Unified Parameter Generation**
-- Single codebase for grid and paired parameter combinations
-- Support for nested Hydra configurations
-- Validation and conflict detection
+### ✅ **Smart Configuration**
+- **Auto-discovery**: Scans Hydra configs and detects 100+ parameters automatically
+- **Interactive builder**: Menu-driven parameter selection with intelligent suggestions
+- **Grid & paired sweeps**: Support for both exhaustive and coordinated parameter variations
 
-### ✅ **Multi-HPC System Support**
-- Abstract job manager interface
-- PBS/Torque and Slurm implementations
-- Easy to extend for other systems
+### ✅ **Flexible Job Submission**
+- **Multi-HPC support**: PBS/Torque and Slurm systems with auto-detection
+- **Array & individual jobs**: Choose submission mode based on your needs
+- **Resource management**: Configurable walltime, CPU, memory, and priority settings
 
-### ✅ **Smart Path Detection**
-- Auto-detect Python environments (conda, venv, system)
-- Find training scripts and Hydra configs
-- Detect HPC-specific paths and storage
+### ✅ **Comprehensive Monitoring**
+- **Real-time tracking**: Live updates on job status, progress, and failures
+- **Array job insight**: Detailed breakdown of subjob states (R, Q, C, F) for array jobs
+- **Smart job completion**: Automatically treats jobs not in PBS queue as finished
+- **Queue monitoring**: Watch your jobs in the HPC queue with auto-refresh
+- **Smart cleanup**: Filter and delete jobs by state, age, or pattern matching
 
-### ✅ **Interactive Configuration**
-- TUI for building sweep configs from Hydra files
-- Parameter selection and grouping
-- Real-time combination counting
+### ✅ **Production Ready**
+- **Error handling**: Graceful failures with detailed logging and recovery suggestions
+- **Template system**: Customizable job scripts for different HPC environments
 
-### ✅ **Quality of Life Features**
-- Dry run mode for testing
-- Job monitoring and status tracking
-- Automatic result collection
-- Email/Slack notifications (optional)
+## 📦 Dependencies
 
-### ✅ **Template System**
-- Jinja2 templates for job scripts
-- Customizable for different HPC environments
-- Version control friendly
+### Core Dependencies
+- **click**: Command-line interface framework
+- **rich**: Rich text and beautiful formatting
+- **textual**: Terminal user interface framework
+- **pyyaml**: YAML configuration parsing
+- **jinja2**: Template engine for job scripts
+- **hydra-core**: Hydra configuration system integration
+- **wandb**: Weights & Biases integration
+- **pandas**: Data manipulation and analysis
+- **numpy**: Numerical computing
 
-## 🔮 Future Extensions
-
-### Planned Features
-- **Slurm support** - Add Slurm job manager implementation
-- **Advanced monitoring** - Real-time job progress dashboards  
-- **Result analysis** - Automated hyperparameter importance analysis
-- **Jupyter integration** - Notebook widgets for sweep management
-- **Multi-objective optimization** - Integration with Optuna/Ray Tune
-- **Fault tolerance** - Automatic job restart on failure
-- **Resource optimization** - Dynamic resource allocation based on job requirements
-
-### Plugin System
-```python
-# Custom job managers
-from hpc_sweep_manager.plugins import BaseJobManager
-
-class SGEJobManager(BaseJobManager):
-    def submit_job(self, ...):
-        # SGE-specific implementation
-        pass
-
-# Custom result collectors  
-from hpc_sweep_manager.plugins import BaseResultCollector
-
-class TensorboardCollector(BaseResultCollector):
-    def collect_results(self, sweep_id):
-        # Parse tensorboard logs
-        pass
-```
+### Development Dependencies
+- **pytest**: Testing framework with coverage
+- **black**: Code formatting
+- **isort**: Import sorting
+- **flake8**: Linting
+- **mypy**: Static type checking
+- **pre-commit**: Git hooks for code quality
 
 ## 🙏 Acknowledgments
 
 - Built on top of [Hydra](https://hydra.cc/) for configuration management
 - Inspired by [W&B Sweeps](https://wandb.ai/site/sweeps) for experiment tracking
-- Designed for HPC environments like Imperial College's CX3 and PBS systems
+- Designed for HPC environments like Imperial College's CX3 and other PBS/Slurm systems
+- Rich terminal UI powered by [Rich](https://rich.readthedocs.io/) and [Textual](https://textual.textualize.io/)

@@ -17,6 +17,10 @@ echo "Job started at: $(date)"
 echo "Running on node: $(hostname)"
 echo "Working directory: $(pwd)"
 
+# Change to project directory early to ensure correct paths
+cd {{ project_dir }}
+echo "Changed to project directory: $(pwd)"
+
 # Validate PBS_ARRAY_INDEX
 if [[ -z "$PBS_ARRAY_INDEX" ]]; then
     echo "Error: PBS_ARRAY_INDEX not set. This script should only run as part of an array job."
@@ -27,8 +31,12 @@ fi
 PARAMS_FILE="{{ sweep_dir }}/parameter_combinations.json"
 if [[ ! -f "$PARAMS_FILE" ]]; then
     echo "Error: Parameter combinations file not found: $PARAMS_FILE"
+    echo "Current directory: $(pwd)"
+    echo "Looking for file: $(realpath $PARAMS_FILE 2>/dev/null || echo $PARAMS_FILE)"
     exit 1
 fi
+
+echo "Found parameter combinations file: $PARAMS_FILE"
 
 # Extract parameters using Python
 PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
@@ -74,9 +82,6 @@ if [[ $? -ne 0 ]]; then
 fi
 
 echo "Parameters: $PARAMS_JSON"
-
-# Change to project directory
-cd {{ project_dir }}
 
 # Create a unique output directory for this task
 TASK_OUTPUT_DIR="{{ sweep_dir }}/task_${PBS_ARRAY_INDEX}"
