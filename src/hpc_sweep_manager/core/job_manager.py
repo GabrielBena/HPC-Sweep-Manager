@@ -278,10 +278,22 @@ class PBSJobManager(JobManager):
         return "UNKNOWN"
 
     def _params_to_string(self, params: Dict[str, Any]) -> str:
-        """Convert parameters dictionary to a readable string."""
+        """Convert parameters dictionary to command line arguments for Hydra."""
         param_strs = []
         for key, value in params.items():
-            param_strs.append(f"{key}={value}")
+            if isinstance(value, (list, tuple)):
+                # Convert list/tuple to Hydra format: [item1,item2,...]
+                value_str = str(list(value))  # Ensure it's in list format
+                param_strs.append(f'"{key}={value_str}"')
+            elif value is None:
+                param_strs.append(f'"{key}=null"')
+            elif isinstance(value, bool):
+                param_strs.append(f'"{key}={str(value).lower()}"')
+            elif isinstance(value, str) and (" " in value or "," in value):
+                # Quote strings that contain spaces or commas
+                param_strs.append(f'"{key}={value}"')
+            else:
+                param_strs.append(f'"{key}={value}"')
         return " ".join(param_strs)
 
 
@@ -424,8 +436,20 @@ cd {self.project_dir}
             return "UNKNOWN"
 
     def _params_to_string(self, params: Dict[str, Any]) -> str:
-        """Convert parameters dictionary to command line arguments."""
+        """Convert parameters dictionary to command line arguments for Hydra."""
         param_strs = []
         for key, value in params.items():
-            param_strs.append(f'"{key}={value}"')
+            if isinstance(value, (list, tuple)):
+                # Convert list/tuple to Hydra format: [item1,item2,...]
+                value_str = str(list(value))  # Ensure it's in list format
+                param_strs.append(f'"{key}={value_str}"')
+            elif value is None:
+                param_strs.append(f'"{key}=null"')
+            elif isinstance(value, bool):
+                param_strs.append(f'"{key}={str(value).lower()}"')
+            elif isinstance(value, str) and (" " in value or "," in value):
+                # Quote strings that contain spaces or commas
+                param_strs.append(f'"{key}={value}"')
+            else:
+                param_strs.append(f'"{key}={value}"')
         return " ".join(param_strs)

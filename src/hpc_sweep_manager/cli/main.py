@@ -79,17 +79,23 @@ def configure_cmd(ctx, from_file: str, output: str):
 @click.option(
     "--mode",
     type=click.Choice(["individual", "array"]),
-    default="individual",
+    default="array",
     show_default=True,
     help="Job submission mode",
 )
 @click.option("--dry-run", "-d", is_flag=True, help="Preview jobs without submitting")
 @click.option("--count", is_flag=True, help="Count combinations and exit")
 @click.option("--max-runs", "-n", type=int, help="Maximum number of runs to submit")
-@click.option("--walltime", default="04:00:00", show_default=True, help="Job walltime")
+@click.option(
+    "--walltime",
+    "-w",
+    default="23:59:59",
+    show_default=True,
+    help="Job walltime (default: 72 hours)",
+)
 @click.option(
     "--resources",
-    default="select=1:ncpus=4:mem=16gb",
+    default="select=1:ncpus=4:mem=64gb",
     show_default=True,
     help="HPC resources",
 )

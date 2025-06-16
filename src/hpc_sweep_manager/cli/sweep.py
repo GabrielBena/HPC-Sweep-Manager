@@ -97,6 +97,20 @@ def run_sweep(
         if dry_run:
             console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
 
+            # Show job configuration
+            console.print("\n[bold]Job Configuration:[/bold]")
+            console.print(f"  HPC System: {job_manager.system_type.upper()}")
+            console.print(
+                f"  Mode: {mode} ({'array job' if mode == 'array' else 'individual jobs'})"
+            )
+            console.print(f"  Walltime: {walltime}")
+            console.print(f"  Resources: {resources}")
+            console.print(f"  Python Path: {python_path}")
+            console.print(f"  Script Path: {script_path}")
+            console.print(f"  Project Directory: {project_dir}")
+            if group:
+                console.print(f"  W&B Group: {group}")
+
             # Show first few combinations with their command lines
             console.print("\n[bold]First 3 parameter combinations:[/bold]")
             for i, combo in enumerate(combinations[:3], 1):

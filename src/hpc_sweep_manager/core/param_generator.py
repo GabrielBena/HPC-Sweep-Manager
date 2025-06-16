@@ -11,7 +11,9 @@ class ParameterGenerator:
         """Initialize with a SweepConfig object."""
         self.config = config
 
-    def generate_combinations(self, max_runs: Optional[int] = None) -> List[Dict[str, Any]]:
+    def generate_combinations(
+        self, max_runs: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
         """Generate all parameter combinations."""
         grid_combinations = self._generate_grid_combinations()
         paired_combinations = self._generate_paired_combinations()
@@ -75,7 +77,9 @@ class ParameterGenerator:
             # Verify all parameters have same length
             lengths = [len(values) for values in flat_group.values()]
             if not all(length == lengths[0] for length in lengths):
-                raise ValueError(f"All paired parameters must have same length. Found lengths: {lengths}")
+                raise ValueError(
+                    f"All paired parameters must have same length. Found lengths: {lengths}"
+                )
 
             # Create combinations by zipping parameter values
             param_names = list(flat_group.keys())
@@ -120,7 +124,9 @@ class ParameterGenerator:
 
         return total_count
 
-    def _flatten_dict(self, d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dict[str, Any]:
+    def _flatten_dict(
+        self, d: Dict[str, Any], parent_key: str = "", sep: str = "."
+    ) -> Dict[str, Any]:
         """Flatten nested dictionary with dot notation."""
         items = []
         for k, v in d.items():
@@ -143,7 +149,11 @@ class ParameterGenerator:
         if self.config.grid:
             flattened_grid = self._flatten_dict(self.config.grid)
             for param_name, values in flattened_grid.items():
-                grid_info[param_name] = {"type": "grid", "values": values, "count": len(values)}
+                grid_info[param_name] = {
+                    "type": "grid",
+                    "values": values,
+                    "count": len(values),
+                }
 
         # Paired parameter info
         for i, group in enumerate(self.config.paired):
@@ -174,19 +184,20 @@ class ParameterGenerator:
         return all_combinations[:max_preview]
 
     def create_command_line_args(self, params: Dict[str, Any]) -> List[str]:
-        """Convert parameter dictionary to command line arguments."""
+        """Convert parameter dictionary to command line arguments for Hydra."""
         args = []
         for key, value in params.items():
-            # Handle special cases
-            if value is None:
+            if isinstance(value, (list, tuple)):
+                # Convert list/tuple to Hydra format: [item1,item2,...]
+                value_str = str(list(value))  # Ensure it's in list format
+                args.append(f"{key}={value_str}")
+            elif value is None:
                 args.append(f"{key}=null")
             elif isinstance(value, bool):
                 args.append(f"{key}={str(value).lower()}")
-            elif isinstance(value, (list, tuple)):
-                # Convert back to list format if it was a tuple
-                if isinstance(value, tuple):
-                    value = list(value)
-                args.append(f"{key}={value}")
+            elif isinstance(value, str) and (" " in value or "," in value):
+                # Quote strings that contain spaces or commas
+                args.append(f'"{key}={value}"')
             else:
                 args.append(f"{key}={value}")
 
