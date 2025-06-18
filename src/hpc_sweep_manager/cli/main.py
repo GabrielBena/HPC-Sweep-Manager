@@ -89,15 +89,11 @@ def configure_cmd(ctx, from_file: str, output: str):
 @click.option(
     "--walltime",
     "-w",
-    default="23:59:59",
-    show_default=True,
-    help="Job walltime (default: 72 hours)",
+    help="Job walltime (auto-detected from hsm_config.yaml or defaults to 23:59:59)",
 )
 @click.option(
     "--resources",
-    default="select=1:ncpus=4:mem=64gb",
-    show_default=True,
-    help="HPC resources",
+    help="HPC resources (auto-detected from hsm_config.yaml or defaults to select=1:ncpus=4:mem=64gb)",
 )
 @click.option("--group", help="W&B group name")
 @click.option("--priority", type=int, help="Job priority")
@@ -116,6 +112,27 @@ def sweep_cmd(
 ):
     """Run parameter sweep."""
     from .sweep import run_sweep
+    from ..core.hsm_config import HSMConfig
+
+    # Load HSM config for defaults
+    hsm_config = HSMConfig.load()
+
+    # Use HSM config defaults if not provided via CLI
+    if walltime is None:
+        walltime = hsm_config.get_default_walltime() if hsm_config else "23:59:59"
+
+    if resources is None:
+        resources = (
+            hsm_config.get_default_resources()
+            if hsm_config
+            else "select=1:ncpus=4:mem=64gb"
+        )
+
+    # Auto-detect group from HSM config if not provided
+    if group is None and hsm_config:
+        wandb_config = hsm_config.get_wandb_config()
+        if wandb_config.get("project"):
+            group = f"sweep_{wandb_config['project']}"
 
     config_path = Path(config)
 
@@ -131,6 +148,7 @@ def sweep_cmd(
         priority=priority,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
+        hsm_config=hsm_config,
     )
 
 

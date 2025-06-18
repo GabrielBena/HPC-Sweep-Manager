@@ -4,8 +4,11 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from datetime import datetime
+
+if TYPE_CHECKING:
+    from ..core.hsm_config import HSMConfig
 
 from ..core.config_parser import SweepConfig
 from ..core.param_generator import ParameterGenerator
@@ -25,12 +28,34 @@ def run_sweep(
     priority: Optional[int],
     console: Console,
     logger: logging.Logger,
+    hsm_config: Optional["HSMConfig"] = None,
 ):
     """Run parameter sweep."""
 
     console.print(f"[bold blue]HPC Sweep Manager[/bold blue]")
     console.print(f"Config: {config_path}")
     console.print(f"Mode: {mode}")
+
+    # Show if HSM config is being used
+    if hsm_config:
+        hsm_config_path = None
+        search_paths = [
+            Path.cwd() / "sweeps" / "hsm_config.yaml",
+            Path.cwd() / "hsm_config.yaml",
+            Path("sweeps") / "hsm_config.yaml",
+            Path("hsm_config.yaml"),
+        ]
+        for path in search_paths:
+            if path.exists():
+                hsm_config_path = path
+                break
+
+        if hsm_config_path:
+            console.print(f"[green]Using HSM config: {hsm_config_path}[/green]")
+    else:
+        console.print(
+            "[yellow]No hsm_config.yaml found - using default values[/yellow]"
+        )
 
     try:
         # Load sweep configuration
@@ -80,10 +105,19 @@ def run_sweep(
 
         detector = PathDetector()
 
-        # Try to get paths from project config or auto-detect
-        python_path = detector.detect_python_path()
-        script_path = detector.detect_train_script()
-        project_dir = str(Path.cwd())
+        # Try to get paths from HSM config first, then auto-detect
+        if hsm_config:
+            python_path = (
+                hsm_config.get_default_python_path() or detector.detect_python_path()
+            )
+            script_path = (
+                hsm_config.get_default_script_path() or detector.detect_train_script()
+            )
+            project_dir = hsm_config.get_project_root() or str(Path.cwd())
+        else:
+            python_path = detector.detect_python_path()
+            script_path = detector.detect_train_script()
+            project_dir = str(Path.cwd())
 
         job_manager = JobManager.auto_detect(
             walltime=walltime,
@@ -103,8 +137,10 @@ def run_sweep(
             console.print(
                 f"  Mode: {mode} ({'array job' if mode == 'array' else 'individual jobs'})"
             )
-            console.print(f"  Walltime: {walltime}")
-            console.print(f"  Resources: {resources}")
+            walltime_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
+            resources_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
+            console.print(f"  Walltime: {walltime}{walltime_source}")
+            console.print(f"  Resources: {resources}{resources_source}")
             console.print(f"  Python Path: {python_path}")
             console.print(f"  Script Path: {script_path}")
             console.print(f"  Project Directory: {project_dir}")
