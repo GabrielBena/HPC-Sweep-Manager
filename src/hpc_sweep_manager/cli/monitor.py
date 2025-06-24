@@ -2,19 +2,16 @@
 
 import subprocess
 import time
-import re
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
-from rich.live import Live
 import logging
 
-from ..core.utils import format_duration, format_walltime, ProgressTracker
+from ..core.utils import format_duration
 
 
 class SweepMonitor:
@@ -660,6 +657,12 @@ def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.L
         console.print(f"[red]Error: Could not load sweep information[/red]")
         return
 
+    # Determine if this is a local sweep
+    mode = sweep_info.get("mode", "").lower()
+    is_local_sweep = mode == "local" or any(
+        job_id.startswith("local_") for job_id in sweep_info["job_ids"]
+    )
+
     if not force:
         response = console.input(
             f"Are you sure you want to cancel sweep {sweep_id}? (y/N): "
@@ -668,19 +671,201 @@ def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.L
             console.print("[yellow]Cancellation aborted.[/yellow]")
             return
 
-    # Cancel PBS jobs
+    if is_local_sweep:
+        console.print(
+            "[blue]Detected local sweep, attempting to cancel local jobs...[/blue]"
+        )
+        _cancel_local_sweep(sweep_info, sweep_dir, console, logger)
+    else:
+        console.print(
+            "[blue]Detected HPC sweep, attempting to cancel HPC jobs...[/blue]"
+        )
+        _cancel_hpc_sweep(sweep_info, console, logger)
+
+
+def _cancel_local_sweep(
+    sweep_info: dict, sweep_dir: Path, console: Console, logger: logging.Logger
+):
+    """Cancel a local sweep by looking for running processes."""
+    from ..core.job_manager import LocalJobManager
+
+    # Try to find and cancel running local processes
+    # First, check if we can find a running LocalJobManager instance
+    # Since we don't have access to the original instance, we'll try to find processes manually
+
+    # Look for process info in task directories
+    tasks_dir = sweep_dir / "tasks"
+    cancelled_count = 0
+    failed_count = 0
+    not_found_count = 0
+
+    if tasks_dir.exists():
+        console.print(f"[blue]Looking for running tasks in {tasks_dir}...[/blue]")
+
+        for task_dir in tasks_dir.iterdir():
+            if not task_dir.is_dir():
+                continue
+
+            task_info_file = task_dir / "task_info.txt"
+            if not task_info_file.exists():
+                continue
+
+            try:
+                # Read task info to get process information
+                with open(task_info_file, "r") as f:
+                    content = f.read()
+
+                # Check if task is still running
+                if "Status: RUNNING" in content or "Status: CANCELLED" not in content:
+                    # Try to find and kill the process
+                    # Look for Python processes running the train script
+                    import psutil
+                    import re
+
+                    # Extract job ID from task info
+                    job_id_match = re.search(r"Job ID: (local_\w+_\d+)", content)
+                    if job_id_match:
+                        job_id = job_id_match.group(1)
+
+                        # Try to find the process
+                        killed = False
+                        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                            try:
+                                if (
+                                    proc.info["name"]
+                                    and "python" in proc.info["name"].lower()
+                                ):
+                                    cmdline = " ".join(proc.info["cmdline"] or [])
+                                    # Look for processes that might be this job
+                                    if (
+                                        "train.py" in cmdline or "train" in cmdline
+                                    ) and job_id in cmdline:
+                                        console.print(
+                                            f"  Found and killing process {proc.pid} for job {job_id}"
+                                        )
+                                        try:
+                                            # Kill the entire process group
+                                            parent = psutil.Process(proc.pid)
+                                            children = parent.children(recursive=True)
+                                            for child in children:
+                                                child.kill()
+                                            parent.kill()
+                                            killed = True
+                                            break
+                                        except (
+                                            psutil.NoSuchProcess,
+                                            psutil.AccessDenied,
+                                        ):
+                                            pass
+                            except (
+                                psutil.NoSuchProcess,
+                                psutil.AccessDenied,
+                                psutil.ZombieProcess,
+                            ):
+                                continue
+
+                        if killed:
+                            cancelled_count += 1
+                            # Update task status
+                            with open(task_info_file, "a") as f:
+                                f.write(f"Status: CANCELLED\n")
+                                f.write(f"End Time: {datetime.now()}\n")
+                        else:
+                            # Process might have finished on its own
+                            not_found_count += 1
+                    else:
+                        not_found_count += 1
+
+            except Exception as e:
+                logger.warning(f"Error processing task {task_dir.name}: {e}")
+                failed_count += 1
+
+    # Report results
+    total_tasks = cancelled_count + failed_count + not_found_count
+    if total_tasks > 0:
+        console.print(f"[green]Local sweep cancellation summary:[/green]")
+        console.print(f"  - Cancelled: {cancelled_count}")
+        console.print(f"  - Not found/already finished: {not_found_count}")
+        if failed_count > 0:
+            console.print(f"  - Failed: {failed_count}")
+    else:
+        console.print("[yellow]No running local tasks found to cancel[/yellow]")
+
+    # Also try to kill by job name pattern (fallback)
+    console.print("[blue]Searching for remaining processes by pattern...[/blue]")
+    additional_killed = _kill_processes_by_pattern(sweep_info["sweep_id"], console)
+    if additional_killed > 0:
+        console.print(f"[green]Killed {additional_killed} additional processes[/green]")
+
+    logger.info(
+        f"Local sweep {sweep_info['sweep_id']} cancellation completed. "
+        f"Cancelled: {cancelled_count}, Not found: {not_found_count}, Failed: {failed_count}"
+    )
+
+
+def _kill_processes_by_pattern(sweep_id: str, console: Console) -> int:
+    """Kill processes that match the sweep pattern."""
+    try:
+        import psutil
+
+        killed_count = 0
+
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["name"] and "python" in proc.info["name"].lower():
+                    cmdline = " ".join(proc.info["cmdline"] or [])
+                    # Look for processes that contain the sweep ID
+                    if sweep_id in cmdline and (
+                        "train" in cmdline or "wandb.group" in cmdline
+                    ):
+                        console.print(
+                            f"  Killing process {proc.pid}: {proc.info['name']}"
+                        )
+                        try:
+                            parent = psutil.Process(proc.pid)
+                            children = parent.children(recursive=True)
+                            for child in children:
+                                child.kill()
+                            parent.kill()
+                            killed_count += 1
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
+        return killed_count
+    except ImportError:
+        console.print(
+            "[yellow]psutil not available, cannot search for additional processes[/yellow]"
+        )
+        return 0
+
+
+def _cancel_hpc_sweep(sweep_info: dict, console: Console, logger: logging.Logger):
+    """Cancel HPC jobs using PBS/Slurm commands."""
+    # Cancel PBS/Slurm jobs
     cancelled_jobs = []
     failed_jobs = []
 
     for job_id in sweep_info["job_ids"]:
         try:
+            # Try PBS first, then Slurm
             result = subprocess.run(
                 ["qdel", job_id], capture_output=True, text=True, timeout=10
             )
+
             if result.returncode == 0:
                 cancelled_jobs.append(job_id)
             else:
-                failed_jobs.append((job_id, result.stderr))
+                # Try Slurm
+                result = subprocess.run(
+                    ["scancel", job_id], capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    cancelled_jobs.append(job_id)
+                else:
+                    failed_jobs.append((job_id, result.stderr))
+
         except subprocess.TimeoutExpired:
             failed_jobs.append((job_id, "Timeout"))
         except Exception as e:
@@ -700,7 +885,8 @@ def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.L
             console.print(f"  - {job_id}: {error}")
 
     logger.info(
-        f"Sweep {sweep_id} cancellation completed. Cancelled: {len(cancelled_jobs)}, Failed: {len(failed_jobs)}"
+        f"HPC sweep {sweep_info['sweep_id']} cancellation completed. "
+        f"Cancelled: {len(cancelled_jobs)}, Failed: {len(failed_jobs)}"
     )
 
 

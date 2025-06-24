@@ -312,10 +312,15 @@ hsm configure
 hsm sweep --dry-run --count
 # Output: Would generate 60 jobs (5 seeds × 3 models × 4 learning rates)
 
-# 4. Submit as array job
+# 4. Submit as array job (HPC)
 hsm sweep --array --max-runs 50
 # Output: Submitted array job 12345.pbs with 50 tasks
 # Creates organized tasks/ folder with task_1/, task_2/, etc.
+
+# 4b. OR run locally for development/testing
+hsm sweep --mode local --parallel-jobs 4 --max-runs 10
+# Output: Running 10 jobs locally with up to 4 parallel processes
+# Same organized folder structure: tasks/task_1/, tasks/task_2/, etc.
 
 # 5. Monitor progress with real-time updates
 hsm monitor 12345.pbs --watch
@@ -362,6 +367,40 @@ hsm monitor sweep_20240315_143022 --watch
 hsm delete-jobs sweep_20240315_143022 --state F  # Remove failed sub-jobs
 hsm queue --watch  # Monitor remaining jobs
 ```
+
+### Local Mode for Development & Testing
+
+The local mode provides seamless development and testing capabilities while maintaining the same organized structure as HPC runs:
+
+```bash
+# Run sweeps locally with controlled parallelism
+hsm sweep --mode local --parallel-jobs 2 --max-runs 10
+
+# Sequential execution (safest for debugging)
+hsm sweep --mode local --parallel-jobs 1
+
+# Use all CPU cores for maximum local throughput  
+hsm sweep --mode local --parallel-jobs 8
+
+# Same monitoring works for local jobs
+hsm monitor local_sweep_20240315_143022 --watch
+
+# Same organized output structure:
+# sweeps/outputs/sweep_20240315_143022/
+# ├── tasks/task_1/    # Individual job outputs
+# ├── tasks/task_2/    # Same W&B logging, checkpoints, etc.
+# ├── local_scripts/   # Generated shell scripts
+# └── logs/            # Execution logs
+```
+
+**Local Mode Benefits:**
+- **Same folder structure** as HPC jobs for seamless workflow transition
+- **Controlled parallelism** with `--parallel-jobs` option
+- **Individual task folders** with status tracking and command history
+- **W&B integration** works identically to HPC runs  
+- **Real-time monitoring** with `hsm monitor` and `hsm queue`
+- **Easy debugging** with direct access to logs and outputs
+- **No HPC queue waiting** for rapid development iteration
 
 ## 🔧 Interactive Configuration Builder
 
@@ -427,9 +466,10 @@ Choose option [1/2/3/4] (1):
 - **Grid & paired sweeps**: Support for both exhaustive and coordinated parameter variations
 
 ### ✅ **Flexible Job Submission**
-- **Multi-HPC support**: PBS/Torque and Slurm systems with auto-detection
-- **Array & individual jobs**: Choose submission mode based on your needs
+- **Multi-system support**: PBS/Torque, Slurm, and local execution with auto-detection
+- **Multiple execution modes**: Array jobs, individual jobs, or local execution with controlled parallelism
 - **Resource management**: Configurable walltime, CPU, memory, and priority settings
+- **Seamless local development**: Same folder structure and monitoring for local vs. HPC runs
 
 ### ✅ **Comprehensive Monitoring**
 - **Real-time tracking**: Live updates on job status, progress, and failures

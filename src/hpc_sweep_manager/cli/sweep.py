@@ -26,6 +26,7 @@ def run_sweep(
     resources: str,
     group: Optional[str],
     priority: Optional[int],
+    parallel_jobs: Optional[int],
     console: Console,
     logger: logging.Logger,
     hsm_config: Optional["HSMConfig"] = None,
@@ -119,24 +120,51 @@ def run_sweep(
             script_path = detector.detect_train_script()
             project_dir = str(Path.cwd())
 
-        job_manager = JobManager.auto_detect(
-            walltime=walltime,
-            resources=resources,
-            python_path=python_path,
-            script_path=script_path,
-            project_dir=project_dir,
-        )
-        console.print(f"Detected HPC system: {job_manager.system_type}")
+            # Create appropriate job manager based on mode
+        if mode == "local":
+            from ..core.job_manager import LocalJobManager
+
+            # For local mode, determine parallel jobs from CLI, HSM config, or default
+            max_parallel_jobs = 1
+            if parallel_jobs is not None:
+                max_parallel_jobs = parallel_jobs
+            elif hsm_config:
+                max_parallel_jobs = hsm_config.get_max_array_size() or 1
+                # For local execution, limit to reasonable number
+                max_parallel_jobs = min(max_parallel_jobs, 8)
+
+            job_manager = LocalJobManager(
+                walltime=walltime,
+                resources=resources,
+                python_path=python_path,
+                script_path=script_path,
+                project_dir=project_dir,
+                max_parallel_jobs=max_parallel_jobs,
+            )
+        else:
+            job_manager = JobManager.auto_detect(
+                walltime=walltime,
+                resources=resources,
+                python_path=python_path,
+                script_path=script_path,
+                project_dir=project_dir,
+            )
+        console.print(f"Detected/Selected execution system: {job_manager.system_type}")
 
         if dry_run:
             console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
 
             # Show job configuration
             console.print("\n[bold]Job Configuration:[/bold]")
-            console.print(f"  HPC System: {job_manager.system_type.upper()}")
-            console.print(
-                f"  Mode: {mode} ({'array job' if mode == 'array' else 'individual jobs'})"
-            )
+            console.print(f"  Execution System: {job_manager.system_type.upper()}")
+            if mode == "local":
+                console.print(
+                    f"  Mode: {mode} (local execution with up to {job_manager.max_parallel_jobs} parallel jobs)"
+                )
+            else:
+                console.print(
+                    f"  Mode: {mode} ({'array job' if mode == 'array' else 'individual jobs'})"
+                )
             walltime_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
             resources_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
             console.print(f"  Walltime: {walltime}{walltime_source}")
@@ -154,7 +182,11 @@ def run_sweep(
 
                 # Generate the command line that would be executed
                 params_str = job_manager._params_to_string(combo)
-                wandb_group_str = f"wandb.group={group or 'sweep'}"
+                # Use sweep_id as fallback for wandb group (consistent with actual execution)
+                effective_group = (
+                    group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                wandb_group_str = f"wandb.group={effective_group}"
                 full_command = (
                     f"{python_path} {script_path} {params_str} {wandb_group_str}"
                 )
@@ -175,13 +207,21 @@ def run_sweep(
         console.print(f"Sweep directory: {sweep_dir}")
 
         # Create subdirectories for organization
-        pbs_dir = sweep_dir / "pbs_files"
-        pbs_dir.mkdir(exist_ok=True)
+        if mode == "local":
+            scripts_dir = sweep_dir / "local_scripts"
+            dir_name = "Local scripts"
+        elif job_manager.system_type == "slurm":
+            scripts_dir = sweep_dir / "slurm_files"
+            dir_name = "Slurm files"
+        else:
+            scripts_dir = sweep_dir / "pbs_files"
+            dir_name = "PBS files"
 
+        scripts_dir.mkdir(exist_ok=True)
         logs_dir = sweep_dir / "logs"
         logs_dir.mkdir(exist_ok=True)
 
-        console.print(f"PBS files will be stored in: {pbs_dir}")
+        console.print(f"{dir_name} will be stored in: {scripts_dir}")
         console.print(f"Job logs will be stored in: {logs_dir}")
 
         # Save sweep config for reference
@@ -202,7 +242,7 @@ def run_sweep(
                 sweep_dir=sweep_dir,
                 sweep_id=sweep_id,
                 wandb_group=group,
-                pbs_dir=pbs_dir,
+                pbs_dir=scripts_dir,
                 logs_dir=logs_dir,
             )
 

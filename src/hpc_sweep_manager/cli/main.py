@@ -3,10 +3,8 @@
 import click
 from pathlib import Path
 from rich.console import Console
-from rich.panel import Panel
 
 from ..core.utils import setup_logging
-from . import init, configure, sweep, monitor
 
 console = Console()
 
@@ -78,7 +76,7 @@ def configure_cmd(ctx, from_file: str, output: str):
 )
 @click.option(
     "--mode",
-    type=click.Choice(["individual", "array"]),
+    type=click.Choice(["individual", "array", "local"]),
     default="array",
     show_default=True,
     help="Job submission mode",
@@ -97,6 +95,12 @@ def configure_cmd(ctx, from_file: str, output: str):
 )
 @click.option("--group", help="W&B group name")
 @click.option("--priority", type=int, help="Job priority")
+@click.option(
+    "--parallel-jobs",
+    "-j",
+    type=int,
+    help="Maximum parallel jobs for local mode (default: 1)",
+)
 @click.pass_context
 def sweep_cmd(
     ctx,
@@ -109,6 +113,7 @@ def sweep_cmd(
     resources: str,
     group: str,
     priority: int,
+    parallel_jobs: int,
 ):
     """Run parameter sweep."""
     from .sweep import run_sweep
@@ -128,12 +133,6 @@ def sweep_cmd(
             else "select=1:ncpus=4:mem=64gb"
         )
 
-    # Auto-detect group from HSM config if not provided
-    if group is None and hsm_config:
-        wandb_config = hsm_config.get_wandb_config()
-        if wandb_config.get("project"):
-            group = f"sweep_{wandb_config['project']}"
-
     config_path = Path(config)
 
     run_sweep(
@@ -146,6 +145,7 @@ def sweep_cmd(
         resources=resources,
         group=group,
         priority=priority,
+        parallel_jobs=parallel_jobs,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
         hsm_config=hsm_config,

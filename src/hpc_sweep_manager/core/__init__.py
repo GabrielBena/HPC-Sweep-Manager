@@ -2,7 +2,7 @@
 
 from .config_parser import SweepConfig
 from .param_generator import ParameterGenerator
-from .job_manager import JobManager, PBSJobManager, SlurmJobManager
+from .job_manager import JobManager, PBSJobManager, SlurmJobManager, LocalJobManager
 from .path_detector import PathDetector
 from .utils import setup_logging, create_sweep_id
 
@@ -12,6 +12,7 @@ __all__ = [
     "JobManager",
     "PBSJobManager",
     "SlurmJobManager",
+    "LocalJobManager",
     "PathDetector",
     "setup_logging",
     "create_sweep_id",
