@@ -470,12 +470,18 @@ class LocalJobManager(JobManager):
         script_path: str = "",
         project_dir: str = ".",
         max_parallel_jobs: int = 1,
+        show_progress: bool = True,
+        show_output: bool = False,
     ):
         super().__init__(walltime, resources, python_path, script_path, project_dir)
         self.system_type = "local"
         self.max_parallel_jobs = max_parallel_jobs
         self.running_processes = {}  # job_id -> subprocess.Popen
         self.job_counter = 0
+        self.show_progress = show_progress
+        self.show_output = show_output
+        self.total_jobs_planned = 0
+        self.jobs_completed = 0
 
         # Validate and fix paths for cross-machine compatibility
         self._validate_and_fix_paths()
@@ -583,10 +589,10 @@ echo "Parameters: {self._params_to_string(params)}" >> {task_dir}/task_info.txt
 echo "Status: RUNNING" >> {task_dir}/task_info.txt
 
 # Store the command for reference
-echo "{self.python_path} {self.script_path} {self._params_to_string(params)} wandb.group={effective_wandb_group}" > {task_dir}/command.txt
+echo "{self.python_path} {self.script_path} {self._params_to_string(params)} output.dir={task_dir} wandb.group={effective_wandb_group}" > {task_dir}/command.txt
 
-# Run the training script and capture output
-{self.python_path} {self.script_path} {self._params_to_string(params)} wandb.group={effective_wandb_group} 2>&1
+# Run the training script and capture output (with output directory set to task directory)
+{self.python_path} {self.script_path} {self._params_to_string(params)} output.dir={task_dir} wandb.group={effective_wandb_group} 2>&1
 
 # Update status on completion
 if [ $? -eq 0 ]; then
@@ -608,14 +614,55 @@ fi
         log_file = logs_dir / f"{job_name}.log"
         error_file = logs_dir / f"{job_name}.err"
 
-        with open(log_file, "w") as log_f, open(error_file, "w") as err_f:
-            process = subprocess.Popen(
-                ["/bin/bash", str(script_path)],
-                stdout=log_f,
-                stderr=err_f,
-                cwd=self.project_dir,
-                preexec_fn=os.setsid,  # Create new process group for clean termination
-            )
+        if self.show_output:
+            # Show output in real-time while also logging to files
+            from threading import Thread
+
+            def stream_output(pipe, file_handle, prefix=""):
+                """Stream output from subprocess to both console and file."""
+                for line in iter(pipe.readline, b""):
+                    line_str = line.decode("utf-8", errors="replace")
+                    file_handle.write(line_str)
+                    file_handle.flush()
+                    if prefix:
+                        print(f"[{prefix}] {line_str.rstrip()}")
+                    else:
+                        print(line_str.rstrip())
+                pipe.close()
+
+            with open(log_file, "w") as log_f, open(error_file, "w") as err_f:
+                process = subprocess.Popen(
+                    ["/bin/bash", str(script_path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=self.project_dir,
+                    preexec_fn=os.setsid,
+                    bufsize=1,
+                    universal_newlines=False,
+                )
+
+                # Start threads to handle output streaming
+                stdout_thread = Thread(
+                    target=stream_output, args=(process.stdout, log_f, job_name)
+                )
+                stderr_thread = Thread(
+                    target=stream_output,
+                    args=(process.stderr, err_f, f"{job_name}-ERR"),
+                )
+                stdout_thread.daemon = True
+                stderr_thread.daemon = True
+                stdout_thread.start()
+                stderr_thread.start()
+        else:
+            # Original behavior: redirect to log files
+            with open(log_file, "w") as log_f, open(error_file, "w") as err_f:
+                process = subprocess.Popen(
+                    ["/bin/bash", str(script_path)],
+                    stdout=log_f,
+                    stderr=err_f,
+                    cwd=self.project_dir,
+                    preexec_fn=os.setsid,  # Create new process group for clean termination
+                )
 
         # Store process reference
         self.running_processes[job_id] = {
@@ -661,13 +708,26 @@ fi
         with open(params_file, "w") as f:
             json.dump(indexed_combinations, f, indent=2)
 
+        # Initialize progress tracking
+        self.total_jobs_planned = len(param_combinations)
+        self.jobs_completed = 0
+
         # Generate array job ID
         array_job_id = f"local_array_{sweep_id}"
+
+        if self.show_progress:
+            print(
+                f"Starting {len(param_combinations)} jobs with max {self.max_parallel_jobs} parallel..."
+            )
 
         # Submit individual jobs for each parameter combination
         job_ids = []
         for i, params in enumerate(param_combinations):
             job_name = f"{sweep_id}_task_{i + 1:03d}"
+
+            if self.show_progress:
+                print(f"Submitting job {i + 1}/{len(param_combinations)}: {job_name}")
+
             job_id = self.submit_single_job(
                 params, job_name, sweep_dir, sweep_id, wandb_group, pbs_dir, logs_dir
             )
@@ -675,6 +735,10 @@ fi
 
             # If we're limiting parallel jobs, wait for some to complete
             if len(self.running_processes) >= self.max_parallel_jobs:
+                if self.show_progress:
+                    print(
+                        f"Reached max parallel jobs ({self.max_parallel_jobs}), waiting for completion..."
+                    )
                 self._wait_for_job_completion()
 
         # Store array job info
@@ -683,6 +747,11 @@ fi
             "subjobs": job_ids,
             "start_time": datetime.now(),
         }
+
+        if self.show_progress:
+            print(
+                f"All {len(param_combinations)} jobs submitted. Use 'hsm monitor {sweep_id}' to track progress."
+            )
 
         return array_job_id
 
@@ -737,6 +806,14 @@ fi
                 process = job_info["process"]
                 if process.poll() is not None:  # Process has finished
                     completed_jobs.append(job_id)
+                    self.jobs_completed += 1
+
+                    if self.show_progress:
+                        job_name = job_info.get("job_name", job_id)
+                        status = "COMPLETED" if process.returncode == 0 else "FAILED"
+                        print(
+                            f"Job {job_name} {status} ({self.jobs_completed}/{self.total_jobs_planned})"
+                        )
 
             # Remove completed jobs
             for job_id in completed_jobs:
@@ -767,8 +844,12 @@ fi
                 param_strs.append(f'"{key}={value}"')
         return " ".join(param_strs)
 
-    def wait_for_all_jobs(self):
+    def wait_for_all_jobs(self, use_progress_bar: bool = False):
         """Wait for all running jobs to complete."""
+        if use_progress_bar and self.show_progress:
+            self.monitor_with_progress_bar()
+            return
+
         while self.running_processes:
             completed_jobs = []
             for job_id, job_info in self.running_processes.items():
@@ -786,11 +867,30 @@ fi
                     if process.poll() is not None:  # Process has finished
                         completed_jobs.append(job_id)
 
+                        # Update progress tracking
+                        if not hasattr(self, "_processed_jobs"):
+                            self._processed_jobs = set()
+                        if job_id not in self._processed_jobs:
+                            self.jobs_completed += 1
+                            self._processed_jobs.add(job_id)
+
+                            if self.show_progress:
+                                job_name = job_info.get("job_name", job_id)
+                                status = (
+                                    "COMPLETED" if process.returncode == 0 else "FAILED"
+                                )
+                                print(
+                                    f"Job {job_name} {status} ({self.jobs_completed}/{self.total_jobs_planned})"
+                                )
+
             # Remove completed jobs
             for job_id in completed_jobs:
                 del self.running_processes[job_id]
 
             if not completed_jobs and self.running_processes:
+                # Show periodic progress summary
+                if self.show_progress and self.total_jobs_planned > 0:
+                    self.show_progress_summary()
                 # Sleep briefly before checking again
                 time.sleep(2)
 
@@ -961,6 +1061,112 @@ fi
                         info["completed_jobs"] += 1
 
         return info
+
+    def show_progress_summary(self):
+        """Display a summary of current progress."""
+        if not self.show_progress:
+            return
+
+        info = self.get_running_process_info()
+        if self.total_jobs_planned > 0:
+            progress_pct = (self.jobs_completed / self.total_jobs_planned) * 100
+            print(
+                f"\nProgress: {self.jobs_completed}/{self.total_jobs_planned} ({progress_pct:.1f}%)"
+            )
+
+        print(f"Currently running: {info['running_jobs']} jobs")
+        print(f"Max parallel: {self.max_parallel_jobs}")
+
+        if info["running_jobs"] > 0:
+            print("Running job PIDs:", info["process_pids"])
+
+    def monitor_with_progress_bar(self, update_interval: int = 5):
+        """Monitor jobs with a rich progress bar (requires rich library)."""
+        try:
+            from rich.console import Console
+            from rich.progress import (
+                Progress,
+                SpinnerColumn,
+                TextColumn,
+                BarColumn,
+                MofNCompleteColumn,
+                TimeElapsedColumn,
+            )
+            from rich.live import Live
+            from rich.table import Table
+            import time
+
+            console = Console()
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TextColumn("•"),
+                TimeElapsedColumn(),
+                console=console,
+                transient=False,
+            ) as progress:
+                task = progress.add_task(
+                    "Processing jobs...", total=self.total_jobs_planned
+                )
+
+                while self.running_processes:
+                    # Update completed count by checking finished processes
+                    self._update_completed_count()
+
+                    # Update progress bar
+                    progress.update(task, completed=self.jobs_completed)
+
+                    # Check if all jobs are done
+                    running_count = sum(
+                        1
+                        for job_info in self.running_processes.values()
+                        if job_info.get("type") != "array"
+                        and job_info.get("process")
+                        and job_info["process"].poll() is None
+                    )
+
+                    if (
+                        running_count == 0
+                        and self.jobs_completed >= self.total_jobs_planned
+                    ):
+                        break
+
+                    time.sleep(update_interval)
+
+                progress.update(task, completed=self.total_jobs_planned)
+                console.print(f"✅ All {self.total_jobs_planned} jobs completed!")
+
+        except ImportError:
+            print(
+                "Rich library not available, falling back to simple progress monitoring"
+            )
+            self.wait_for_all_jobs()
+
+    def _update_completed_count(self):
+        """Update the completed job count by checking finished processes."""
+        completed_jobs = []
+        for job_id, job_info in self.running_processes.items():
+            if job_info.get("type") == "array":
+                continue
+
+            process = job_info.get("process")
+            if (
+                process
+                and process.poll() is not None
+                and job_id not in getattr(self, "_processed_jobs", set())
+            ):
+                completed_jobs.append(job_id)
+
+        if not hasattr(self, "_processed_jobs"):
+            self._processed_jobs = set()
+
+        for job_id in completed_jobs:
+            if job_id not in self._processed_jobs:
+                self.jobs_completed += 1
+                self._processed_jobs.add(job_id)
 
     def force_cleanup_all(self) -> dict:
         """Force cleanup of all processes without graceful termination."""

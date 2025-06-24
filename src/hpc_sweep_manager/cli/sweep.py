@@ -27,6 +27,8 @@ def run_sweep(
     group: Optional[str],
     priority: Optional[int],
     parallel_jobs: Optional[int],
+    show_output: bool,
+    no_progress: bool,
     console: Console,
     logger: logging.Logger,
     hsm_config: Optional["HSMConfig"] = None,
@@ -140,6 +142,8 @@ def run_sweep(
                 script_path=script_path,
                 project_dir=project_dir,
                 max_parallel_jobs=max_parallel_jobs,
+                show_progress=not no_progress,  # Enable progress tracking unless disabled
+                show_output=show_output,  # Show output if requested
             )
         else:
             job_manager = JobManager.auto_detect(

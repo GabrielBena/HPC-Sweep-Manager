@@ -101,6 +101,16 @@ def configure_cmd(ctx, from_file: str, output: str):
     type=int,
     help="Maximum parallel jobs for local mode (default: 1)",
 )
+@click.option(
+    "--show-output",
+    is_flag=True,
+    help="Show job output in real-time for local mode (also saves to log files)",
+)
+@click.option(
+    "--no-progress",
+    is_flag=True,
+    help="Disable progress tracking for local mode",
+)
 @click.pass_context
 def sweep_cmd(
     ctx,
@@ -114,6 +124,8 @@ def sweep_cmd(
     group: str,
     priority: int,
     parallel_jobs: int,
+    show_output: bool,
+    no_progress: bool,
 ):
     """Run parameter sweep."""
     from .sweep import run_sweep
@@ -146,6 +158,8 @@ def sweep_cmd(
         group=group,
         priority=priority,
         parallel_jobs=parallel_jobs,
+        show_output=show_output,
+        no_progress=no_progress,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
         hsm_config=hsm_config,
