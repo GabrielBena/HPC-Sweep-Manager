@@ -17,18 +17,19 @@ from ..core.utils import format_duration
 class SweepMonitor:
     """Monitor PBS-based sweeps."""
 
-    def __init__(self, console: Console, logger: logging.Logger):
+    def __init__(self, console: Console, logger: logging.Logger, days: int = 7):
         self.console = console
         self.logger = logger
+        self.days = days
         self.sweeps_dir = Path("sweeps/outputs")
 
-    def discover_recent_sweeps(self, days: int = 7) -> List[Dict]:
+    def discover_recent_sweeps(self) -> List[Dict]:
         """Discover recent sweeps from the outputs directory."""
         if not self.sweeps_dir.exists():
             return []
 
         recent_sweeps = []
-        cutoff_date = datetime.now() - timedelta(days=days)
+        cutoff_date = datetime.now() - timedelta(days=self.days)
 
         for sweep_dir in self.sweeps_dir.iterdir():
             if not sweep_dir.is_dir():
@@ -437,11 +438,12 @@ def monitor_sweep(
     watch: bool,
     refresh: int,
     detailed: bool,
+    days: int,
     console: Console,
     logger: logging.Logger,
 ):
     """Monitor sweep progress."""
-    monitor = SweepMonitor(console, logger)
+    monitor = SweepMonitor(console, logger, days=days)
 
     if sweep_id:
         # Monitor specific sweep
@@ -612,7 +614,7 @@ def _display_all_sweeps_status(
     """Display status for all recent sweeps."""
     console.print("\n[bold blue]Recent Sweeps Monitor[/bold blue]")
 
-    sweeps = monitor.discover_recent_sweeps(days=7)
+    sweeps = monitor.discover_recent_sweeps()
 
     if not sweeps:
         console.print("[yellow]No recent sweeps found in the last 7 days.[/yellow]")
@@ -915,7 +917,7 @@ def show_recent_sweeps(
     days: int, watch: bool, refresh: int, console: Console, logger: logging.Logger
 ):
     """Show recent sweeps from the last N days."""
-    monitor = SweepMonitor(console, logger)
+    monitor = SweepMonitor(console, logger, days=days)
 
     if watch:
         console.print(
@@ -929,7 +931,7 @@ def show_recent_sweeps(
                     f"\n[bold blue]Recent Sweeps (Last {days} days)[/bold blue]"
                 )
 
-                sweeps = monitor.discover_recent_sweeps(days=days)
+                sweeps = monitor.discover_recent_sweeps()
 
                 if not sweeps:
                     console.print(
@@ -948,7 +950,7 @@ def show_recent_sweeps(
     else:
         console.print(f"\n[bold blue]Recent Sweeps (Last {days} days)[/bold blue]")
 
-        sweeps = monitor.discover_recent_sweeps(days=days)
+        sweeps = monitor.discover_recent_sweeps()
 
         if not sweeps:
             console.print(f"[yellow]No sweeps found in the last {days} days.[/yellow]")
@@ -1378,12 +1380,10 @@ def cleanup_old_sweeps(
     """Clean up old sweep jobs based on age and state."""
     console.print(f"[blue]Cleaning up sweeps older than {days} days[/blue]")
 
-    monitor = SweepMonitor(console, logger)
+    monitor = SweepMonitor(console, logger, days=days * 2)
 
     # Find old sweeps
-    all_sweeps = monitor.discover_recent_sweeps(
-        days=days * 2
-    )  # Get more sweeps to filter
+    all_sweeps = monitor.discover_recent_sweeps()  # Get more sweeps to filter
     cutoff_date = datetime.now() - timedelta(days=days)
 
     old_sweeps = [

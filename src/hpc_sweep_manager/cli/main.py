@@ -170,13 +170,22 @@ def sweep_cmd(
     is_flag=True,
     help="Show detailed array job subjob status breakdown",
 )
+@click.option(
+    "--days",
+    "-d",
+    type=int,
+    default=14,
+    help="Show sweeps from last N days",
+)
 @click.pass_context
-def monitor_cmd(ctx, sweep_id: str, watch: bool, refresh: int, detailed: bool):
+def monitor_cmd(
+    ctx, sweep_id: str, watch: bool, refresh: int, detailed: bool, days: int
+):
     """Monitor sweep progress."""
     from .monitor import monitor_sweep
 
     monitor_sweep(
-        sweep_id, watch, refresh, detailed, ctx.obj["console"], ctx.obj["logger"]
+        sweep_id, watch, refresh, detailed, days, ctx.obj["console"], ctx.obj["logger"]
     )
 
 
