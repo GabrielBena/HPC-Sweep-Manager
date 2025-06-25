@@ -200,7 +200,7 @@ def sample_job_outputs(temp_dir):
 
     # Create task directories with outputs
     for i in range(4):
-        task_dir = sweep_dir / "tasks" / f"task_{i + 1}"
+        task_dir = sweep_dir / "tasks" / f"task_{i + 1:03d}"
         task_dir.mkdir(parents=True)
 
         # Create task info file

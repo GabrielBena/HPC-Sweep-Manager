@@ -52,7 +52,7 @@ def expand_ssh_key_path(ssh_key_path: str) -> Optional[str]:
     if expanded_path.exists():
         return str(expanded_path)
     else:
-        logger.warning(f"SSH key not found at: {expanded_path}")
+        logger.debug(f"SSH key not found at: {expanded_path}")
         return None
 
 
@@ -67,9 +67,9 @@ def get_ssh_client_keys(ssh_key_path: Optional[str]) -> List[str]:
             keys.append(expanded_key)
             logger.debug(f"Added user-specified SSH key: {expanded_key}")
         else:
-            logger.warning(f"User-specified SSH key not found: {ssh_key_path}")
+            logger.debug(f"User-specified SSH key not found: {ssh_key_path}")
 
-    # Always try default SSH keys as fallback
+    # Always try default SSH keys as fallback (but only add if they exist)
     default_keys = [
         "~/.ssh/id_ed25519",
         "~/.ssh/id_rsa",
@@ -77,13 +77,18 @@ def get_ssh_client_keys(ssh_key_path: Optional[str]) -> List[str]:
         "~/.ssh/id_dsa",
     ]
 
+    found_default_keys = []
     for default_key in default_keys:
         expanded_default = expand_ssh_key_path(default_key)
         if expanded_default and expanded_default not in keys:
             keys.append(expanded_default)
-            logger.debug(f"Added default SSH key: {expanded_default}")
+            found_default_keys.append(expanded_default)
 
-    logger.debug(f"Final SSH key list: {keys}")
+    if found_default_keys:
+        logger.debug(f"Added default SSH keys: {found_default_keys}")
+    elif not keys:
+        logger.debug("No SSH keys found, using SSH agent or password authentication")
+
     return keys
 
 
@@ -171,7 +176,7 @@ class RemoteDiscovery:
             RemoteConfig with discovered paths, or None if discovery fails
         """
         remote_name = remote_info.get("name", "unknown")
-        logger.info(f"Discovering HSM configuration on remote: {remote_name}")
+        logger.debug(f"Discovering HSM configuration on remote: {remote_name}")
 
         try:
             # Create RemoteConfig with basic info
@@ -215,11 +220,11 @@ class RemoteDiscovery:
                     logger.error(f"Basic command tests failed for {remote_name}")
                     return None
 
-                logger.info(f"Successfully discovered configuration for remote: {remote_name}")
+                logger.debug(f"Successfully discovered configuration for remote: {remote_name}")
                 return remote_config
 
         except Exception as e:
-            logger.error(f"Failed to discover remote configuration for {remote_name}: {e}")
+            logger.error(f"Failed to discover configuration for remote {remote_name}: {e}")
             return None
 
     async def _find_hsm_config(self, conn) -> Optional[str]:
@@ -347,7 +352,7 @@ class RemoteDiscovery:
         success_count = sum(1 for result in results if result is True)
         total_checks = len(validation_tasks)
 
-        logger.info(f"Environment validation: {success_count}/{total_checks} checks passed")
+        logger.debug(f"Environment validation: {success_count}/{total_checks} checks passed")
         return success_count == total_checks
 
     async def _check_command(self, conn, command: str, description: str) -> bool:
@@ -379,35 +384,54 @@ class RemoteDiscovery:
             return False
 
     async def _test_basic_commands(self, conn, remote_config: RemoteConfig) -> bool:
-        """Test basic commands needed for job execution."""
-        test_commands = [
-            ("echo 'test'", "Basic shell"),
-            ("which rsync", "Rsync availability"),
-            ("date", "Date command"),
-        ]
+        """Test basic commands to ensure remote environment works."""
+        test_tasks = []
 
-        # Test Python imports if we have a Python interpreter
+        # Test Python version
         if remote_config.python_interpreter:
-            test_commands.extend(
-                [
-                    (
-                        f"{remote_config.python_interpreter} -c 'import sys; print(sys.version)'",
-                        "Python execution",
-                    ),
-                    (
-                        f"{remote_config.python_interpreter} -c 'import jax, hydra'",
-                        "Required packages",
-                    ),
-                ]
+            test_tasks.append(
+                self._check_command(
+                    conn,
+                    f"{remote_config.python_interpreter} --version",
+                    "Python version check",
+                )
             )
 
-        success_count = 0
-        for command, description in test_commands:
-            if await self._check_command(conn, command, description):
-                success_count += 1
+        # Test import of basic modules
+        if remote_config.python_interpreter:
+            test_tasks.append(
+                self._check_command(
+                    conn,
+                    f"{remote_config.python_interpreter} -c 'import sys; print(sys.version)'",
+                    "Python import test",
+                )
+            )
 
-        logger.info(f"Basic command tests: {success_count}/{len(test_commands)} passed")
-        return success_count >= len(test_commands) - 1  # Allow 1 failure
+        # Test wandb if available (don't fail if not present)
+        if remote_config.python_interpreter:
+            # This is optional, so we'll allow it to fail
+            try:
+                result = await conn.run(
+                    f"{remote_config.python_interpreter} -c 'import wandb; print(wandb.__version__)'",
+                    check=False,
+                )
+                if result.returncode == 0:
+                    logger.debug("✓ W&B available on remote")
+                else:
+                    logger.debug("W&B not available on remote (optional)")
+            except:
+                logger.debug("W&B not available on remote (optional)")
+
+        # Run command tests
+        if test_tasks:
+            results = await asyncio.gather(*test_tasks, return_exceptions=True)
+            success_count = sum(1 for result in results if result is True)
+            total_tests = len(test_tasks)
+
+            logger.debug(f"Basic command tests: {success_count}/{total_tests} passed")
+            return success_count == total_tests
+
+        return True
 
     async def discover_all_remotes(self, remotes_config: Dict[str, Any]) -> Dict[str, RemoteConfig]:
         """Discover configurations for all configured remote machines."""

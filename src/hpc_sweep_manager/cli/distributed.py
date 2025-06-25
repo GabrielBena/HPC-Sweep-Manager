@@ -165,7 +165,7 @@ def list():
         "Local",
         "localhost",
         "-",
-        str(distributed_config.get("local_max_jobs", 4)),
+        str(distributed_config.get("local_max_jobs", 1)),
         "✓ Available",
     )
 

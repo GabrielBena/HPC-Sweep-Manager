@@ -473,7 +473,6 @@ def run_sweep(
                     sweep_dir=sweep_dir,
                     show_progress=not no_progress,
                 )
-                console.print("[green]✓ Distributed job manager created successfully[/green]")
             except Exception as e:
                 console.print(f"[red]Error creating distributed job manager: {e}[/red]")
                 return
@@ -563,22 +562,50 @@ def run_sweep(
                     console.print(f"[red]Error collecting results: {e}[/red]")
                     logger.warning(f"Result collection failed: {e}")
 
-            # For distributed mode, collect results after job completion
-            elif mode == "distributed" and hasattr(job_manager, "collect_results"):
-                console.print("\n[cyan]Collecting results from distributed sources...[/cyan]")
-                try:
-                    success = job_manager.collect_results()
-                    if success:
+                    # For distributed mode, results are normalized automatically during execution
+            elif mode == "distributed":
+                tasks_dir = sweep_dir / "tasks"
+                scripts_dir = sweep_dir / "distributed_scripts"
+                logs_dir = sweep_dir / "logs"
+                source_mapping_file = sweep_dir / "source_mapping.yaml"
+
+                if tasks_dir.exists():
+                    task_count = len(
+                        [
+                            d
+                            for d in tasks_dir.iterdir()
+                            if d.is_dir() and d.name.startswith("task_")
+                        ]
+                    )
+                    console.print(
+                        f"[green]✓ {task_count} task results available in: {tasks_dir}/[/green]"
+                    )
+
+                    # Show scripts and logs collection status
+                    scripts_count = (
+                        len(list(scripts_dir.glob("*.sh"))) if scripts_dir.exists() else 0
+                    )
+                    logs_count = (
+                        len([f for f in logs_dir.glob("*") if f.is_file()])
+                        if logs_dir.exists()
+                        else 0
+                    )
+
+                    if scripts_count > 0:
                         console.print(
-                            f"[green]✓ Results collected successfully to {sweep_dir}/tasks/[/green]"
+                            f"[green]📜 {scripts_count} job scripts collected in: {scripts_dir}/[/green]"
                         )
-                    else:
+                    if logs_count > 0:
                         console.print(
-                            "[yellow]⚠ Result collection completed with warnings[/yellow]"
+                            f"[green]📋 {logs_count} log files collected in: {logs_dir}/[/green]"
                         )
-                except Exception as e:
-                    console.print(f"[red]Error collecting results: {e}[/red]")
-                    logger.warning(f"Result collection failed: {e}")
+
+                    if source_mapping_file.exists():
+                        console.print(
+                            f"[cyan]📊 Source assignment details: {source_mapping_file}[/cyan]"
+                        )
+                else:
+                    console.print(f"[yellow]Results will be available in: {tasks_dir}/[/yellow]")
 
         except Exception as e:
             console.print(f"[red]Error submitting jobs: {e}[/red]")

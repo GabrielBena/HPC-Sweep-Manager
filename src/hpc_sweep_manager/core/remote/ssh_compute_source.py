@@ -33,7 +33,7 @@ class SSHComputeSource(ComputeSource):
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         """Setup the SSH compute source for job execution."""
         try:
-            logger.info(f"Setting up SSH compute source: {self.name}")
+            logger.debug(f"Setting up SSH compute source: {self.name}")
 
             # Store local sweep directory for result collection
             self.local_sweep_dir = sweep_dir
@@ -56,7 +56,7 @@ class SSHComputeSource(ComputeSource):
             if setup_success:
                 self.stats.health_status = "healthy"
                 self.stats.last_health_check = datetime.now()
-                logger.info(f"✓ SSH compute source {self.name} setup successful")
+                logger.debug(f"✓ SSH compute source {self.name} setup successful")
                 return True
             else:
                 self.stats.health_status = "unhealthy"

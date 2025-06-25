@@ -121,7 +121,7 @@ class LocalJobManager:
         pbs_dir.mkdir(parents=True, exist_ok=True)
 
         # Create task directory for organized outputs
-        task_dir = sweep_dir / "tasks" / f"task_{self.job_counter + 1}"
+        task_dir = sweep_dir / "tasks" / f"task_{self.job_counter + 1:03d}"
         task_dir.mkdir(parents=True, exist_ok=True)
 
         # Increment job counter
@@ -466,25 +466,28 @@ fi
                 print(f"  {job_info['job_name']} (PID: {job_info['pid']}) - {runtime_mins:.1f}m")
         print()
 
-    def monitor_with_progress_bar(self, update_interval: int = 5):
+    def monitor_with_progress_bar(self, update_interval: int = 1):
         """Monitor jobs with a progress bar."""
         try:
             from rich.console import Console
             from rich.progress import (
                 BarColumn,
+                MofNCompleteColumn,
                 Progress,
+                SpinnerColumn,
                 TextColumn,
-                TimeRemainingColumn,
+                TimeElapsedColumn,
             )
 
             console = Console()
 
             with Progress(
-                TextColumn("[progress.description]{task.description}"),
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
                 BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TextColumn("({task.completed}/{task.total})"),
-                TimeRemainingColumn(),
+                MofNCompleteColumn(),
+                TextColumn("•"),
+                TimeElapsedColumn(),
                 console=console,
             ) as progress:
                 task = progress.add_task(
@@ -496,16 +499,41 @@ fi
                 while self.running_processes:
                     self._wait_for_job_completion()
                     self._update_completed_count()
-                    progress.update(task, completed=self.jobs_completed)
-                    time.sleep(1)
+
+                    # Count failed jobs for display
+                    failed_count = 0
+                    for job_info in self.running_processes.values():
+                        process = job_info["process"]
+                        if process.poll() is not None and process.returncode != 0:
+                            failed_count += 1
+
+                    # Add completed failed jobs to the count
+                    total_failed = (
+                        self.total_jobs_planned
+                        - self.jobs_completed
+                        - len(self.running_processes)
+                        + failed_count
+                    )
+
+                    progress.update(
+                        task,
+                        completed=self.jobs_completed,
+                        description=f"Local sweep • ✓ {self.jobs_completed} • ✗ {total_failed} • {len(self.running_processes)} running",
+                    )
+                    time.sleep(update_interval)
 
                 # Final update
-                progress.update(task, completed=self.jobs_completed)
-                console.print(f"[green]All {self.total_jobs_planned} jobs completed![/green]")
+                final_failed = self.total_jobs_planned - self.jobs_completed
+                progress.update(
+                    task,
+                    completed=self.total_jobs_planned,
+                    description=f"Local sweep completed • ✓ {self.jobs_completed} • ✗ {final_failed}",
+                )
+                console.print(f"[green]All {self.total_jobs_planned} local jobs completed![/green]")
 
         except ImportError:
             # Fallback to simple text progress
-            console.print("Rich not available, using simple progress display")
+            print("Rich not available, using simple progress display")
             while self.running_processes:
                 self._wait_for_job_completion()
                 print(f"Progress: {self.jobs_completed}/{self.total_jobs_planned} jobs completed")

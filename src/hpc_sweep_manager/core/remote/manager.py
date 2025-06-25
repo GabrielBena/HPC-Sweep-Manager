@@ -19,6 +19,21 @@ try:
 except ImportError:
     ASYNCSSH_AVAILABLE = False
 
+try:
+    from rich.console import Console
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
+
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
 from .discovery import RemoteConfig, create_ssh_connection, get_ssh_client_keys
 
 logger = logging.getLogger(__name__)
@@ -62,6 +77,11 @@ class RemoteJobManager:
         # Signal handling state
         self._signal_received = False
         self._cleanup_in_progress = False
+
+        # Rich progress tracking
+        self._progress = None
+        self._task_id = None
+        self._console = Console() if RICH_AVAILABLE else None
 
         if not ASYNCSSH_AVAILABLE:
             raise ImportError("asyncssh is required for remote job execution")
@@ -250,13 +270,18 @@ class RemoteJobManager:
                                 else:
                                     logger.error("Failed to sync changes to remote")
                                     return False
-                            elif sync_choice == "skip":
-                                logger.warning("⚠ Skipping sync verification as requested by user")
-                                # Continue without sync
                             else:
-                                # User declined sync - show error and exit
+                                # User declined sync - show error and exit (no skip option)
                                 self._show_sync_error_details(sync_result)
                                 return False
+                        else:
+                            # Cannot offer safe sync - show error and exit
+                            self._show_sync_error_details(sync_result)
+                            logger.error("Automatic sync is not safe for this type of mismatch.")
+                            logger.error(
+                                "Please manually synchronize the projects before running the sweep."
+                            )
+                            return False
                     else:
                         logger.info(
                             f"✓ Project synchronization verified ({sync_result['method']} method)"
@@ -381,13 +406,27 @@ class RemoteJobManager:
         logger.info(f"Submitting job {job_name} to remote {self.remote_config.name}")
 
         try:
+            # Extract task number from job name (e.g., "sweep_20250625_210408_task_002" -> "task_002")
+            import re
+
+            task_match = re.search(r"task_(\d+)", job_name)
+            if task_match:
+                task_number = task_match.group(1)
+                task_name = f"task_{task_number}"
+            else:
+                # Fallback to job counter if pattern not found
+                task_name = f"task_{self.job_counter:03d}"
+                logger.warning(
+                    f"Could not extract task number from job name {job_name}, using fallback: {task_name}"
+                )
+
             async with await create_ssh_connection(
                 self.remote_config.host,
                 self.remote_config.ssh_key,
                 self.remote_config.ssh_port,
             ) as conn:
-                # Create task directory
-                task_dir = f"{self.remote_tasks_dir}/task_{self.job_counter}"
+                # Create task directory using the extracted task name
+                task_dir = f"{self.remote_tasks_dir}/{task_name}"
                 await conn.run(f"mkdir -p {task_dir}")
 
                 # Create job script
@@ -1179,31 +1218,69 @@ fi
         self.total_jobs_planned = len(param_combinations)
         self.jobs_completed = 0
 
-        if self.show_progress:
+        # Setup Rich progress bar if available
+        if RICH_AVAILABLE and self.show_progress and self._console:
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TextColumn("•"),
+                TimeElapsedColumn(),
+                console=self._console,
+            )
+            self._task_id = self._progress.add_task(
+                f"Running remote sweep on {self.remote_config.name}",
+                total=self.total_jobs_planned,
+            )
+            self._progress.start()
+        elif self.show_progress:
             logger.info(
                 f"Starting {len(param_combinations)} jobs with max {self.max_parallel_jobs} parallel on {self.remote_config.name}"
             )
 
-        job_ids = []
-        for i, params in enumerate(param_combinations):
-            job_name = f"{sweep_id}_task_{i + 1:03d}"
+        try:
+            job_ids = []
+            for i, params in enumerate(param_combinations):
+                job_name = f"{sweep_id}_task_{i + 1:03d}"
 
-            if self.show_progress:
-                logger.info(f"Submitting job {i + 1}/{len(param_combinations)}: {job_name}")
-
-            job_id = await self.submit_single_job(params, job_name, sweep_id, wandb_group)
-            job_ids.append(job_id)
-
-            # If we're limiting parallel jobs, wait for some to complete
-            if len(self.running_jobs) >= self.max_parallel_jobs:
-                if self.show_progress:
-                    logger.info(
-                        f"Reached max parallel jobs ({self.max_parallel_jobs}), waiting for completion..."
+                # Update progress for job submission
+                if self._progress and self._task_id is not None:
+                    self._progress.update(
+                        self._task_id,
+                        description=f"Submitting remote jobs ({i + 1}/{len(param_combinations)})",
                     )
-                await self._wait_for_job_completion()
+                elif self.show_progress:
+                    logger.info(f"Submitting job {i + 1}/{len(param_combinations)}: {job_name}")
 
-        if self.show_progress:
-            logger.info(f"All {len(param_combinations)} jobs submitted")
+                job_id = await self.submit_single_job(params, job_name, sweep_id, wandb_group)
+                job_ids.append(job_id)
+
+                # If we're limiting parallel jobs, wait for some to complete
+                if len(self.running_jobs) >= self.max_parallel_jobs:
+                    if self._progress and self._task_id is not None:
+                        self._progress.update(
+                            self._task_id,
+                            description=f"Waiting for job slots ({len(self.running_jobs)}/{self.max_parallel_jobs} running)",
+                        )
+                    elif self.show_progress:
+                        logger.info(
+                            f"Reached max parallel jobs ({self.max_parallel_jobs}), waiting for completion..."
+                        )
+                    await self._wait_for_job_completion()
+
+            # Update progress description for monitoring phase
+            if self._progress and self._task_id is not None:
+                self._progress.update(
+                    self._task_id,
+                    description=f"Remote sweep running • {len(self.running_jobs)} jobs active",
+                )
+            elif self.show_progress:
+                logger.info(f"All {len(param_combinations)} jobs submitted")
+
+        finally:
+            # Keep progress bar running - it will be stopped by wait_for_all_jobs
+            pass
 
         return job_ids
 
@@ -1237,39 +1314,74 @@ fi
 
     async def wait_for_all_jobs(self):
         """Wait for all running jobs to complete."""
-        while self.running_jobs:
-            completed_jobs = []
+        try:
+            while self.running_jobs:
+                completed_jobs = []
 
-            for job_id, job_info in self.running_jobs.items():
-                status = await self.get_job_status(job_id)
+                for job_id, job_info in self.running_jobs.items():
+                    status = await self.get_job_status(job_id)
 
-                if status in ["COMPLETED", "FAILED", "CANCELLED"]:
-                    completed_jobs.append(job_id)
+                    if status in ["COMPLETED", "FAILED", "CANCELLED"]:
+                        completed_jobs.append(job_id)
 
-                    # Only increment if not already counted
-                    if not job_info.get("counted", False):
-                        self.jobs_completed += 1
-                        job_info["counted"] = True
+                        # Only increment if not already counted
+                        if not job_info.get("counted", False):
+                            self.jobs_completed += 1
+                            job_info["counted"] = True
 
-                        if self.show_progress:
-                            job_name = job_info.get("job_name", job_id)
-                            logger.info(
-                                f"Job {job_name} {status} ({self.jobs_completed}/{self.total_jobs_planned})"
-                            )
+                            # Update Rich progress bar
+                            if self._progress and self._task_id is not None:
+                                # Count failed jobs from all completed jobs, not just running ones
+                                failed_count = 0
+                                for j_info in self.running_jobs.values():
+                                    if j_info.get("status") == "FAILED":
+                                        failed_count += 1
+                                if status == "FAILED":
+                                    failed_count += 1
 
-            # Remove completed jobs
-            for job_id in completed_jobs:
-                del self.running_jobs[job_id]
+                                self._progress.update(
+                                    self._task_id,
+                                    completed=self.jobs_completed,
+                                    description=f"Remote sweep • ✓ {self.jobs_completed} • ✗ {failed_count} • {len(self.running_jobs) - len(completed_jobs)} running",
+                                )
+                            elif self.show_progress:
+                                job_name = job_info.get("job_name", job_id)
+                                logger.info(
+                                    f"Job {job_name} {status} ({self.jobs_completed}/{self.total_jobs_planned})"
+                                )
 
-            if not completed_jobs and self.running_jobs:
-                # Show periodic progress summary
-                if self.show_progress:
-                    await self._show_progress_summary()
-                # Sleep briefly before checking again
-                await asyncio.sleep(5)
+                # Remove completed jobs
+                for job_id in completed_jobs:
+                    del self.running_jobs[job_id]
 
-        if self.show_progress:
-            logger.info(f"All {self.total_jobs_planned} jobs completed!")
+                if not completed_jobs and self.running_jobs:
+                    # Show periodic progress summary (only for non-Rich mode)
+                    if self.show_progress and not self._progress:
+                        await self._show_progress_summary()
+                    # Sleep briefly before checking again
+                    await asyncio.sleep(5)
+
+            # Final completion message
+            if self._progress and self._task_id is not None:
+                failed_count = self.total_jobs_planned - self.jobs_completed
+                self._progress.update(
+                    self._task_id,
+                    completed=self.total_jobs_planned,
+                    description=f"Remote sweep completed • ✓ {self.jobs_completed} • ✗ {failed_count}",
+                )
+                if self._console:
+                    self._console.print(
+                        f"[green]All {self.total_jobs_planned} remote jobs completed![/green]"
+                    )
+            elif self.show_progress:
+                logger.info(f"All {self.total_jobs_planned} jobs completed!")
+
+        finally:
+            # Stop progress bar
+            if self._progress:
+                self._progress.stop()
+                self._progress = None
+                self._task_id = None
 
     async def _show_progress_summary(self):
         """Display a summary of current progress."""
@@ -1287,14 +1399,17 @@ fi
 
     def _can_offer_sync(self, sync_result: Dict[str, Any]) -> bool:
         """Determine if we can safely offer to sync based on the mismatch type."""
-        # Only offer sync for checksum mismatches (not git commit differences)
+        # More strict criteria - only allow sync for safe scenarios
         if sync_result["method"] == "git":
             details = sync_result["details"]
             # Don't offer sync if commits are different (too risky)
             if details.get("local_commit") != details.get("remote_commit"):
                 return False
-            # Only offer if there are just uncommitted changes
-            return bool(details.get("local_status") and not details.get("remote_status"))
+            # Don't allow sync if remote has uncommitted changes
+            if details.get("remote_status"):
+                return False
+            # Only offer if there are just local uncommitted changes
+            return bool(details.get("local_status"))
         elif sync_result["method"] == "checksum":
             details = sync_result["details"]
             # Offer sync if we have specific file mismatches (not missing files)
@@ -1303,10 +1418,10 @@ fi
         return False
 
     def _prompt_for_sync(self, sync_result: Dict[str, Any]) -> bool:
-        """Prompt user whether to sync local changes to remote."""
-        print("\n" + "=" * 60)
-        print("🔄 PROJECT SYNC REQUIRED")
-        print("=" * 60)
+        """Prompt user whether to sync local changes to remote with detailed diff display."""
+        print("\n" + "=" * 80)
+        print("🔄 PROJECT SYNC REQUIRED - UNCOMMITTED CHANGES DETECTED")
+        print("=" * 80)
 
         if sync_result["method"] == "git":
             details = sync_result["details"]
@@ -1314,34 +1429,207 @@ fi
                 print("Local uncommitted changes detected:")
                 for line in details["local_status"].split("\n"):
                     if line.strip():
-                        print(f"  {line}")
+                        status = line[:2]
+                        filename = line[3:] if len(line) > 3 else ""
+                        if status.strip() in ["M", "MM"]:
+                            print(f"  📝 Modified: {filename}")
+                        elif status.strip() in ["A", "AM"]:
+                            print(f"  ➕ Added: {filename}")
+                        elif status.strip() in ["D", "AD"]:
+                            print(f"  ❌ Deleted: {filename}")
+                        elif status.strip() in ["R"]:
+                            print(f"  ↗️ Renamed: {filename}")
+                        else:
+                            print(f"  {status} {filename}")
+
+                # Show detailed diff for config files and key files
+                self._show_detailed_git_diff(details.get("local_status", ""))
+
         elif sync_result["method"] == "checksum":
             details = sync_result["details"]
             if details.get("mismatched_files"):
                 print("Files that differ between local and remote:")
                 for mismatch in details["mismatched_files"]:
-                    print(f"  📄 {mismatch['file']}")
+                    file_path = mismatch["file"]
+                    print(f"  📄 {file_path}")
+                    # Show content diff for important files
+                    self._show_file_content_diff(file_path, mismatch)
+
+        print("\n" + "⚠️" * 25)
+        print("IMPORTANT: Review the changes above carefully!")
+        print("Config changes can significantly affect experiment results.")
+        print("⚠️" * 25)
 
         print("\nOptions:")
-        print("  ✅ [Y] Sync local changes to remote (recommended)")
+        print("  ✅ [Y] Sync local changes to remote (after reviewing above)")
         print("  ❌ [n] Cancel sweep execution")
-        print("  ⚠️  [s] Skip sync verification (not recommended)")
+        print("  🔍 [d] Show detailed diff for all changed files")
 
         while True:
             try:
-                choice = input("\nChoose [Y/n/s]: ").strip().lower()
+                choice = input("\nChoose [Y/n/d]: ").strip().lower()
                 if choice in ["", "y", "yes"]:
                     return True
                 elif choice in ["n", "no"]:
                     return False
-                elif choice in ["s", "skip"]:
-                    logger.warning("User chose to skip sync verification")
-                    return "skip"
+                elif choice in ["d", "diff"]:
+                    self._show_full_detailed_diff(sync_result)
+                    continue
                 else:
-                    print("Please enter Y, n, or s")
+                    print("Please enter Y, n, or d")
             except (EOFError, KeyboardInterrupt):
                 print("\nOperation cancelled by user")
                 return False
+
+    def _show_detailed_git_diff(self, git_status: str):
+        """Show detailed git diff for important files."""
+        import subprocess
+
+        print("\n📋 DETAILED CHANGES PREVIEW:")
+        print("-" * 60)
+
+        # Parse git status to find modified files
+        important_patterns = [
+            "config",
+            "Config",
+            "CONFIG",
+            ".yaml",
+            ".yml",
+            ".json",
+            "train",
+            "Train",
+            "TRAIN",
+            "requirements.txt",
+            "pyproject.toml",
+        ]
+
+        for line in git_status.split("\n"):
+            if not line.strip():
+                continue
+
+            status = line[:2]
+            filename = line[3:] if len(line) > 3 else ""
+
+            # Show diff for modified files that match important patterns
+            if status.strip() in ["M", "MM"] and any(
+                pattern in filename for pattern in important_patterns
+            ):
+                try:
+                    # Get diff for this specific file
+                    diff_result = subprocess.run(
+                        ["git", "diff", "HEAD", "--", filename],
+                        cwd=self.local_project_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+
+                    if diff_result.returncode == 0 and diff_result.stdout.strip():
+                        print(f"\n🔍 Changes in {filename}:")
+                        # Show a condensed diff (first 15 lines)
+                        diff_lines = diff_result.stdout.split("\n")
+                        shown_lines = 0
+                        for i, diff_line in enumerate(diff_lines):
+                            if shown_lines >= 15:
+                                remaining = len(diff_lines) - i
+                                if remaining > 0:
+                                    print(
+                                        f"    ... ({remaining} more lines, use 'd' to see full diff)"
+                                    )
+                                break
+
+                            if diff_line.startswith("@@"):
+                                print(f"    {diff_line}")
+                                shown_lines += 1
+                            elif diff_line.startswith("+") and not diff_line.startswith("+++"):
+                                print(f"    🟢 {diff_line}")
+                                shown_lines += 1
+                            elif diff_line.startswith("-") and not diff_line.startswith("---"):
+                                print(f"    🔴 {diff_line}")
+                                shown_lines += 1
+                            elif (
+                                diff_line.strip()
+                                and not diff_line.startswith("diff --git")
+                                and not diff_line.startswith("index ")
+                            ):
+                                print(f"      {diff_line}")
+                                shown_lines += 1
+
+                except Exception as e:
+                    print(f"    ⚠️ Could not show diff for {filename}: {e}")
+
+        print("-" * 60)
+
+    def _show_file_content_diff(self, file_path: str, mismatch_info: dict):
+        """Show content differences for files when using checksum method."""
+        try:
+            local_file = Path.cwd() / file_path
+            if local_file.exists() and any(
+                pattern in file_path.lower() for pattern in ["config", ".yaml", ".yml", ".json"]
+            ):
+                print(f"\n🔍 Preview of {file_path}:")
+                with open(local_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    lines = content.split("\n")
+                    total_lines = len(lines)
+
+                    if total_lines <= 10:
+                        for i, line in enumerate(lines, 1):
+                            print(f"    {i:2d}: {line}")
+                    else:
+                        # Show first 5 and last 5 lines
+                        for i in range(5):
+                            print(f"    {i + 1:2d}: {lines[i]}")
+                        print(f"    ... ({total_lines - 10} more lines)")
+                        for i in range(total_lines - 5, total_lines):
+                            print(f"    {i + 1:2d}: {lines[i]}")
+
+                print(
+                    f"    Checksum mismatch: local={mismatch_info.get('local_checksum', 'unknown')[:8]}... vs remote={mismatch_info.get('remote_checksum', 'unknown')[:8]}..."
+                )
+        except Exception as e:
+            print(f"    ⚠️ Could not preview {file_path}: {e}")
+
+    def _show_full_detailed_diff(self, sync_result: Dict[str, Any]):
+        """Show complete detailed diff for all changed files."""
+        import subprocess
+
+        print("\n" + "=" * 80)
+        print("📋 COMPLETE DETAILED DIFF")
+        print("=" * 80)
+
+        if sync_result["method"] == "git":
+            details = sync_result["details"]
+            git_status = details.get("local_status", "")
+
+            for line in git_status.split("\n"):
+                if not line.strip():
+                    continue
+
+                status = line[:2]
+                filename = line[3:] if len(line) > 3 else ""
+
+                if status.strip() in ["M", "MM"]:
+                    try:
+                        print(f"\n{'=' * 20} {filename} {'=' * 20}")
+                        diff_result = subprocess.run(
+                            ["git", "diff", "HEAD", "--", filename],
+                            cwd=self.local_project_root,
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                        )
+
+                        if diff_result.returncode == 0:
+                            print(diff_result.stdout)
+                        else:
+                            print(f"Could not get diff for {filename}")
+
+                    except Exception as e:
+                        print(f"Error showing diff for {filename}: {e}")
+
+        print("=" * 80)
+        input("Press Enter to continue...")
 
     async def _sync_mismatched_files(self, conn, sync_result: Dict[str, Any]) -> bool:
         """Sync specific mismatched files to remote."""
@@ -1381,7 +1669,47 @@ HSMSYNCEOF"""
                         logger.error(f"Failed to sync {file_path}: {result.stderr}")
                         return False
 
-                logger.info(f"Successfully synced {len(mismatched_files)} files")
+                logger.info(f"✓ Successfully synced {len(mismatched_files)} files to remote")
+
+                # Wait a moment for filesystem to sync
+                await asyncio.sleep(1)
+
+                # Verify sync by re-checking the files we just synced
+                verification_failed = False
+                for mismatch in mismatched_files:
+                    file_path = mismatch["file"]
+                    local_file = Path.cwd() / file_path
+
+                    if not local_file.exists():
+                        continue
+
+                    local_checksum = hashlib.sha256()
+                    with open(local_file, "rb") as f:
+                        for chunk in iter(lambda: f.read(4096), b""):
+                            local_checksum.update(chunk)
+                    local_hash = local_checksum.hexdigest()
+
+                    # Check remote file again
+                    remote_file_path = f"{self.remote_config.project_root}/{file_path}"
+                    verify_cmd = f"sha256sum '{remote_file_path}' | cut -d' ' -f1"
+                    verify_result = await conn.run(verify_cmd, check=False)
+
+                    if verify_result.returncode == 0:
+                        remote_hash = verify_result.stdout.strip()
+                        if local_hash == remote_hash:
+                            logger.debug(f"✓ Sync verified for {file_path}")
+                        else:
+                            logger.warning(f"⚠ Sync verification failed for {file_path}")
+                            verification_failed = True
+                    else:
+                        logger.warning(f"⚠ Could not verify sync for {file_path}")
+                        verification_failed = True
+
+                if verification_failed:
+                    logger.warning("Some files may not have synced properly")
+                else:
+                    logger.info("✓ All synced files verified successfully")
+
                 return True
 
             elif sync_result["method"] == "git":
@@ -1582,12 +1910,9 @@ class ProjectStateChecker:
                     f"Git commits differ: local={result['local_commit'][:8]} vs remote={result['remote_commit'][:8]}"
                 )
 
-            # Projects are in sync if commits match and no uncommitted changes
-            result["in_sync"] = (
-                result["local_commit"] == result["remote_commit"]
-                and not result["local_status"]
-                and not result["remote_status"]
-            )
+            # Projects are in sync if commits match, regardless of uncommitted changes
+            # We'll handle uncommitted changes through the checksum verification
+            result["in_sync"] = result["local_commit"] == result["remote_commit"]
 
         except subprocess.TimeoutExpired:
             result["errors"].append("Git command timeout")
@@ -1609,15 +1934,13 @@ class ProjectStateChecker:
         # Key files to check (relative to project root)
         key_files = [
             self.remote_config.train_script,
-            "configs/config.yaml",
             "requirements.txt",
             "pyproject.toml",
             "setup.py",
         ]
 
-        # Add discovered config directory files if available
+        # Add config files based on discovered config directory
         if self.remote_config.config_dir:
-            # Try to find config files
             try:
                 config_base = Path(self.remote_config.config_dir).name
                 key_files.extend(
@@ -1629,6 +1952,15 @@ class ProjectStateChecker:
                 )
             except:
                 pass
+        else:
+            # Fallback to standard config location if no config_dir discovered
+            key_files.append("configs/config.yaml")
+
+        # Remove duplicates while preserving order
+        seen = set()
+        key_files = [f for f in key_files if f and f not in seen and not seen.add(f)]
+
+        logger.debug(f"Checking sync for files: {key_files}")
 
         for file_path in key_files:
             if not file_path:

@@ -54,32 +54,26 @@ class DistributedSweepWrapper:
     ) -> List[str]:
         """Async implementation of distributed sweep submission."""
         try:
-            self.console.print("[cyan]Setting up distributed computing environment...[/cyan]")
-
             # Create distributed job manager
             config = self._create_distributed_config()
             self.distributed_manager = DistributedJobManager(
                 sweep_dir=sweep_dir, config=config, show_progress=self.show_progress
             )
 
-            # Create and add compute sources
+            # Create and add compute sources quietly
             await self._setup_compute_sources()
 
             # Setup all sources
-            self.console.print(
-                f"[cyan]Initializing {len(self.distributed_manager.sources)} compute sources...[/cyan]"
-            )
             setup_success = await self.distributed_manager.setup_all_sources(sweep_id)
 
             if not setup_success:
                 raise Exception("Failed to setup compute sources for distributed execution")
 
-            self.console.print("[green]✓ Distributed environment ready[/green]")
+            self.console.print(
+                f"[green]✓ Distributed environment ready with {len(self.distributed_manager.sources)} sources[/green]"
+            )
 
             # Submit distributed sweep
-            self.console.print(
-                f"[bold]Starting distributed execution across {len(self.distributed_manager.sources)} sources...[/bold]"
-            )
             job_ids = await self.distributed_manager.submit_distributed_sweep(
                 param_combinations=param_combinations,
                 sweep_id=sweep_id,
@@ -89,6 +83,10 @@ class DistributedSweepWrapper:
             self.console.print("[green]✓ Distributed sweep completed successfully![/green]")
             return job_ids
 
+        except asyncio.CancelledError:
+            self.logger.warning("Distributed sweep was cancelled")
+            self.console.print("[yellow]⚠ Distributed sweep cancelled[/yellow]")
+            raise
         except Exception as e:
             self.logger.error(f"Distributed sweep failed: {e}")
             self.console.print(f"[red]Distributed sweep failed: {e}[/red]")
@@ -96,7 +94,10 @@ class DistributedSweepWrapper:
         finally:
             # Cleanup
             if self.distributed_manager:
-                await self.distributed_manager.cleanup()
+                try:
+                    await self.distributed_manager.cleanup()
+                except Exception as cleanup_error:
+                    self.logger.error(f"Error during cleanup: {cleanup_error}")
 
     def _create_distributed_config(self) -> DistributedSweepConfig:
         """Create distributed sweep configuration from HSM config."""
@@ -127,18 +128,32 @@ class DistributedSweepWrapper:
         """Setup all configured compute sources."""
         distributed_config = self.hsm_config.config_data.get("distributed", {})
 
-        # Add local compute source
-        await self._add_local_compute_source(distributed_config)
+        # Count potential sources for summary
+        local_enabled = distributed_config.get("local_max_jobs", 1) > 0
+        remotes = {
+            k: v for k, v in distributed_config.get("remotes", {}).items() if v.get("enabled", True)
+        }
 
-        # Add SSH remote compute sources
-        remotes = distributed_config.get("remotes", {})
-        if remotes:
-            await self._add_ssh_compute_sources(remotes)
+        self.console.print(
+            f"[cyan]Discovering compute sources... (up to {1 if local_enabled else 0} local + {len(remotes)} remote)[/cyan]"
+        )
 
-        if len(self.distributed_manager.sources) == 0:
-            raise Exception("No compute sources configured for distributed execution")
+        try:
+            # Add local compute source
+            await self._add_local_compute_source(distributed_config)
 
-        self.logger.info(f"Configured {len(self.distributed_manager.sources)} compute sources")
+            # Add SSH remote compute sources
+            if remotes:
+                await self._add_ssh_compute_sources(remotes)
+
+            if len(self.distributed_manager.sources) == 0:
+                raise Exception("No compute sources configured for distributed execution")
+
+            self.logger.info(f"Configured {len(self.distributed_manager.sources)} compute sources")
+
+        except Exception as e:
+            self.logger.error(f"Error setting up compute sources: {e}")
+            raise Exception(f"Failed to setup compute sources: {e}")
 
     async def _add_local_compute_source(self, distributed_config: Dict[str, Any]):
         """Add local compute source."""
@@ -152,9 +167,9 @@ class DistributedSweepWrapper:
             project_dir = self.hsm_config.get_project_root() or str(Path.cwd())
 
             # Get max parallel jobs for local
-            local_max_jobs = distributed_config.get("local_max_jobs", 4)
+            local_max_jobs = distributed_config.get("local_max_jobs", 1)
             if self.hsm_config:
-                local_max_jobs = min(local_max_jobs, self.hsm_config.get_max_array_size() or 4)
+                local_max_jobs = min(local_max_jobs, self.hsm_config.get_max_array_size() or 1)
 
             local_source = LocalComputeSource(
                 name="local",
@@ -165,26 +180,22 @@ class DistributedSweepWrapper:
             )
 
             self.distributed_manager.add_compute_source(local_source)
-            self.console.print(
-                f"[green]✓ Added local compute source ({local_max_jobs} max jobs)[/green]"
-            )
+            self.console.print(f"[green]✓ Local source ready ({local_max_jobs} max jobs)[/green]")
 
         except Exception as e:
             self.logger.warning(f"Failed to add local compute source: {e}")
-            self.console.print(f"[yellow]⚠ Could not add local compute source: {e}[/yellow]")
+            self.console.print(f"[yellow]⚠ Local source unavailable: {e}[/yellow]")
+            # Don't raise - this isn't critical if we have remote sources
 
     async def _add_ssh_compute_sources(self, remotes: Dict[str, Any]):
         """Add SSH remote compute sources."""
         discovery = RemoteDiscovery(self.hsm_config.config_data)
 
+        successful_remotes = []
+        failed_remotes = []
+
         for remote_name, remote_config in remotes.items():
-            if not remote_config.get("enabled", True):
-                self.console.print(f"[dim]- Skipping disabled source: {remote_name}[/dim]")
-                continue
-
             try:
-                self.console.print(f"[cyan]Discovering SSH source: {remote_name}...[/cyan]")
-
                 # Prepare remote info for discovery
                 remote_info = remote_config.copy()
                 remote_info["name"] = remote_name
@@ -196,21 +207,28 @@ class DistributedSweepWrapper:
                     ssh_source = SSHComputeSource(name=remote_name, remote_config=discovered_config)
 
                     self.distributed_manager.add_compute_source(ssh_source)
-                    self.console.print(
-                        f"[green]✓ Added SSH source: {remote_name} ({discovered_config.max_parallel_jobs} max jobs)[/green]"
+                    successful_remotes.append(
+                        f"{remote_name} ({discovered_config.max_parallel_jobs} jobs)"
                     )
 
                 else:
                     self.logger.warning(f"Failed to discover configuration for {remote_name}")
-                    self.console.print(
-                        f"[yellow]⚠ Could not configure SSH source: {remote_name}[/yellow]"
-                    )
+                    failed_remotes.append(remote_name)
 
             except Exception as e:
                 self.logger.warning(f"Failed to add SSH source {remote_name}: {e}")
-                self.console.print(
-                    f"[yellow]⚠ Could not add SSH source {remote_name}: {e}[/yellow]"
-                )
+                failed_remotes.append(remote_name)
+
+        # Show summary instead of individual messages
+        if successful_remotes:
+            self.console.print(
+                f"[green]✓ Remote sources ready: {', '.join(successful_remotes)}[/green]"
+            )
+
+        if failed_remotes:
+            self.console.print(
+                f"[yellow]⚠ Unavailable remotes: {', '.join(failed_remotes)}[/yellow]"
+            )
 
     def get_job_status(self, job_id: str) -> str:
         """Get job status (sync wrapper)."""
@@ -233,40 +251,31 @@ class DistributedSweepWrapper:
         if not self.distributed_manager:
             return False
 
-        return asyncio.run(self._async_collect_results())
+        try:
+            return asyncio.run(self._async_collect_results())
+        except Exception as e:
+            self.logger.error(f"Error collecting distributed results: {e}")
+            return False
 
     async def _async_collect_results(self) -> bool:
         """Async result collection."""
         try:
-            # Collect results from all SSH sources
-            ssh_sources = [
-                s for s in self.distributed_manager.sources if isinstance(s, SSHComputeSource)
-            ]
+            # Results should already be normalized by the distributed manager
+            # during sweep execution, so this is just a verification
 
-            if ssh_sources:
-                self.console.print(
-                    f"[cyan]Collecting results from {len(ssh_sources)} SSH sources...[/cyan]"
+            tasks_dir = self.sweep_dir / "tasks"
+            if tasks_dir.exists():
+                task_count = len(
+                    [d for d in tasks_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
                 )
-
-                collection_tasks = []
-                for source in ssh_sources:
-                    collection_tasks.append(source.collect_results())
-
-                results = await asyncio.gather(*collection_tasks, return_exceptions=True)
-
-                success_count = sum(1 for r in results if r is True)
-                self.console.print(
-                    f"[green]✓ Results collected from {success_count}/{len(ssh_sources)} SSH sources[/green]"
-                )
-
-                return success_count > 0
-            else:
-                # Only local source, results are already local
-                self.console.print("[green]✓ Results are local (no remote sources)[/green]")
+                self.console.print(f"[green]✓ {task_count} task results available locally[/green]")
                 return True
+            else:
+                self.console.print("[yellow]⚠ No task results directory found[/yellow]")
+                return False
 
         except Exception as e:
-            self.logger.error(f"Error collecting distributed results: {e}")
+            self.logger.error(f"Error in result collection verification: {e}")
             return False
 
     def _params_to_string(self, params: Dict[str, Any]) -> str:
