@@ -6,6 +6,9 @@ from rich.console import Console
 
 from ..core.utils import setup_logging
 
+from .remote import remote  # NEW: Add remote commands
+from .distributed import distributed  # NEW: Add distributed commands
+
 console = Console()
 
 
@@ -65,67 +68,63 @@ def configure_cmd(ctx, from_file: str, output: str):
     configure_sweep(config_file, output_file, ctx.obj["console"], ctx.obj["logger"])
 
 
-@cli.command("sweep")
+@cli.command()
 @click.option(
     "--config",
     "-c",
-    type=click.Path(),
-    default="sweeps/sweep.yaml",
-    show_default=True,
-    help="Sweep configuration file",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("sweeps/sweep.yaml"),
+    help="Path to sweep configuration file",
 )
 @click.option(
     "--mode",
-    type=click.Choice(["individual", "array", "local"]),
-    default="array",
-    show_default=True,
+    type=click.Choice(
+        ["auto", "individual", "array", "local", "remote", "distributed"]
+    ),
+    default="auto",
     help="Job submission mode",
 )
-@click.option("--dry-run", "-d", is_flag=True, help="Preview jobs without submitting")
-@click.option("--count", is_flag=True, help="Count combinations and exit")
-@click.option("--max-runs", "-n", type=int, help="Maximum number of runs to submit")
 @click.option(
-    "--walltime",
-    "-w",
-    help="Job walltime (auto-detected from hsm_config.yaml or defaults to 23:59:59)",
+    "--dry-run", is_flag=True, help="Show what would be executed without running"
 )
-@click.option(
-    "--resources",
-    help="HPC resources (auto-detected from hsm_config.yaml or defaults to select=1:ncpus=4:mem=64gb)",
-)
-@click.option("--group", help="W&B group name")
+@click.option("--count-only", is_flag=True, help="Count combinations and exit")
+@click.option("--max-runs", type=int, help="Maximum number of runs to execute")
+@click.option("--walltime", help="Job walltime (overrides config default)")
+@click.option("--resources", help="Job resources (overrides config default)")
+@click.option("--group", help="W&B group name for this sweep")
 @click.option("--priority", type=int, help="Job priority")
+@click.option("--parallel-jobs", type=int, help="Maximum parallel jobs")
 @click.option(
-    "--parallel-jobs",
-    "-j",
-    type=int,
-    help="Maximum parallel jobs for local mode (default: 1)",
+    "--show-output", is_flag=True, help="Show job output in real-time (local mode only)"
+)
+@click.option("--no-progress", is_flag=True, help="Disable progress tracking")
+@click.option("--remote", help="Remote machine name for remote mode")
+@click.option(
+    "--no-verify-sync", is_flag=True, help="Skip project synchronization verification"
 )
 @click.option(
-    "--show-output",
+    "--auto-sync",
     is_flag=True,
-    help="Show job output in real-time for local mode (also saves to log files)",
-)
-@click.option(
-    "--no-progress",
-    is_flag=True,
-    help="Disable progress tracking for local mode",
+    help="Automatically sync mismatched files to remote without prompting",
 )
 @click.pass_context
 def sweep_cmd(
     ctx,
-    config: str,
-    mode: str,
-    dry_run: bool,
-    count: bool,
-    max_runs: int,
-    walltime: str,
-    resources: str,
-    group: str,
-    priority: int,
-    parallel_jobs: int,
-    show_output: bool,
-    no_progress: bool,
+    config,
+    mode,
+    dry_run,
+    count_only,
+    max_runs,
+    walltime,
+    resources,
+    group,
+    priority,
+    parallel_jobs,
+    show_output,
+    no_progress,
+    remote,
+    no_verify_sync,
+    auto_sync,
 ):
     """Run parameter sweep."""
     from .sweep import run_sweep
@@ -151,7 +150,7 @@ def sweep_cmd(
         config_path=config_path,
         mode=mode,
         dry_run=dry_run,
-        count_only=count,
+        count_only=count_only,
         max_runs=max_runs,
         walltime=walltime,
         resources=resources,
@@ -160,6 +159,9 @@ def sweep_cmd(
         parallel_jobs=parallel_jobs,
         show_output=show_output,
         no_progress=no_progress,
+        remote=remote,
+        no_verify_sync=no_verify_sync,
+        auto_sync=auto_sync,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
         hsm_config=hsm_config,
@@ -362,6 +364,32 @@ def results(ctx, sweep_id: str, output_dir: str, format: str):
     collect_results(
         sweep_id, output_path, format, ctx.obj["console"], ctx.obj["logger"]
     )
+
+
+@cli.command("collect-results")
+@click.argument("sweep_id")
+@click.option(
+    "--remote",
+    help="Remote machine name to collect from (for remote sweeps)",
+)
+@click.pass_context
+def collect_results_cmd(ctx, sweep_id: str, remote: str):
+    """Collect results from remote machines for distributed/remote sweeps."""
+    from .collect import collect_results
+
+    collect_results(
+        sweep_id=sweep_id,
+        remote=remote,
+        console=ctx.obj["console"],
+        logger=ctx.obj["logger"],
+    )
+
+
+# Remote machine management (NEW)
+cli.add_command(remote)
+
+# Distributed computing management (NEW)
+cli.add_command(distributed)
 
 
 def main():
