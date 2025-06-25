@@ -1,24 +1,28 @@
 """Sweep execution CLI commands."""
 
+from datetime import datetime
+import logging
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+import click
 from rich.console import Console
 from rich.table import Table
-import logging
-from typing import Optional, TYPE_CHECKING
-from datetime import datetime
-import sys
 
 if TYPE_CHECKING:
-    from ..core.hsm_config import HSMConfig
+    from ..core.common.config import HSMConfig
 
-from ..core.config_parser import SweepConfig
-from ..core.param_generator import ParameterGenerator
-from ..core.job_manager import JobManager
-from ..core.utils import create_sweep_id
-from ..core.remote_discovery import RemoteDiscovery
-from ..core.remote_job_manager import RemoteJobManager
-from ..core.distributed_sweep_wrapper import create_distributed_sweep_wrapper
 import asyncio
+
+from ..core.common.config import HSMConfig
+from ..core.common.config_parser import SweepConfig
+from ..core.common.param_generator import ParameterGenerator
+from ..core.common.utils import create_sweep_id
+from ..core.distributed.wrapper import create_distributed_sweep_wrapper
+from ..core.hpc.hpc_base import HPCJobManager
+from ..core.remote.discovery import RemoteDiscovery
+from ..core.remote.manager import RemoteJobManager
+from .common import common_options
 
 
 class RemoteJobManagerWrapper:
@@ -41,14 +45,10 @@ class RemoteJobManagerWrapper:
         """Submit a complete sweep to remote machine."""
         # Run async setup and job submission
         return asyncio.run(
-            self._async_submit_sweep(
-                param_combinations, mode, sweep_dir, sweep_id, wandb_group
-            )
+            self._async_submit_sweep(param_combinations, mode, sweep_dir, sweep_id, wandb_group)
         )
 
-    async def _async_submit_sweep(
-        self, param_combinations, mode, sweep_dir, sweep_id, wandb_group
-    ):
+    async def _async_submit_sweep(self, param_combinations, mode, sweep_dir, sweep_id, wandb_group):
         """Async version of submit_sweep."""
         # Setup remote environment first with sync verification
         setup_success = await self.remote_manager.setup_remote_environment(
@@ -58,9 +58,7 @@ class RemoteJobManagerWrapper:
             raise Exception("Failed to setup remote environment")
 
         # Submit jobs with parallel control and wait for completion
-        job_ids = await self.remote_manager.submit_sweep(
-            param_combinations, sweep_id, wandb_group
-        )
+        job_ids = await self.remote_manager.submit_sweep(param_combinations, sweep_id, wandb_group)
 
         # Wait for all jobs to complete before returning
         await self.remote_manager.wait_for_all_jobs()
@@ -97,9 +95,7 @@ def create_remote_job_manager_wrapper(
         remotes = distributed_config.get("remotes", {})
 
         if remote_name not in remotes:
-            console.print(
-                f"[red]Error: Remote '{remote_name}' not found in hsm_config.yaml[/red]"
-            )
+            console.print(f"[red]Error: Remote '{remote_name}' not found in hsm_config.yaml[/red]")
             console.print("Available remotes:")
             for name in remotes.keys():
                 console.print(f"  - {name}")
@@ -107,9 +103,7 @@ def create_remote_job_manager_wrapper(
 
         # Discover remote configuration
         logger.info(f"Discovering configuration for remote: {remote_name}")
-        console.print(
-            f"[cyan]Discovering configuration for remote: {remote_name}[/cyan]"
-        )
+        console.print(f"[cyan]Discovering configuration for remote: {remote_name}[/cyan]")
 
         # Run discovery
         discovery = RemoteDiscovery(hsm_config.config_data)
@@ -123,12 +117,10 @@ def create_remote_job_manager_wrapper(
             console.print(
                 f"[red]Error: Failed to discover configuration for remote '{remote_name}'[/red]"
             )
-            console.print(
-                "Make sure the remote machine is accessible and has hsm_config.yaml"
-            )
+            console.print("Make sure the remote machine is accessible and has hsm_config.yaml")
             return None
 
-        console.print(f"[green]✓ Remote configuration discovered successfully[/green]")
+        console.print("[green]✓ Remote configuration discovered successfully[/green]")
 
         # Use the provided sweep directory instead of creating a new one
         # Just ensure it exists
@@ -148,10 +140,10 @@ def create_remote_job_manager_wrapper(
 
         console.print(f"[cyan]Max parallel jobs on remote: {max_parallel_jobs}[/cyan]")
         if not verify_sync:
-            console.print(f"[yellow]⚠ Project sync verification disabled[/yellow]")
+            console.print("[yellow]⚠ Project sync verification disabled[/yellow]")
         if auto_sync:
             console.print(
-                f"[cyan]Auto-sync enabled: mismatched files will be automatically synced[/cyan]"
+                "[cyan]Auto-sync enabled: mismatched files will be automatically synced[/cyan]"
             )
 
         # Create RemoteJobManager with the provided sweep directory
@@ -195,7 +187,7 @@ def run_sweep(
 ):
     """Run parameter sweep."""
 
-    console.print(f"[bold blue]HPC Sweep Manager[/bold blue]")
+    console.print("[bold blue]HPC Sweep Manager[/bold blue]")
     console.print(f"Config: {config_path}")
     console.print(f"Mode: {mode}")
 
@@ -216,9 +208,7 @@ def run_sweep(
         if hsm_config_path:
             console.print(f"[green]Using HSM config: {hsm_config_path}[/green]")
     else:
-        console.print(
-            "[yellow]No hsm_config.yaml found - using default values[/yellow]"
-        )
+        console.print("[yellow]No hsm_config.yaml found - using default values[/yellow]")
 
     try:
         # Load sweep configuration
@@ -238,9 +228,7 @@ def run_sweep(
 
         if count_only:
             total_combinations = generator.count_combinations()
-            console.print(
-                f"[green]Total parameter combinations: {total_combinations}[/green]"
-            )
+            console.print(f"[green]Total parameter combinations: {total_combinations}[/green]")
             return
 
         combinations = generator.generate_combinations(max_runs)
@@ -264,27 +252,23 @@ def run_sweep(
         console.print(f"\n[bold]Total combinations to run: {len(combinations)}[/bold]")
 
         # Create job manager with project configuration (needed for both dry run and actual run)
-        from ..core.path_detector import PathDetector
+        from ..core.common.path_detector import PathDetector
 
         detector = PathDetector()
 
         # Try to get paths from HSM config first, then auto-detect
         if hsm_config:
-            python_path = (
-                hsm_config.get_default_python_path() or detector.detect_python_path()
-            )
-            script_path = (
-                hsm_config.get_default_script_path() or detector.detect_train_script()
-            )
+            python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
+            script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
             project_dir = hsm_config.get_project_root() or str(Path.cwd())
         else:
             python_path = detector.detect_python_path()
             script_path = detector.detect_train_script()
             project_dir = str(Path.cwd())
 
-            # Create appropriate job manager based on mode
+        # Create appropriate job manager based on mode
         if mode == "local":
-            from ..core.job_manager import LocalJobManager
+            from ..core.local.manager import LocalJobManager
 
             # For local mode, determine parallel jobs from CLI, HSM config, or default
             max_parallel_jobs = 1
@@ -308,19 +292,13 @@ def run_sweep(
         elif mode == "remote":
             # Remote job execution on a single machine
             if not hsm_config:
-                console.print(
-                    "[red]Error: hsm_config.yaml required for remote mode[/red]"
-                )
+                console.print("[red]Error: hsm_config.yaml required for remote mode[/red]")
                 return
 
             if not remote:
-                console.print(
-                    "[red]Error: --remote MACHINE_NAME required for remote mode[/red]"
-                )
+                console.print("[red]Error: --remote MACHINE_NAME required for remote mode[/red]")
                 console.print("Available remotes:")
-                remotes = hsm_config.config_data.get("distributed", {}).get(
-                    "remotes", {}
-                )
+                remotes = hsm_config.config_data.get("distributed", {}).get("remotes", {})
                 for name in remotes.keys():
                     console.print(f"  - {name}")
                 return
@@ -330,26 +308,65 @@ def run_sweep(
         elif mode == "distributed":
             # Distributed job execution across multiple sources
             if not hsm_config:
-                console.print(
-                    "[red]Error: hsm_config.yaml required for distributed mode[/red]"
-                )
+                console.print("[red]Error: hsm_config.yaml required for distributed mode[/red]")
                 return
 
             # Distributed job manager will be created later with proper sweep directory
             job_manager = None  # Will be created after sweep directory is set up
+        elif mode == "auto" or mode in ["individual", "array"]:
+            # Auto-detect HPC system, fall back to local if none found
+            try:
+                job_manager = HPCJobManager.auto_detect(
+                    walltime=walltime,
+                    resources=resources,
+                    python_path=python_path,
+                    script_path=script_path,
+                    project_dir=project_dir,
+                )
+                # Update mode to reflect what was detected
+                if mode == "auto":
+                    mode = "array"  # Default to array mode for HPC systems
+                    console.print(f"[green]Auto-detected HPC system, using {mode} mode[/green]")
+            except RuntimeError as e:
+                # No HPC system found, fall back to local mode
+                if mode == "auto":
+                    console.print(
+                        "[yellow]No HPC system detected, falling back to local mode[/yellow]"
+                    )
+                    mode = "local"
+
+                    from ..core.local.manager import LocalJobManager
+
+                    # For local mode, determine parallel jobs from CLI, HSM config, or default
+                    max_parallel_jobs = 4  # Better default for auto-detected local
+                    if parallel_jobs is not None:
+                        max_parallel_jobs = parallel_jobs
+                    elif hsm_config:
+                        max_parallel_jobs = hsm_config.get_max_array_size() or 4
+                        # For local execution, limit to reasonable number
+                        max_parallel_jobs = min(max_parallel_jobs, 8)
+
+                    job_manager = LocalJobManager(
+                        walltime=walltime,
+                        resources=resources,
+                        python_path=python_path,
+                        script_path=script_path,
+                        project_dir=project_dir,
+                        max_parallel_jobs=max_parallel_jobs,
+                        show_progress=not no_progress,
+                        show_output=show_output,
+                    )
+                else:
+                    # User explicitly requested array/individual mode but no HPC found
+                    console.print(f"[red]Error: {e}[/red]")
+                    console.print("[yellow]Consider using --mode local or --mode auto[/yellow]")
+                    return
         else:
-            job_manager = JobManager.auto_detect(
-                walltime=walltime,
-                resources=resources,
-                python_path=python_path,
-                script_path=script_path,
-                project_dir=project_dir,
-            )
+            console.print(f"[red]Error: Unknown mode '{mode}'[/red]")
+            return
 
         if job_manager:
-            console.print(
-                f"Detected/Selected execution system: {job_manager.system_type}"
-            )
+            console.print(f"Detected/Selected execution system: {job_manager.system_type}")
 
         if dry_run:
             console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
@@ -357,19 +374,15 @@ def run_sweep(
             # Show job configuration
             console.print("\n[bold]Job Configuration:[/bold]")
             if mode == "remote":
-                console.print(f"  Execution System: REMOTE")
+                console.print("  Execution System: REMOTE")
                 console.print(f"  Mode: {mode} (remote execution on {remote})")
                 console.print(
-                    f"  Note: Remote configuration will be discovered during actual execution"
+                    "  Note: Remote configuration will be discovered during actual execution"
                 )
             elif mode == "distributed":
-                console.print(f"  Execution System: DISTRIBUTED")
-                console.print(
-                    f"  Mode: {mode} (distributed execution across multiple sources)"
-                )
-                console.print(
-                    f"  Note: Compute sources will be discovered during actual execution"
-                )
+                console.print("  Execution System: DISTRIBUTED")
+                console.print(f"  Mode: {mode} (distributed execution across multiple sources)")
+                console.print("  Note: Compute sources will be discovered during actual execution")
             elif job_manager:
                 console.print(f"  Execution System: {job_manager.system_type.upper()}")
                 if mode == "local":
@@ -416,13 +429,9 @@ def run_sweep(
                     params_str = " ".join(param_strs)
 
                 # Use sweep_id as fallback for wandb group (consistent with actual execution)
-                effective_group = (
-                    group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                )
+                effective_group = group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 wandb_group_str = f"wandb.group={effective_group}"
-                full_command = (
-                    f"{python_path} {script_path} {params_str} {wandb_group_str}"
-                )
+                full_command = f"{python_path} {script_path} {params_str} {wandb_group_str}"
 
                 console.print(f"     [dim]Command: {full_command}[/dim]")
                 console.print()  # Add spacing between combinations
@@ -464,9 +473,7 @@ def run_sweep(
                     sweep_dir=sweep_dir,
                     show_progress=not no_progress,
                 )
-                console.print(
-                    f"[green]✓ Distributed job manager created successfully[/green]"
-                )
+                console.print("[green]✓ Distributed job manager created successfully[/green]")
             except Exception as e:
                 console.print(f"[red]Error creating distributed job manager: {e}[/red]")
                 return
@@ -502,9 +509,7 @@ def run_sweep(
         shutil.copy2(config_path, config_backup)
 
         # Submit jobs
-        console.print(
-            f"\n[bold]Submitting {len(combinations)} jobs in {mode} mode...[/bold]"
-        )
+        console.print(f"\n[bold]Submitting {len(combinations)} jobs in {mode} mode...[/bold]")
 
         try:
             job_ids = job_manager.submit_sweep(
@@ -517,17 +522,15 @@ def run_sweep(
                 logs_dir=logs_dir,
             )
 
-            console.print(
-                f"\n[green]Successfully submitted {len(job_ids)} job(s):[/green]"
-            )
+            console.print(f"\n[green]Successfully submitted {len(job_ids)} job(s):[/green]")
             for job_id in job_ids:
                 console.print(f"  - {job_id}")
 
             # Create submission summary
             summary_file = sweep_dir / "submission_summary.txt"
             with open(summary_file, "w") as f:
-                f.write(f"Sweep Submission Summary\n")
-                f.write(f"========================\n")
+                f.write("Sweep Submission Summary\n")
+                f.write("========================\n")
                 f.write(f"Sweep ID: {sweep_id}\n")
                 f.write(f"Submission Time: {datetime.now()}\n")
                 f.write(f"Mode: {mode}\n")
@@ -545,9 +548,7 @@ def run_sweep(
 
             # For remote mode, collect results after job completion
             if mode == "remote" and hasattr(job_manager, "collect_results"):
-                console.print(
-                    f"\n[cyan]Collecting results from remote machine...[/cyan]"
-                )
+                console.print("\n[cyan]Collecting results from remote machine...[/cyan]")
                 try:
                     success = job_manager.collect_results()
                     if success:
@@ -556,7 +557,7 @@ def run_sweep(
                         )
                     else:
                         console.print(
-                            f"[yellow]⚠ Result collection completed with warnings[/yellow]"
+                            "[yellow]⚠ Result collection completed with warnings[/yellow]"
                         )
                 except Exception as e:
                     console.print(f"[red]Error collecting results: {e}[/red]")
@@ -564,9 +565,7 @@ def run_sweep(
 
             # For distributed mode, collect results after job completion
             elif mode == "distributed" and hasattr(job_manager, "collect_results"):
-                console.print(
-                    f"\n[cyan]Collecting results from distributed sources...[/cyan]"
-                )
+                console.print("\n[cyan]Collecting results from distributed sources...[/cyan]")
                 try:
                     success = job_manager.collect_results()
                     if success:
@@ -575,7 +574,7 @@ def run_sweep(
                         )
                     else:
                         console.print(
-                            f"[yellow]⚠ Result collection completed with warnings[/yellow]"
+                            "[yellow]⚠ Result collection completed with warnings[/yellow]"
                         )
                 except Exception as e:
                     console.print(f"[red]Error collecting results: {e}[/red]")
@@ -592,3 +591,113 @@ def run_sweep(
         console.print(f"[red]Error: {e}[/red]")
         logger.error(f"Sweep execution failed: {e}")
         raise
+
+
+# CLI command - make this a direct command instead of a group
+@click.command("sweep")
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("sweeps/sweep.yaml"),
+    help="Path to sweep configuration file",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "individual", "array", "local", "remote", "distributed"]),
+    default="auto",
+    help="Job submission mode",
+)
+@click.option("--dry-run", "-d", is_flag=True, help="Show what would be executed without running")
+@click.option("--count-only", is_flag=True, help="Count combinations and exit")
+@click.option("--max-runs", type=int, help="Maximum number of runs to execute")
+@click.option("--walltime", help="Job walltime (overrides config default)")
+@click.option("--resources", help="Job resources (overrides config default)")
+@click.option("--group", help="W&B group name for this sweep")
+@click.option("--priority", type=int, help="Job priority")
+@click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
+@click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
+@click.option("--no-progress", is_flag=True, help="Disable progress tracking")
+@click.option("--remote", help="Remote machine name for remote mode")
+@click.option("--no-verify-sync", is_flag=True, help="Skip project synchronization verification")
+@click.option(
+    "--auto-sync",
+    is_flag=True,
+    help="Automatically sync mismatched files to remote without prompting",
+)
+@common_options
+@click.pass_context
+def sweep_cmd(
+    ctx,
+    config,
+    mode,
+    dry_run,
+    count_only,
+    max_runs,
+    walltime,
+    resources,
+    group,
+    priority,
+    parallel_jobs,
+    show_output,
+    no_progress,
+    remote,
+    no_verify_sync,
+    auto_sync,
+    verbose,
+    quiet,
+):
+    """Run parameter sweep."""
+    # Load HSM config for defaults
+    hsm_config = HSMConfig.load()
+
+    # Use HSM config defaults if not provided via CLI
+    if walltime is None:
+        walltime = hsm_config.get_default_walltime() if hsm_config else "23:59:59"
+
+    if resources is None:
+        resources = (
+            hsm_config.get_default_resources() if hsm_config else "select=1:ncpus=4:mem=64gb"
+        )
+
+    config_path = Path(config)
+
+    run_sweep(
+        config_path=config_path,
+        mode=mode,
+        dry_run=dry_run,
+        count_only=count_only,
+        max_runs=max_runs,
+        walltime=walltime,
+        resources=resources,
+        group=group,
+        priority=priority,
+        parallel_jobs=parallel_jobs,
+        show_output=show_output,
+        no_progress=no_progress,
+        remote=remote,
+        no_verify_sync=no_verify_sync,
+        auto_sync=auto_sync,
+        console=ctx.obj["console"],
+        logger=ctx.obj["logger"],
+        hsm_config=hsm_config,
+    )
+
+
+# Keep the old group-based interface for backwards compatibility, but hidden
+@click.group(hidden=True)
+def sweep():
+    """Run and manage parameter sweeps."""
+    pass
+
+
+@sweep.command("run", hidden=True)
+@click.pass_context
+def run_cmd(ctx):
+    """Run parameter sweep (legacy interface)."""
+    # This could redirect to the main sweep command if needed for backwards compatibility
+    ctx.invoke(sweep_cmd)
+
+
+if __name__ == "__main__":
+    sweep()

@@ -1,17 +1,20 @@
 """Monitoring CLI commands."""
 
+from datetime import datetime, timedelta
+import logging
+import os
+from pathlib import Path
 import subprocess
 import time
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional, List, Dict
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-import logging
+from typing import Dict, List, Optional
 
-from ..core.utils import format_duration
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from ..core.common.utils import format_duration
+from .common import common_options
 
 
 class SweepMonitor:
@@ -62,7 +65,7 @@ class SweepMonitor:
             return None
 
         try:
-            with open(summary_file, "r") as f:
+            with open(summary_file) as f:
                 content = f.read()
 
             # Parse the summary file
@@ -147,9 +150,7 @@ class SweepMonitor:
                         )
 
                         if result.returncode == 0:
-                            job_details = self._parse_array_job_output(
-                                result.stdout, job_id
-                            )
+                            job_details = self._parse_array_job_output(result.stdout, job_id)
                             status_info["details"][job_id] = job_details
 
                             # Count array job sub-job states
@@ -193,9 +194,7 @@ class SweepMonitor:
                         )
 
                         if result.returncode == 0:
-                            job_details = self._parse_regular_job_output(
-                                result.stdout, job_id
-                            )
+                            job_details = self._parse_regular_job_output(result.stdout, job_id)
                             status_info["details"][job_id] = job_details
 
                             # Count job states
@@ -216,9 +215,7 @@ class SweepMonitor:
                 except subprocess.TimeoutExpired:
                     self.logger.warning(f"Timeout querying job {job_id}")
                     status_info["unknown"] += 1
-                    status_info["details"][job_id] = [
-                        {"state": "timeout", "job_id": job_id}
-                    ]
+                    status_info["details"][job_id] = [{"state": "timeout", "job_id": job_id}]
 
         except Exception as e:
             self.logger.error(f"Error getting PBS job status: {e}")
@@ -382,9 +379,7 @@ class SweepMonitor:
             # Progress bar
             if total_jobs > 0:
                 completed_pct = (status_info["completed"] / total_jobs) * 100
-                progress_str = (
-                    f"{status_info['completed']}/{total_jobs} ({completed_pct:.1f}%)"
-                )
+                progress_str = f"{status_info['completed']}/{total_jobs} ({completed_pct:.1f}%)"
             else:
                 progress_str = "N/A"
 
@@ -457,7 +452,7 @@ def monitor_sweep(
 
         sweep_info = monitor._load_sweep_info(sweep_dir)
         if not sweep_info:
-            console.print(f"[red]Error: Could not load sweep information[/red]")
+            console.print("[red]Error: Could not load sweep information[/red]")
             return
 
         if watch:
@@ -494,9 +489,7 @@ def monitor_sweep(
         _display_all_sweeps_status(monitor, console, detailed)
 
 
-def _display_single_sweep_status(
-    sweep_info: Dict, monitor: SweepMonitor, console: Console
-):
+def _display_single_sweep_status(sweep_info: Dict, monitor: SweepMonitor, console: Console):
     """Display detailed status for a single sweep."""
     console.print(f"\n[bold blue]Sweep Status: {sweep_info['sweep_id']}[/bold blue]")
 
@@ -580,9 +573,7 @@ def _display_single_sweep_status(
                     elif state.lower() == "b":
                         state_display = f"[magenta]{state}[/magenta] (Array Begun)"
                     elif state.lower() == "not_found":
-                        state_display = (
-                            f"[blue]{state}[/blue] (Finished - not in PBS queue)"
-                        )
+                        state_display = f"[blue]{state}[/blue] (Finished - not in PBS queue)"
                     else:
                         state_display = state
 
@@ -590,9 +581,7 @@ def _display_single_sweep_status(
 
                 console.print(array_table)
             else:
-                console.print(
-                    "[yellow]No detailed sub-job information available[/yellow]"
-                )
+                console.print("[yellow]No detailed sub-job information available[/yellow]")
 
     # Progress bar
     if total_jobs > 0:
@@ -608,9 +597,7 @@ def _display_single_sweep_status(
         console.print(f"[green]{progress_bar}[/green] {progress_pct:.1f}%")
 
 
-def _display_all_sweeps_status(
-    monitor: SweepMonitor, console: Console, detailed: bool = False
-):
+def _display_all_sweeps_status(monitor: SweepMonitor, console: Console, detailed: bool = False):
     """Display status for all recent sweeps."""
     console.print("\n[bold blue]Recent Sweeps Monitor[/bold blue]")
 
@@ -631,9 +618,7 @@ def _display_all_sweeps_status(
         console.print(
             f"\n[dim]Found {len(sweeps)} recent sweeps. Last updated: {datetime.now().strftime('%H:%M:%S')}[/dim]"
         )
-        console.print(
-            "[dim]Use --detailed flag to see array job subjob breakdown[/dim]"
-        )
+        console.print("[dim]Use --detailed flag to see array job subjob breakdown[/dim]")
 
 
 def show_status(console: Console, logger: logging.Logger):
@@ -656,7 +641,7 @@ def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.L
 
     sweep_info = monitor._load_sweep_info(sweep_dir)
     if not sweep_info:
-        console.print(f"[red]Error: Could not load sweep information[/red]")
+        console.print("[red]Error: Could not load sweep information[/red]")
         return
 
     # Determine if this is a local sweep
@@ -666,22 +651,16 @@ def cancel_sweep(sweep_id: str, force: bool, console: Console, logger: logging.L
     )
 
     if not force:
-        response = console.input(
-            f"Are you sure you want to cancel sweep {sweep_id}? (y/N): "
-        )
+        response = console.input(f"Are you sure you want to cancel sweep {sweep_id}? (y/N): ")
         if response.lower() != "y":
             console.print("[yellow]Cancellation aborted.[/yellow]")
             return
 
     if is_local_sweep:
-        console.print(
-            "[blue]Detected local sweep, attempting to cancel local jobs...[/blue]"
-        )
+        console.print("[blue]Detected local sweep, attempting to cancel local jobs...[/blue]")
         _cancel_local_sweep(sweep_info, sweep_dir, console, logger)
     else:
-        console.print(
-            "[blue]Detected HPC sweep, attempting to cancel HPC jobs...[/blue]"
-        )
+        console.print("[blue]Detected HPC sweep, attempting to cancel HPC jobs...[/blue]")
         _cancel_hpc_sweep(sweep_info, console, logger)
 
 
@@ -689,7 +668,6 @@ def _cancel_local_sweep(
     sweep_info: dict, sweep_dir: Path, console: Console, logger: logging.Logger
 ):
     """Cancel a local sweep by looking for running processes."""
-    from ..core.job_manager import LocalJobManager
 
     # Try to find and cancel running local processes
     # First, check if we can find a running LocalJobManager instance
@@ -714,15 +692,16 @@ def _cancel_local_sweep(
 
             try:
                 # Read task info to get process information
-                with open(task_info_file, "r") as f:
+                with open(task_info_file) as f:
                     content = f.read()
 
                 # Check if task is still running
                 if "Status: RUNNING" in content or "Status: CANCELLED" not in content:
                     # Try to find and kill the process
                     # Look for Python processes running the train script
-                    import psutil
                     import re
+
+                    import psutil
 
                     # Extract job ID from task info
                     job_id_match = re.search(r"Job ID: (local_\w+_\d+)", content)
@@ -733,10 +712,7 @@ def _cancel_local_sweep(
                         killed = False
                         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                             try:
-                                if (
-                                    proc.info["name"]
-                                    and "python" in proc.info["name"].lower()
-                                ):
+                                if proc.info["name"] and "python" in proc.info["name"].lower():
                                     cmdline = " ".join(proc.info["cmdline"] or [])
                                     # Look for processes that might be this job
                                     if (
@@ -770,7 +746,7 @@ def _cancel_local_sweep(
                             cancelled_count += 1
                             # Update task status
                             with open(task_info_file, "a") as f:
-                                f.write(f"Status: CANCELLED\n")
+                                f.write("Status: CANCELLED\n")
                                 f.write(f"End Time: {datetime.now()}\n")
                         else:
                             # Process might have finished on its own
@@ -785,7 +761,7 @@ def _cancel_local_sweep(
     # Report results
     total_tasks = cancelled_count + failed_count + not_found_count
     if total_tasks > 0:
-        console.print(f"[green]Local sweep cancellation summary:[/green]")
+        console.print("[green]Local sweep cancellation summary:[/green]")
         console.print(f"  - Cancelled: {cancelled_count}")
         console.print(f"  - Not found/already finished: {not_found_count}")
         if failed_count > 0:
@@ -817,12 +793,8 @@ def _kill_processes_by_pattern(sweep_id: str, console: Console) -> int:
                 if proc.info["name"] and "python" in proc.info["name"].lower():
                     cmdline = " ".join(proc.info["cmdline"] or [])
                     # Look for processes that contain the sweep ID
-                    if sweep_id in cmdline and (
-                        "train" in cmdline or "wandb.group" in cmdline
-                    ):
-                        console.print(
-                            f"  Killing process {proc.pid}: {proc.info['name']}"
-                        )
+                    if sweep_id in cmdline and ("train" in cmdline or "wandb.group" in cmdline):
+                        console.print(f"  Killing process {proc.pid}: {proc.info['name']}")
                         try:
                             parent = psutil.Process(proc.pid)
                             children = parent.children(recursive=True)
@@ -852,9 +824,7 @@ def _cancel_hpc_sweep(sweep_info: dict, console: Console, logger: logging.Logger
     for job_id in sweep_info["job_ids"]:
         try:
             # Try PBS first, then Slurm
-            result = subprocess.run(
-                ["qdel", job_id], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["qdel", job_id], capture_output=True, text=True, timeout=10)
 
             if result.returncode == 0:
                 cancelled_jobs.append(job_id)
@@ -875,9 +845,7 @@ def _cancel_hpc_sweep(sweep_info: dict, console: Console, logger: logging.Logger
 
     # Report results
     if cancelled_jobs:
-        console.print(
-            f"[green]Successfully cancelled {len(cancelled_jobs)} job(s):[/green]"
-        )
+        console.print(f"[green]Successfully cancelled {len(cancelled_jobs)} job(s):[/green]")
         for job_id in cancelled_jobs:
             console.print(f"  - {job_id}")
 
@@ -927,16 +895,12 @@ def show_recent_sweeps(
         try:
             while True:
                 console.clear()
-                console.print(
-                    f"\n[bold blue]Recent Sweeps (Last {days} days)[/bold blue]"
-                )
+                console.print(f"\n[bold blue]Recent Sweeps (Last {days} days)[/bold blue]")
 
                 sweeps = monitor.discover_recent_sweeps()
 
                 if not sweeps:
-                    console.print(
-                        f"[yellow]No sweeps found in the last {days} days.[/yellow]"
-                    )
+                    console.print(f"[yellow]No sweeps found in the last {days} days.[/yellow]")
                 else:
                     table = monitor.create_status_table(sweeps, detailed=False)
                     console.print(table)
@@ -960,9 +924,7 @@ def show_recent_sweeps(
             console.print(f"\n[dim]Found {len(sweeps)} sweeps.[/dim]")
 
 
-def show_queue_status(
-    watch: bool, refresh: int, console: Console, logger: logging.Logger
-):
+def show_queue_status(watch: bool, refresh: int, console: Console, logger: logging.Logger):
     """Show current queue status for all user jobs."""
 
     if watch:
@@ -1081,9 +1043,7 @@ def _display_queue_status(console: Console, logger: logging.Logger):
     except subprocess.TimeoutExpired:
         console.print("[red]Timeout while querying queue status[/red]")
     except FileNotFoundError:
-        console.print(
-            "[red]qstat command not found. Are you on an HPC system with PBS?[/red]"
-        )
+        console.print("[red]qstat command not found. Are you on an HPC system with PBS?[/red]")
     except Exception as e:
         console.print(f"[red]Error getting queue status: {e}[/red]")
         logger.error(f"Queue status error: {e}")
@@ -1112,7 +1072,7 @@ def delete_sweep_jobs(
 
     sweep_info = monitor._load_sweep_info(sweep_dir)
     if not sweep_info:
-        console.print(f"[red]Error: Could not load sweep information[/red]")
+        console.print("[red]Error: Could not load sweep information[/red]")
         return
 
     # Get detailed job status
@@ -1187,9 +1147,7 @@ def delete_sweep_jobs(
 
     for job in jobs_to_delete:
         state_color = _get_state_color(job["state"])
-        job_type = (
-            "Array SubJob" if job["is_array_job"] and job["array_index"] else "Regular"
-        )
+        job_type = "Array SubJob" if job["is_array_job"] and job["array_index"] else "Regular"
         if job["is_array_job"] and not job["array_index"]:
             job_type = "Array Parent"
 
@@ -1248,36 +1206,24 @@ def delete_sweep_jobs(
 
             if result.returncode == 0:
                 # Mark all related jobs as deleted
-                related_jobs = [
-                    j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
-                ]
+                related_jobs = [j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id]
                 deleted_jobs.extend(related_jobs)
-                console.print(
-                    f"[green]Deleted entire array job: {parent_job_id}[/green]"
-                )
+                console.print(f"[green]Deleted entire array job: {parent_job_id}[/green]")
             else:
                 # Mark all related jobs as failed
-                related_jobs = [
-                    j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
-                ]
+                related_jobs = [j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id]
                 for job in related_jobs:
-                    failed_jobs.append(
-                        (job["job_id"], f"Array deletion failed: {result.stderr}")
-                    )
+                    failed_jobs.append((job["job_id"], f"Array deletion failed: {result.stderr}"))
                 console.print(
                     f"[red]Failed to delete array job {parent_job_id}: {result.stderr}[/red]"
                 )
 
         except subprocess.TimeoutExpired:
-            related_jobs = [
-                j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
-            ]
+            related_jobs = [j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id]
             for job in related_jobs:
                 failed_jobs.append((job["job_id"], "Timeout"))
         except Exception as e:
-            related_jobs = [
-                j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id
-            ]
+            related_jobs = [j for j in jobs_to_delete if j["parent_job_id"] == parent_job_id]
             for job in related_jobs:
                 failed_jobs.append((job["job_id"], str(e)))
 
@@ -1292,9 +1238,7 @@ def delete_sweep_jobs(
 
                 if result.returncode == 0:
                     deleted_jobs.append(job)
-                    console.print(
-                        f"[green]Deleted array subjob: {job['job_id']}[/green]"
-                    )
+                    console.print(f"[green]Deleted array subjob: {job['job_id']}[/green]")
                 else:
                     failed_jobs.append((job["job_id"], result.stderr))
                     console.print(
@@ -1325,9 +1269,7 @@ def delete_sweep_jobs(
 
     # Report results
     if deleted_jobs:
-        console.print(
-            f"\n[green]Successfully deleted {len(deleted_jobs)} job(s):[/green]"
-        )
+        console.print(f"\n[green]Successfully deleted {len(deleted_jobs)} job(s):[/green]")
 
         # Group results for better reporting
         array_deletions = len(array_parents_to_delete)
@@ -1447,16 +1389,12 @@ def cleanup_old_sweeps(
             state = job["state"]
             state_counts[state] = state_counts.get(state, 0) + 1
 
-        state_summary = ", ".join(
-            [f"{count} {state}" for state, count in state_counts.items()]
-        )
+        state_summary = ", ".join([f"{count} {state}" for state, count in state_counts.items()])
 
         table.add_row(sweep["sweep_id"], age_str, f"{len(jobs)} ({state_summary})")
 
     console.print(table)
-    console.print(
-        f"\n[bold red]Total jobs to delete: {total_jobs_to_delete}[/bold red]"
-    )
+    console.print(f"\n[bold red]Total jobs to delete: {total_jobs_to_delete}[/bold red]")
 
     if dry_run:
         console.print("\n[yellow]DRY RUN: No jobs were actually deleted.[/yellow]")
@@ -1515,7 +1453,7 @@ def cleanup_old_sweeps(
             except Exception:
                 total_failed += len(job_group)
 
-    console.print(f"\n[green]Cleanup completed![/green]")
+    console.print("\n[green]Cleanup completed![/green]")
     console.print(f"[green]Successfully deleted: {total_deleted} jobs[/green]")
     if total_failed > 0:
         console.print(f"[red]Failed to delete: {total_failed} jobs[/red]")
@@ -1540,3 +1478,220 @@ def _get_state_color(state: str) -> str:
         return "blue"  # Same as completed since they're finished
     else:
         return "white"
+
+
+# CLI command group structure
+@click.group()
+def monitor():
+    """Monitor and manage sweep execution."""
+    pass
+
+
+@monitor.command("watch")
+@click.argument("sweep_id", required=False)
+@click.option(
+    "--watch",
+    "-w",
+    is_flag=True,
+    default=True,
+    help="Watch mode - continuously update status",
+)
+@click.option(
+    "--refresh",
+    "-r",
+    type=int,
+    default=30,
+    help="Refresh interval in seconds for watch mode",
+)
+@click.option(
+    "--detailed",
+    "-d",
+    is_flag=True,
+    help="Show detailed array job subjob status breakdown",
+)
+@click.option(
+    "--days",
+    type=int,
+    default=14,
+    help="Show sweeps from last N days",
+)
+@common_options
+@click.pass_context
+def watch_cmd(
+    ctx,
+    sweep_id: str,
+    watch: bool,
+    refresh: int,
+    detailed: bool,
+    days: int,
+    verbose: bool,
+    quiet: bool,
+):
+    """Monitor sweep progress."""
+    monitor_sweep(sweep_id, watch, refresh, detailed, days, ctx.obj["console"], ctx.obj["logger"])
+
+
+@monitor.command("status")
+@common_options
+@click.pass_context
+def status_cmd(ctx, verbose: bool, quiet: bool):
+    """Show status of all active sweeps."""
+    show_status(ctx.obj["console"], ctx.obj["logger"])
+
+
+@monitor.command("recent")
+@click.option("--days", "-d", type=int, default=7, help="Show sweeps from last N days")
+@click.option("--watch", "-w", is_flag=True, help="Watch mode - continuously update status")
+@click.option(
+    "--refresh",
+    "-r",
+    type=int,
+    default=60,
+    help="Refresh interval in seconds for watch mode",
+)
+@common_options
+@click.pass_context
+def recent_cmd(ctx, days: int, watch: bool, refresh: int, verbose: bool, quiet: bool):
+    """Show recent sweeps from the last N days."""
+    show_recent_sweeps(days, watch, refresh, ctx.obj["console"], ctx.obj["logger"])
+
+
+@monitor.command("queue")
+@click.option("--watch", "-w", is_flag=True, help="Watch mode - continuously update status")
+@click.option(
+    "--refresh",
+    "-r",
+    type=int,
+    default=30,
+    help="Refresh interval in seconds for watch mode",
+)
+@common_options
+@click.pass_context
+def queue_cmd(ctx, watch: bool, refresh: int, verbose: bool, quiet: bool):
+    """Show current queue status for all user jobs."""
+    show_queue_status(watch, refresh, ctx.obj["console"], ctx.obj["logger"])
+
+
+@monitor.command("cancel")
+@click.argument("sweep_id")
+@click.option("--force", "-f", is_flag=True, help="Force cancellation without confirmation")
+@common_options
+@click.pass_context
+def cancel_cmd(ctx, sweep_id: str, force: bool, verbose: bool, quiet: bool):
+    """Cancel a running sweep."""
+    cancel_sweep(sweep_id, force, ctx.obj["console"], ctx.obj["logger"])
+
+
+@monitor.command("delete-jobs")
+@click.argument("sweep_id")
+@click.option("--pattern", "-p", help="Filter jobs by name pattern (e.g., 'job_001', '*_002')")
+@click.option("--state", "-s", help="Filter jobs by state (e.g., 'R', 'Q', 'H')")
+@click.option(
+    "--dry-run",
+    "-d",
+    is_flag=True,
+    help="Show what would be deleted without actually deleting",
+)
+@click.option("--force", "-f", is_flag=True, help="Force deletion without confirmation")
+@click.option(
+    "--all-states",
+    is_flag=True,
+    help="Include jobs in all states (even completed ones)",
+)
+@common_options
+@click.pass_context
+def delete_jobs_cmd(
+    ctx,
+    sweep_id: str,
+    pattern: str,
+    state: str,
+    dry_run: bool,
+    force: bool,
+    all_states: bool,
+    verbose: bool,
+    quiet: bool,
+):
+    """Delete specific jobs from a sweep with filtering options."""
+    delete_sweep_jobs(
+        sweep_id=sweep_id,
+        pattern=pattern,
+        state=state,
+        dry_run=dry_run,
+        force=force,
+        all_states=all_states,
+        console=ctx.obj["console"],
+        logger=ctx.obj["logger"],
+    )
+
+
+@monitor.command("cleanup")
+@click.option(
+    "--days",
+    "-d",
+    type=int,
+    default=7,
+    help="Delete jobs from sweeps older than N days",
+)
+@click.option(
+    "--states",
+    "-s",
+    multiple=True,
+    help="Only delete jobs in these states (e.g., 'C', 'F')",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be deleted without actually deleting",
+)
+@click.option("--force", "-f", is_flag=True, help="Force deletion without confirmation")
+@common_options
+@click.pass_context
+def cleanup_cmd(
+    ctx,
+    days: int,
+    states: tuple,
+    dry_run: bool,
+    force: bool,
+    verbose: bool,
+    quiet: bool,
+):
+    """Clean up old sweep jobs based on age and state."""
+    cleanup_old_sweeps(
+        days=days,
+        states=list(states) if states else None,
+        dry_run=dry_run,
+        force=force,
+        console=ctx.obj["console"],
+        logger=ctx.obj["logger"],
+    )
+
+
+@monitor.command("collect-results")
+@click.argument("sweep_id")
+@click.option("--output-dir", "-o", type=click.Path(), help="Output directory for results")
+@click.option(
+    "--format",
+    type=click.Choice(["csv", "json", "xlsx"]),
+    default="csv",
+    help="Output format",
+)
+@common_options
+@click.pass_context
+def collect_results_cmd(
+    ctx, sweep_id: str, output_dir: str, format: str, verbose: bool, quiet: bool
+):
+    """Collect and export sweep results."""
+    from pathlib import Path
+
+    output_path = Path(output_dir) if output_dir else None
+    collect_results(
+        sweep_id=sweep_id,
+        output_path=output_path,
+        format=format,
+        console=ctx.obj["console"],
+        logger=ctx.obj["logger"],
+    )
+
+
+if __name__ == "__main__":
+    monitor()

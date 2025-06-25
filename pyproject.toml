@@ -43,9 +43,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "black>=22.0.0",
-    "isort>=5.0.0",
-    "flake8>=5.0.0",
+    "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
 ]
@@ -70,13 +68,83 @@ where = ["src"]
 [tool.setuptools.package-data]
 hpc_sweep_manager = ["templates/*.j2"]
 
-[tool.black]
+# Ruff configuration
+[tool.ruff]
+# Same as Black.
 line-length = 100
-target-version = ["py38", "py39", "py310", "py311"]
+indent-width = 4
 
-[tool.isort]
-profile = "black"
-line_length = 100
+# Assume Python 3.8+
+target-version = "py38"
+
+# Exclude common directories
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+[tool.ruff.lint]
+# Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
+# Also enable:
+# - pyupgrade (UP) - modernize Python code
+# - flake8-bugbear (B) - find likely bugs and design problems
+# - flake8-simplify (SIM) - simplify code
+# - isort (I) - import sorting
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    # Allow non-abstract empty methods in abstract base classes
+    "B027",
+    # Allow boolean positional values in function calls, like `dict.get(... True)`
+    "FBT003",
+    # Ignore checks for possible passwords
+    "S105", "S106", "S107",
+    # Ignore complexity
+    "C901", "PLR0911", "PLR0912", "PLR0913", "PLR0915",
+]
+
+# Allow fix for all enabled rules (when `--fix`) is provided.
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed.
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+known-first-party = ["hpc_sweep_manager"]
+force-sort-within-sections = true
+split-on-trailing-comma = true
 
 [tool.mypy]
 python_version = "3.8"

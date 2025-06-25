@@ -1,22 +1,22 @@
 """Project initialization CLI commands."""
 
-from pathlib import Path
-from rich.console import Console
-from rich.table import Table
-from rich.prompt import Prompt, Confirm
-from rich.panel import Panel
-import logging
-import yaml
 from datetime import datetime
-from typing import Dict, Any
+import logging
+from pathlib import Path
+from typing import Any, Dict
 
-from ..core.path_detector import PathDetector
-from ..core.job_manager import JobManager
+import click
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+import yaml
+
+from ..core.common.path_detector import PathDetector
+from .common import common_options
 
 
-def init_project(
-    project_path: Path, interactive: bool, console: Console, logger: logging.Logger
-):
+def init_project(project_path: Path, interactive: bool, console: Console, logger: logging.Logger):
     """Initialize sweep infrastructure in a project."""
     console.print(
         Panel.fit(
@@ -53,13 +53,11 @@ def init_project(
         config = _auto_configuration(project_info)
 
     # Create sweep infrastructure
-    console.print(f"\n[yellow]Creating sweep infrastructure...[/yellow]")
+    console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
     success = _create_sweep_infrastructure(project_path, config, console, logger)
 
     if success:
-        console.print(
-            "\n[green]✅ Project initialization completed successfully![/green]"
-        )
+        console.print("\n[green]✅ Project initialization completed successfully![/green]")
         _display_next_steps(console)
     else:
         console.print("\n[red]❌ Project initialization failed![/red]")
@@ -107,9 +105,7 @@ def _display_project_info(info: Dict[str, Any], console: Console):
     console.print(table)
 
 
-def _interactive_configuration(
-    project_info: Dict[str, Any], console: Console
-) -> Dict[str, Any]:
+def _interactive_configuration(project_info: Dict[str, Any], console: Console) -> Dict[str, Any]:
     """Interactive configuration prompts."""
     config = {}
 
@@ -141,9 +137,7 @@ def _interactive_configuration(
         else:
             config["train_script"] = Prompt.ask("Training script path")
     else:
-        config["train_script"] = Prompt.ask(
-            "Training script path", default="scripts/train.py"
-        )
+        config["train_script"] = Prompt.ask("Training script path", default="scripts/train.py")
 
     # Config directory
     if project_info["config_dir"]:
@@ -162,15 +156,11 @@ def _interactive_configuration(
 
     config["default_walltime"] = Prompt.ask("Default job walltime", default="04:00:00")
 
-    config["default_resources"] = Prompt.ask(
-        "Default job resources", default=default_resources
-    )
+    config["default_resources"] = Prompt.ask("Default job resources", default=default_resources)
 
     # W&B settings
     if Confirm.ask("Configure Weights & Biases integration?", default=True):
-        config["wandb_project"] = Prompt.ask(
-            "W&B project name", default=config["project_name"]
-        )
+        config["wandb_project"] = Prompt.ask("W&B project name", default=config["project_name"])
         config["wandb_entity"] = Prompt.ask("W&B entity (optional)", default="")
 
     return config
@@ -186,9 +176,7 @@ def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
         "train_script": str(project_info["train_script"])
         if project_info["train_script"]
         else "scripts/train.py",
-        "config_dir": str(project_info["config_dir"])
-        if project_info["config_dir"]
-        else "configs",
+        "config_dir": str(project_info["config_dir"]) if project_info["config_dir"] else "configs",
         "hpc_system": project_info["hpc_system"],
         "default_walltime": "04:00:00",
         "wandb_project": project_info["project_root"].name,
@@ -340,3 +328,44 @@ def _display_next_steps(console: Console):
 """
 
     console.print(Panel(next_steps, title="Getting Started", border_style="green"))
+
+
+# CLI command group structure
+@click.group()
+def setup():
+    """Setup and configure HSM projects."""
+    pass
+
+
+@setup.command("init")
+@click.option("--interactive", "-i", is_flag=True, help="Interactive setup mode")
+@click.option("--project-root", type=click.Path(exists=True), help="Project root directory")
+@common_options
+@click.pass_context
+def init_cmd(ctx, interactive: bool, project_root: str, verbose: bool, quiet: bool):
+    """Initialize sweep infrastructure in a project."""
+    project_path = Path(project_root) if project_root else Path.cwd()
+    init_project(project_path, interactive, ctx.obj["console"], ctx.obj["logger"])
+
+
+@setup.command("configure")
+@click.option(
+    "--from-file",
+    type=click.Path(exists=True),
+    help="Build from existing Hydra config file",
+)
+@click.option("--output", "-o", type=click.Path(), help="Output sweep config file")
+@common_options
+@click.pass_context
+def configure_cmd(ctx, from_file: str, output: str, verbose: bool, quiet: bool):
+    """Interactive sweep configuration builder."""
+    from .configure import configure_sweep
+
+    config_file = Path(from_file) if from_file else None
+    output_file = Path(output) if output else None
+
+    configure_sweep(config_file, output_file, ctx.obj["console"], ctx.obj["logger"])
+
+
+if __name__ == "__main__":
+    setup()

@@ -1,19 +1,17 @@
 """Interactive configuration CLI commands."""
 
-from pathlib import Path
-from rich.console import Console
-from rich.table import Table
-from rich.prompt import Prompt, Confirm, IntPrompt
-from rich.panel import Panel
-from rich.columns import Columns
-from rich.text import Text
-import logging
-import yaml
-from typing import Optional, Dict, Any, List, Set
 from datetime import datetime
-import re
+import logging
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from ..core.path_detector import PathDetector
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, IntPrompt, Prompt
+from rich.table import Table
+import yaml
+
+from ..core.common.path_detector import PathDetector
 
 
 def configure_sweep(
@@ -60,9 +58,7 @@ def configure_sweep(
         parameters = _scan_config_directory(project_info["config_dir"], console)
     else:
         # Manual parameter entry
-        console.print(
-            "[yellow]No config files found. Using manual parameter entry.[/yellow]"
-        )
+        console.print("[yellow]No config files found. Using manual parameter entry.[/yellow]")
         parameters = {}
 
     # Interactive parameter selection and configuration
@@ -90,14 +86,12 @@ def _scan_config_directory(config_dir: Path, console: Console) -> Dict[str, Any]
 
     for yaml_file in yaml_files:
         try:
-            with open(yaml_file, "r") as f:
+            with open(yaml_file) as f:
                 config = yaml.safe_load(f)
 
             if config:
                 relative_path = yaml_file.relative_to(config_dir)
-                file_params = _extract_parameters_from_config(
-                    config, str(relative_path)
-                )
+                file_params = _extract_parameters_from_config(config, str(relative_path))
                 parameters.update(file_params)
 
         except Exception as e:
@@ -106,12 +100,10 @@ def _scan_config_directory(config_dir: Path, console: Console) -> Dict[str, Any]
     return parameters
 
 
-def _extract_parameters_from_file(
-    config_file: Path, console: Console
-) -> Dict[str, Any]:
+def _extract_parameters_from_file(config_file: Path, console: Console) -> Dict[str, Any]:
     """Extract parameters from a specific config file."""
     try:
-        with open(config_file, "r") as f:
+        with open(config_file) as f:
             config = yaml.safe_load(f)
 
         if config:
@@ -207,14 +199,14 @@ def _interactive_parameter_selection(
     console.print(table)
 
     # Parameter selection
-    console.print(f"\n[bold]Select parameters for sweep:[/bold]")
+    console.print("\n[bold]Select parameters for sweep:[/bold]")
 
     selected_params = {}
     grid_params = {}
     paired_groups = []
 
     while True:
-        console.print(f"\n[yellow]Parameter selection menu:[/yellow]")
+        console.print("\n[yellow]Parameter selection menu:[/yellow]")
         console.print("1. Add grid parameter (all combinations)")
         console.print("2. Add paired parameters (vary together)")
         console.print("3. Review current selection")
@@ -269,9 +261,7 @@ def _select_grid_parameter(
 
     console.print(f"\n[yellow]Available parameters ({len(param_names)}):[/yellow]")
     for i, name in enumerate(param_names[:10], 1):
-        console.print(
-            f"  {i}. {name} ({available[name]['type']}) = {available[name]['default']}"
-        )
+        console.print(f"  {i}. {name} ({available[name]['type']}) = {available[name]['default']}")
 
     if len(param_names) > 10:
         console.print(f"  ... and {len(param_names) - 10} more")
@@ -286,7 +276,7 @@ def _select_grid_parameter(
         console.print(f"[red]No parameter found matching '{param_name}'[/red]")
         return None
     elif len(matches) > 1:
-        console.print(f"Multiple matches found:")
+        console.print("Multiple matches found:")
         for i, match in enumerate(matches[:10], 1):
             console.print(f"  {i}. {match}")
 
@@ -321,10 +311,7 @@ def _select_grid_parameter(
             elif param_info["type"] == "float":
                 values = [float(x.strip()) for x in values_str.split(",")]
             elif param_info["type"] == "bool":
-                values = [
-                    x.strip().lower() in ["true", "1", "yes"]
-                    for x in values_str.split(",")
-                ]
+                values = [x.strip().lower() in ["true", "1", "yes"] for x in values_str.split(",")]
             else:
                 values = [x.strip() for x in values_str.split(",")]
         except ValueError as e:
@@ -338,9 +325,7 @@ def _select_paired_parameters(
     parameters: Dict[str, Any], console: Console
 ) -> Optional[Dict[str, Any]]:
     """Select parameters that should vary together."""
-    console.print(
-        f"\n[yellow]Paired parameters vary together (same length required)[/yellow]"
-    )
+    console.print("\n[yellow]Paired parameters vary together (same length required)[/yellow]")
 
     group_name = Prompt.ask("Group name", default="paired_group")
     paired_params = {}
@@ -352,9 +337,7 @@ def _select_paired_parameters(
 
         if param_name not in parameters:
             # Try partial match
-            matches = [
-                name for name in parameters.keys() if param_name.lower() in name.lower()
-            ]
+            matches = [name for name in parameters if param_name.lower() in name.lower()]
             if matches:
                 param_name = matches[0]
                 console.print(f"Using: {param_name}")
@@ -370,10 +353,7 @@ def _select_paired_parameters(
             elif param_info["type"] == "float":
                 values = [float(x.strip()) for x in values_str.split(",")]
             elif param_info["type"] == "bool":
-                values = [
-                    x.strip().lower() in ["true", "1", "yes"]
-                    for x in values_str.split(",")
-                ]
+                values = [x.strip().lower() in ["true", "1", "yes"] for x in values_str.split(",")]
             else:
                 values = [x.strip() for x in values_str.split(",")]
 
@@ -399,7 +379,7 @@ def _select_paired_parameters(
 
 def _manual_parameter_entry(console: Console) -> Dict[str, Any]:
     """Manual parameter entry when no configs are found."""
-    console.print(f"\n[yellow]Manual parameter entry:[/yellow]")
+    console.print("\n[yellow]Manual parameter entry:[/yellow]")
 
     sweep_config = {
         "defaults": ["override hydra/launcher: basic"],
@@ -442,15 +422,15 @@ def _review_selection(
     grid_params: Dict[str, Any], paired_groups: List[Dict[str, Any]], console: Console
 ):
     """Review current parameter selection."""
-    console.print(f"\n[bold]Current Selection:[/bold]")
+    console.print("\n[bold]Current Selection:[/bold]")
 
     if grid_params:
-        console.print(f"\n[green]Grid Parameters (all combinations):[/green]")
+        console.print("\n[green]Grid Parameters (all combinations):[/green]")
         for param, values in grid_params.items():
             console.print(f"  {param}: {values}")
 
     if paired_groups:
-        console.print(f"\n[green]Paired Parameters (vary together):[/green]")
+        console.print("\n[green]Paired Parameters (vary together):[/green]")
         for group in paired_groups:
             for group_name, params in group.items():
                 console.print(f"  Group '{group_name}':")
@@ -460,7 +440,7 @@ def _review_selection(
 
 def _configure_metadata(console: Console) -> Dict[str, Any]:
     """Configure sweep metadata."""
-    console.print(f"\n[bold]Sweep Metadata:[/bold]")
+    console.print("\n[bold]Sweep Metadata:[/bold]")
 
     metadata = {}
 
@@ -490,9 +470,7 @@ def _save_sweep_config(
         with open(output_file, "w") as f:
             yaml.dump(sweep_config, f, default_flow_style=False, indent=2)
 
-        console.print(
-            f"\n[green]✅ Sweep configuration saved to: {output_file}[/green]"
-        )
+        console.print(f"\n[green]✅ Sweep configuration saved to: {output_file}[/green]")
         logger.info(f"Sweep configuration saved to {output_file}")
 
     except Exception as e:
@@ -500,24 +478,20 @@ def _save_sweep_config(
         logger.error(f"Failed to save sweep configuration: {e}")
 
 
-def _show_configuration_summary(
-    sweep_config: Dict[str, Any], output_file: Path, console: Console
-):
+def _show_configuration_summary(sweep_config: Dict[str, Any], output_file: Path, console: Console):
     """Show configuration summary and next steps."""
 
     # Count total combinations
-    from ..core.param_generator import ParameterGenerator
     from ..core.config_parser import SweepConfig
+    from ..core.param_generator import ParameterGenerator
 
     try:
         config = SweepConfig.from_dict(sweep_config)
         generator = ParameterGenerator(config)
         total_combinations = generator.count_combinations()
 
-        console.print(f"\n[bold]Configuration Summary:[/bold]")
-        console.print(
-            f"Total parameter combinations: [green]{total_combinations}[/green]"
-        )
+        console.print("\n[bold]Configuration Summary:[/bold]")
+        console.print(f"Total parameter combinations: [green]{total_combinations}[/green]")
         console.print(f"Configuration file: [green]{output_file}[/green]")
 
         next_steps = f"""
@@ -534,11 +508,7 @@ def _show_configuration_summary(
 - `hsm sweep --config {output_file} --array` - Submit as array job
 """
 
-        console.print(
-            Panel(next_steps, title="Configuration Complete", border_style="green")
-        )
+        console.print(Panel(next_steps, title="Configuration Complete", border_style="green"))
 
     except Exception as e:
-        console.print(
-            f"[yellow]Configuration saved, but could not validate: {e}[/yellow]"
-        )
+        console.print(f"[yellow]Configuration saved, but could not validate: {e}[/yellow]")

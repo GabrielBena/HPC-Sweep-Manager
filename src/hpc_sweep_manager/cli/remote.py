@@ -1,18 +1,18 @@
 """CLI commands for remote machine management."""
 
 import asyncio
-import click
+import datetime
+import logging
 from pathlib import Path
+
+import click
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 from rich.tree import Tree
 import yaml
-import logging
-import datetime
 
-from ..core.hsm_config import HSMConfig
-from ..core.remote_discovery import RemoteDiscovery, RemoteValidator
+from ..core.common.config import HSMConfig
+from ..core.remote.discovery import RemoteDiscovery, RemoteValidator
 
 # Set up more detailed logging for debugging
 # logging.basicConfig(level=logging.DEBUG)
@@ -30,9 +30,7 @@ def remote():
 @click.argument("host")
 @click.option("--key", help="SSH key path")
 @click.option("--port", default=22, help="SSH port")
-@click.option(
-    "--max-jobs", type=int, help="Max parallel jobs (overrides remote default)"
-)
+@click.option("--max-jobs", type=int, help="Max parallel jobs (overrides remote default)")
 @click.option("--enabled/--disabled", default=True, help="Enable/disable this remote")
 def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool):
     """Add a new remote machine configuration."""
@@ -177,9 +175,7 @@ def test(names: tuple, all: bool):
 
             if remote_config:
                 results[name] = {"status": "success", "config": remote_config}
-                console.print(
-                    f"[green]✓ {name}: Configuration discovered successfully[/green]"
-                )
+                console.print(f"[green]✓ {name}: Configuration discovered successfully[/green]")
             else:
                 results[name] = {"status": "failed", "config": None}
                 console.print(f"[red]✗ {name}: Failed to discover configuration[/red]")
@@ -207,12 +203,8 @@ def test(names: tuple, all: bool):
 
                 if config.wandb_config:
                     wandb_branch = tree.add("W&B Config")
-                    wandb_branch.add(
-                        f"Project: {config.wandb_config.get('project', 'N/A')}"
-                    )
-                    wandb_branch.add(
-                        f"Entity: {config.wandb_config.get('entity', 'N/A')}"
-                    )
+                    wandb_branch.add(f"Project: {config.wandb_config.get('project', 'N/A')}")
+                    wandb_branch.add(f"Entity: {config.wandb_config.get('entity', 'N/A')}")
 
                 console.print(tree)
             else:
@@ -239,9 +231,7 @@ def test(names: tuple, all: bool):
 @click.argument("names", nargs=-1)
 @click.option("--all", is_flag=True, help="Check health of all remotes")
 @click.option("--watch", is_flag=True, help="Continuous monitoring mode")
-@click.option(
-    "--refresh", default=30, help="Refresh interval in seconds for watch mode"
-)
+@click.option("--refresh", default=30, help="Refresh interval in seconds for watch mode")
 def health(names: tuple, all: bool, watch: bool, refresh: int):
     """Check health status of remote machines."""
     console = Console()
@@ -299,9 +289,7 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
 
         for name, health in health_report.items():
             status_style = "green" if health.get("status") == "healthy" else "red"
-            status = (
-                f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
-            )
+            status = f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
 
             table.add_row(
                 name,

@@ -1,28 +1,21 @@
 """CLI commands for distributed computing management."""
 
 import asyncio
-import click
+import datetime
+import logging
 from pathlib import Path
+
+import click
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 from rich.tree import Tree
-from rich.live import Live
 import yaml
-import logging
-import datetime
-from typing import Dict, Any
 
-from ..core.hsm_config import HSMConfig
-from ..core.remote_discovery import RemoteDiscovery, RemoteValidator
-from ..core.distributed_job_manager import (
-    DistributedJobManager,
-    DistributedSweepConfig,
-    DistributionStrategy,
-)
-from ..core.local_compute_source import LocalComputeSource
-from ..core.ssh_compute_source import SSHComputeSource
-from ..core.path_detector import PathDetector
+from ..core.common.config import HSMConfig
+from ..core.common.path_detector import PathDetector
+from ..core.local.local_compute_source import LocalComputeSource
+from ..core.remote.discovery import RemoteDiscovery
+from ..core.remote.ssh_compute_source import SSHComputeSource
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +41,7 @@ def init(interactive: bool):
 
     # Initialize distributed config if it doesn't exist
     if "distributed" not in config_data:
-        console.print(
-            "[cyan]Initializing distributed computing configuration...[/cyan]"
-        )
+        console.print("[cyan]Initializing distributed computing configuration...[/cyan]")
 
         config_data["distributed"] = {
             "enabled": True,
@@ -81,9 +72,7 @@ def init(interactive: bool):
         with open(config_path, "w") as f:
             yaml.dump(config_data, f, default_flow_style=False, indent=2)
 
-        console.print(
-            f"[green]✓ Distributed computing initialized in {config_path}[/green]"
-        )
+        console.print(f"[green]✓ Distributed computing initialized in {config_path}[/green]")
         console.print("Use 'hsm distributed add' to add remote compute sources.")
     else:
         console.print("[yellow]Distributed computing already initialized.[/yellow]")
@@ -199,7 +188,7 @@ def list():
     strategy = distributed_config.get("strategy", "round_robin")
     collect_interval = distributed_config.get("collect_interval", 300)
 
-    console.print(f"\n[bold]Distribution Settings:[/bold]")
+    console.print("\n[bold]Distribution Settings:[/bold]")
     console.print(f"Strategy: {strategy}")
     console.print(f"Result collection interval: {collect_interval}s")
 
@@ -248,17 +237,15 @@ def test(names: tuple, all: bool):
                 try:
                     detector = PathDetector()
                     python_path = (
-                        hsm_config.get_default_python_path()
-                        or detector.detect_python_path()
+                        hsm_config.get_default_python_path() or detector.detect_python_path()
                     )
                     script_path = (
-                        hsm_config.get_default_script_path()
-                        or detector.detect_train_script()
+                        hsm_config.get_default_script_path() or detector.detect_train_script()
                     )
 
                     local_source = LocalComputeSource(
                         name="local",
-                        max_parallel_jobs=4,
+                        max_parallel_jobs=1,
                         python_path=python_path,
                         script_path=script_path,
                         project_dir=str(Path.cwd()),
@@ -277,9 +264,7 @@ def test(names: tuple, all: bool):
                         )
                     else:
                         results[source_name] = {"status": "failed", "type": "local"}
-                        console.print(
-                            f"[red]✗ {source_name}: Local source setup failed[/red]"
-                        )
+                        console.print(f"[red]✗ {source_name}: Local source setup failed[/red]")
 
                 except Exception as e:
                     results[source_name] = {
@@ -291,9 +276,7 @@ def test(names: tuple, all: bool):
             else:
                 # Test SSH remote source
                 if source_name not in remotes:
-                    console.print(
-                        f"[red]✗ {source_name}: Not found in configuration[/red]"
-                    )
+                    console.print(f"[red]✗ {source_name}: Not found in configuration[/red]")
                     continue
 
                 remote_info = remotes[source_name].copy()
@@ -311,9 +294,7 @@ def test(names: tuple, all: bool):
                     )
                 else:
                     results[source_name] = {"status": "failed", "config": None}
-                    console.print(
-                        f"[red]✗ {source_name}: SSH source setup failed[/red]"
-                    )
+                    console.print(f"[red]✗ {source_name}: SSH source setup failed[/red]")
 
         return results
 
@@ -367,9 +348,7 @@ def test(names: tuple, all: bool):
 @click.argument("names", nargs=-1)
 @click.option("--all", is_flag=True, help="Check health of all sources")
 @click.option("--watch", is_flag=True, help="Continuous monitoring mode")
-@click.option(
-    "--refresh", default=30, help="Refresh interval in seconds for watch mode"
-)
+@click.option("--refresh", default=30, help="Refresh interval in seconds for watch mode")
 def health(names: tuple, all: bool, watch: bool, refresh: int):
     """Check health status of compute sources."""
     console = Console()
@@ -398,14 +377,8 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
         for source_name in check_sources:
             if source_name == "local":
                 detector = PathDetector()
-                python_path = (
-                    hsm_config.get_default_python_path()
-                    or detector.detect_python_path()
-                )
-                script_path = (
-                    hsm_config.get_default_script_path()
-                    or detector.detect_train_script()
-                )
+                python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
+                script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
 
                 local_source = LocalComputeSource(
                     name="local",
@@ -453,9 +426,7 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
         for name, health in health_report.items():
             source_type = "Local" if name == "local" else "SSH"
             status_style = "green" if health.get("status") == "healthy" else "red"
-            status = (
-                f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
-            )
+            status = f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
 
             utilization = health.get("utilization", "N/A")
             details = ""
@@ -467,9 +438,7 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
                 details = f"Connected - {health.get('remote_time', 'N/A')}"
             elif "error" in health:
                 details = (
-                    health["error"][:50] + "..."
-                    if len(health["error"]) > 50
-                    else health["error"]
+                    health["error"][:50] + "..." if len(health["error"]) > 50 else health["error"]
                 )
 
             table.add_row(name, source_type, status, utilization, details)
@@ -517,9 +486,7 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
 
 @distributed.command()
 @click.argument("name")
-@click.confirmation_option(
-    prompt="Are you sure you want to remove this compute source?"
-)
+@click.confirmation_option(prompt="Are you sure you want to remove this compute source?")
 def remove(name: str):
     """Remove a compute source from distributed configuration."""
     console = Console()
