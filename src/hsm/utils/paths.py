@@ -1,11 +1,10 @@
 """Path detection and project structure utilities."""
 
+import logging
 import os
 from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional
-
-import logging
 
 logger = logging.getLogger(__name__)
 

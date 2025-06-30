@@ -4,17 +4,17 @@ Integration tests using the simple_mlp example.
 These tests validate the complete HSM workflow using a real example.
 """
 
-import pytest
 import os
-import subprocess
-import tempfile
-import shutil
 from pathlib import Path
+import shutil
+import subprocess
+
 from click.testing import CliRunner
+import pytest
 
 from hsm.cli.main import cli
-from hsm.config.sweep import SweepConfig
 from hsm.config.hsm import HSMConfig
+from hsm.config.sweep import SweepConfig
 from hsm.config.validation import SweepConfigValidator
 
 
@@ -88,7 +88,7 @@ class TestSimpleMlpIntegration:
                 config_data = sweep_cfg.test_sweep
             else:
                 # Try to extract a specific sweep config
-                with open(simple_mlp_dir / "sweep_config.yaml", "r") as f:
+                with open(simple_mlp_dir / "sweep_config.yaml") as f:
                     import yaml
 
                     all_configs = yaml.safe_load(f)
@@ -239,7 +239,7 @@ class TestSimpleMlpConfigLoading:
         # Load the config file directly and extract test_sweep config
         import yaml
 
-        with open(sweep_config_path, "r") as f:
+        with open(sweep_config_path) as f:
             all_configs = yaml.safe_load(f)
 
         # Use test_sweep configuration for validation
@@ -285,12 +285,12 @@ class TestSimpleMlpParameterGeneration:
         if not sweep_config_path.exists():
             pytest.skip("sweep_config.yaml not found in simple_mlp")
 
-        from hsm.utils.params import ParameterGenerator
-
         # Load the config file and use test_sweep configuration
         import yaml
 
-        with open(sweep_config_path, "r") as f:
+        from hsm.utils.params import ParameterGenerator
+
+        with open(sweep_config_path) as f:
             all_configs = yaml.safe_load(f)
 
         test_config_data = all_configs.get("test_sweep", all_configs)

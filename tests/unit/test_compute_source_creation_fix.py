@@ -5,13 +5,14 @@ These tests cover the specific issues encountered when running the simple_mlp ex
 and ensure that compute sources can be created correctly with proper constructor arguments.
 """
 
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 pytestmark = pytest.mark.unit
 
 from hsm.cli.utils import create_compute_source, parse_compute_sources
-from hsm.compute.base import ComputeSource, TaskStatus, HealthStatus
+from hsm.compute.base import ComputeSource
 from hsm.compute.local import LocalComputeSource
 
 

@@ -3,16 +3,13 @@ Pytest configuration and shared fixtures for HSM test suite.
 """
 
 import asyncio
-import tempfile
-import shutil
 from pathlib import Path
-from typing import Generator, Dict, Any
-import pytest
-from click.testing import CliRunner
-import yaml
+import shutil
+import tempfile
 
-from hsm.config.sweep import SweepConfig
-from hsm.config.hsm import HSMConfig
+from click.testing import CliRunner
+import pytest
+import yaml
 
 
 @pytest.fixture
@@ -144,7 +141,8 @@ def event_loop():
 def mock_compute_source():
     """Provide a mock compute source for testing."""
     from unittest.mock import AsyncMock, MagicMock
-    from hsm.compute.base import ComputeSource, TaskStatus, HealthStatus
+
+    from hsm.compute.base import ComputeSource, HealthStatus, TaskStatus
 
     mock_source = AsyncMock(spec=ComputeSource)
     mock_source.setup.return_value = True

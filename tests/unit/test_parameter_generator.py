@@ -5,8 +5,8 @@ Unit tests for ParameterGenerator utility.
 import pytest
 
 pytestmark = pytest.mark.unit
-from hsm.utils.params import ParameterGenerator
 from hsm.config.sweep import SweepConfig
+from hsm.utils.params import ParameterGenerator
 
 
 class TestParameterGenerator:

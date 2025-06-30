@@ -70,16 +70,16 @@ Scanning project structure...
 
 **Files created:**
 - `hsm_config.yaml` - HSM system configuration
-- `sweeps/sweep.yaml` - Example sweep configuration
+- `sweeps/sweep_config.yaml` - Example sweep configuration
 - `sweeps/outputs/` - Directory for sweep results
 - `sweeps/README.md` - Usage instructions
 
 ### 2. Configure Your Sweep
 
-Edit the generated `sweeps/sweep.yaml` to define your hyperparameter search:
+Edit the generated `sweeps/sweep_config.yaml` to define your hyperparameter search:
 
 ```yaml
-# sweeps/sweep.yaml
+# sweeps/sweep_config.yaml
 grid:
   learning_rate: [0.001, 0.01, 0.1]
   batch_size: [32, 64, 128]
@@ -98,10 +98,10 @@ Before running the full sweep, test your configuration:
 
 ```bash
 # Count total combinations
-hsm run --config sweeps/sweep.yaml --count-only
+hsm run --config sweeps/sweep_config.yaml --count-only
 
 # Preview what would be executed
-hsm run --config sweeps/sweep.yaml --dry-run
+hsm run --config sweeps/sweep_config.yaml --dry-run
 ```
 
 **Example output:**
@@ -131,28 +131,28 @@ Choose your execution method:
 #### Local Execution
 ```bash
 # Run on local machine (4 parallel jobs by default)
-hsm run --config sweeps/sweep.yaml --sources local
+hsm run --config sweeps/sweep_config.yaml --sources local
 
 # Limit parallel jobs
-hsm run --config sweeps/sweep.yaml --sources local --parallel-limit 2
+hsm run --config sweeps/sweep_config.yaml --sources local --parallel-limit 2
 ```
 
 #### HPC Cluster Execution
 ```bash
 # Run on detected HPC system (auto-detects PBS/Slurm)
-hsm run --config sweeps/sweep.yaml --sources hpc
+hsm run --config sweeps/sweep_config.yaml --sources hpc
 
 # Specify resource requirements
-hsm run --config sweeps/sweep.yaml --sources hpc:cluster_name
+hsm run --config sweeps/sweep_config.yaml --sources hpc:cluster_name
 ```
 
 #### SSH Remote Execution
 ```bash
 # Run on remote machine via SSH
-hsm run --config sweeps/sweep.yaml --sources ssh:hostname
+hsm run --config sweeps/sweep_config.yaml --sources ssh:hostname
 
 # Multiple sources (distributed execution)
-hsm run --config sweeps/sweep.yaml --sources local,ssh:remote1,hpc:cluster
+hsm run --config sweeps/sweep_config.yaml --sources local,ssh:remote1,hpc:cluster
 ```
 
 ### 5. Monitor Progress
@@ -237,7 +237,7 @@ hsm config show
 hsm config validate
 
 # Validate specific files
-hsm config validate --config hsm_config.yaml --sweep-config sweeps/sweep.yaml
+hsm config validate --config hsm_config.yaml --sweep-config sweeps/sweep_config.yaml
 ```
 
 ### Update Configuration
@@ -247,7 +247,7 @@ hsm config init --interactive --force
 
 # Edit configuration files directly
 vim hsm_config.yaml
-vim sweeps/sweep.yaml
+vim sweeps/sweep_config.yaml
 ```
 
 ## Advanced Features
@@ -256,7 +256,7 @@ vim sweeps/sweep.yaml
 Distribute work across multiple compute sources:
 
 ```bash
-hsm run --config sweeps/sweep.yaml --sources local,ssh:remote1,ssh:remote2,hpc:cluster
+hsm run --config sweeps/sweep_config.yaml --sources local,ssh:remote1,ssh:remote2,hpc:cluster
 ```
 
 ### Parameter Strategies
@@ -296,10 +296,10 @@ paired:
 ### Resource Limits
 ```bash
 # Limit total tasks
-hsm run --config sweeps/sweep.yaml --max-tasks 10
+hsm run --config sweeps/sweep_config.yaml --max-tasks 10
 
 # Limit parallel execution per source
-hsm run --config sweeps/sweep.yaml --parallel-limit 4
+hsm run --config sweeps/sweep_config.yaml --parallel-limit 4
 
 # Custom timeout (default: no timeout)
 # Edit hsm_config.yaml: default_timeout: 3600  # seconds
@@ -345,7 +345,7 @@ hsm run --config sweeps/sweep.yaml --parallel-limit 4
 hsm config validate
 
 # Test sweep configuration
-hsm run --config sweeps/sweep.yaml --dry-run
+hsm run --config sweeps/sweep_config.yaml --dry-run
 
 # Debug specific task
 ls sweeps/outputs/<sweep_id>/tasks/<task_id>/

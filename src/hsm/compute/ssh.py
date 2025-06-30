@@ -229,21 +229,34 @@ class SSHComputeSource(ComputeSource):
                 error_message=str(e),
             )
 
-    async def get_task_status(self, task_id: str) -> TaskStatus:
+    async def get_task_status(self, task_id: str) -> TaskResult:
         """Get current status of a task.
 
         Args:
             task_id: ID of the task
 
         Returns:
-            Current task status
+            TaskResult with current status and metadata
         """
-        # Check if task is in our registry
-        if task_id in self.task_registry:
-            return self.task_registry[task_id]
-
-        # Check remote status file
         try:
+            # Check if task is in our registry first
+            if task_id in self.task_registry:
+                status = self.task_registry[task_id]
+                return TaskResult(
+                    task_id=task_id,
+                    status=status,
+                    submit_time=datetime.now(),  # We should track this better
+                )
+
+            # If not available, ensure connection and check remote status
+            if not await self._check_connection():
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.UNKNOWN,
+                    error_message="SSH connection not available",
+                )
+
+            # Check remote status file
             remote_status_file = f"{self.remote_sweep_dir}/tasks/{task_id}/status.yaml"
             status_content = await self._read_remote_file(remote_status_file)
 
@@ -251,12 +264,42 @@ class SSHComputeSource(ComputeSource):
                 import yaml
 
                 status_data = yaml.safe_load(status_content)
-                return TaskStatus(status_data.get("status", "PENDING"))
+                task_status = TaskStatus(status_data.get("status", "PENDING"))
+
+                # Update our local registry
+                self.register_task(task_id, task_status)
+
+                # Check for failure details
+                error_message = status_data.get("error_message")
+                exit_code = status_data.get("exit_code")
+
+                return TaskResult(
+                    task_id=task_id,
+                    status=task_status,
+                    submit_time=datetime.now(),  # Should be tracked better
+                    complete_time=datetime.now()
+                    if task_status
+                    in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]
+                    else None,
+                    exit_code=exit_code,
+                    error_message=error_message,
+                )
+            else:
+                # No status file found, task might be starting or failed to start
+                logger.debug(f"No status file found for task {task_id} on remote")
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.PENDING,
+                    submit_time=datetime.now(),
+                )
 
         except Exception as e:
-            logger.debug(f"Error reading remote status for {task_id}: {e}")
-
-        return TaskStatus.PENDING
+            logger.error(f"Error reading remote status for {task_id}: {e}")
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.UNKNOWN,
+                error_message=f"Error checking status: {str(e)}",
+            )
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task.
@@ -456,41 +499,57 @@ class SSHComputeSource(ComputeSource):
         """Establish SSH connection."""
         try:
             async with self.connection_lock:
-                if self.connection and not self.connection.is_closing():
-                    return True
+                if self.connection:
+                    try:
+                        # Test if connection is still alive with a simple command
+                        await self.connection.run("echo test", check=True, timeout=10)
+                        return True
+                    except Exception:
+                        # Connection is broken, will create a new one
+                        self.connection = None
 
                 # Prepare connection options
                 options = {
                     "host": self.ssh_config.host,
                     "port": self.ssh_config.port,
-                    "username": self.ssh_config.username,
                 }
 
+                # Only add username if it's provided
+                if self.ssh_config.username:
+                    options["username"] = self.ssh_config.username
+
+                # Handle SSH key authentication
                 if self.ssh_config.key_file:
                     options["client_keys"] = [self.ssh_config.key_file]
+
+                # Handle password authentication
                 if self.ssh_config.password:
                     options["password"] = self.ssh_config.password
+
+                # Handle known hosts
                 if self.ssh_config.known_hosts:
                     options["known_hosts"] = self.ssh_config.known_hosts
                 else:
                     options["known_hosts"] = None  # Skip host key verification
 
+                logger.debug(f"Connecting to SSH with options: {list(options.keys())}")
                 self.connection = await asyncssh.connect(**options)
                 logger.debug(f"SSH connection established to {self.ssh_config.host}")
                 return True
 
         except Exception as e:
             logger.error(f"Failed to establish SSH connection to {self.ssh_config.host}: {e}")
+            self.connection = None
             return False
 
     async def _check_connection(self) -> bool:
         """Check if SSH connection is alive."""
         try:
-            if not self.connection or self.connection.is_closing():
+            if not self.connection:
                 return await self._connect()
 
             # Test connection with a simple command
-            result = await self.connection.run("echo test", check=True)
+            result = await self.connection.run("echo test", check=True, timeout=10)
             return result.stdout.strip() == "test"
 
         except Exception:

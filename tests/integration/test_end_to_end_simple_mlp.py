@@ -6,17 +6,18 @@ the simple_mlp example to demonstrate the complete workflow.
 """
 
 import os
-import pytest
+from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import yaml
-from pathlib import Path
+
 from click.testing import CliRunner
+import pytest
+import yaml
 
 from hsm.cli.main import cli
-from hsm.config.sweep import SweepConfig
 from hsm.config.hsm import HSMConfig
+from hsm.config.sweep import SweepConfig
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
@@ -198,7 +199,7 @@ class TestSimpleMlpEndToEnd:
         sweep_config_path = simple_mlp_dir / "sweep_config.yaml"
         if sweep_config_path.exists():
             try:
-                with open(sweep_config_path, "r") as f:
+                with open(sweep_config_path) as f:
                     all_configs = yaml.safe_load(f)
 
                 # Validate each sweep configuration in the file

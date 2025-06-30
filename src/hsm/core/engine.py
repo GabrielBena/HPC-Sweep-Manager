@@ -109,10 +109,10 @@ class SweepEngine:
             health_check_interval: Interval between health checks in seconds
             result_collection_interval: Interval between result collection in seconds
         """
-        self.context = sweep_context
+        self.sweep_context = sweep_context
         self.sources = {source.name: source for source in sources}
         self.distribution_strategy = distribution_strategy
-        self.max_concurrent_tasks = max_concurrent_tasks
+        self.max_concurrent_tasks = max_concurrent_tasks or self._calculate_max_concurrent_tasks()
         self.health_check_interval = health_check_interval
         self.result_collection_interval = result_collection_interval
 
@@ -122,23 +122,51 @@ class SweepEngine:
         self.end_time: Optional[datetime] = None
 
         # Task management
-        self.pending_tasks: List[Task] = []
-        self.active_tasks: Dict[str, Task] = {}  # task_id -> Task
-        self.completed_tasks: Dict[str, Task] = {}  # task_id -> Task
-        self.failed_tasks: Dict[str, Task] = {}  # task_id -> Task
+        self.pending_tasks: Dict[str, Task] = {}
+        self.active_tasks: Dict[str, Task] = {}
+        self.completed_tasks: Dict[str, Task] = {}
+        self.failed_tasks: Dict[str, Task] = {}
         self.task_to_source: Dict[str, str] = {}  # task_id -> source_name
-
-        # Distribution state
-        self._round_robin_index = 0
 
         # Background tasks
         self._health_check_task: Optional[asyncio.Task] = None
         self._result_collection_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
 
-        # Shutdown control
+        # Control
         self._shutdown_event = asyncio.Event()
         self._cleanup_complete = asyncio.Event()
+
+        # Round-robin state
+        self._round_robin_index = 0
+
+        # Enhanced health monitoring and failure tracking
+        self.source_failure_counts: Dict[str, int] = {}  # source_name -> failure_count
+        self.source_job_counts: Dict[str, int] = {}  # source_name -> total_job_count
+        self.source_health_failures: Dict[
+            str, int
+        ] = {}  # source_name -> consecutive_health_failures
+        self.disabled_sources: set = set()  # Set of disabled source names
+
+        # Failure tracking configuration
+        self.source_failure_threshold: float = 0.4  # Disable source if 40% of jobs fail
+        self.min_jobs_for_failsafe: int = 5  # Need at least 5 jobs before considering failsafe
+        self.health_check_failure_threshold: int = (
+            3  # Disable after 3 consecutive health check failures
+        )
+        self.enable_source_failsafe: bool = True  # Enable automatic source disabling
+        self.auto_disable_unhealthy_sources: bool = True
+
+        logger.info(
+            f"SweepEngine initialized with {len(self.sources)} sources, max_concurrent_tasks={self.max_concurrent_tasks}"
+        )
+        logger.info(
+            f"Health monitoring: failure_threshold={self.source_failure_threshold}, min_jobs={self.min_jobs_for_failsafe}"
+        )
+        logger.info(f"Available sources: {list(self.sources.keys())}")
+        logger.info(
+            f"Health check interval: {self.health_check_interval}s, Result collection interval: {self.result_collection_interval}s"
+        )
 
     async def setup_sources(self) -> bool:
         """Setup all compute sources for sweep execution.
@@ -186,7 +214,7 @@ class SweepEngine:
     async def _setup_source(self, source: ComputeSource) -> bool:
         """Setup a single compute source."""
         try:
-            return await source.setup(self.context)
+            return await source.setup(self.sweep_context)
         except Exception as e:
             logger.error(f"Exception during setup of {source.name}: {e}")
             return False
@@ -206,12 +234,15 @@ class SweepEngine:
         if not tasks:
             raise ValueError("No tasks provided")
 
-        logger.info(f"Starting sweep {self.context.sweep_id} with {len(tasks)} tasks")
+        logger.info(f"Starting sweep {self.sweep_context.sweep_id} with {len(tasks)} tasks")
 
         # Initialize sweep state
         self.status = SweepStatus.RUNNING
         self.start_time = datetime.now()
         self.pending_tasks = tasks.copy()
+
+        # Create sweep directory structure
+        await self._setup_sweep_directories()
 
         try:
             # Start background tasks
@@ -247,46 +278,71 @@ class SweepEngine:
 
         return self._create_result()
 
+    async def _setup_sweep_directories(self):
+        """Setup the sweep directory structure."""
+        base_dir = self.sweep_context.sweep_dir
+
+        # Create main directories
+        directories = [
+            base_dir / "tasks",
+            base_dir / "logs",
+            base_dir / "logs" / "sources",
+            base_dir / "logs" / "errors",
+            base_dir / "scripts",
+            base_dir / "scripts" / "job_scripts",
+            base_dir / "scripts" / "setup_scripts",
+            base_dir / "reports",
+        ]
+
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        logger.debug(f"Created sweep directory structure at {base_dir}")
+
     async def _execute_tasks(self):
-        """Distribute and execute all pending tasks."""
-        submission_tasks = []
+        """Execute all pending tasks using available compute sources."""
+        # Convert pending tasks list to dict if needed
+        if isinstance(self.pending_tasks, list):
+            pending_dict = {task.task_id: task for task in self.pending_tasks}
+            self.pending_tasks = pending_dict
 
-        while self.pending_tasks:
-            # Check if we should submit more tasks
-            current_active = len(self.active_tasks)
-            max_concurrent = self._calculate_max_concurrent_tasks()
+        logger.info(f"Starting task execution: {len(self.pending_tasks)} tasks pending")
 
-            if current_active >= max_concurrent:
-                # Wait a bit before checking again
-                await asyncio.sleep(1.0)
+        while self.pending_tasks and not self._shutdown_event.is_set():
+            # Check if we have capacity for more tasks
+            if len(self.active_tasks) >= self.max_concurrent_tasks:
+                logger.debug(
+                    f"At max capacity ({len(self.active_tasks)}/{self.max_concurrent_tasks}), waiting..."
+                )
+                await asyncio.sleep(2.0)
                 continue
 
-            # Select a compute source for the next task
+            # Get next task
+            task_id, task = next(iter(self.pending_tasks.items()))
+            task = self.pending_tasks.pop(task_id)
+
+            # Select compute source
             source = await self._select_compute_source()
-            if not source:
-                # No available sources, wait and retry
+            if source is None:
+                # No sources available, put task back and wait
+                self.pending_tasks[task_id] = task
+                logger.warning("No compute sources available, waiting...")
                 await asyncio.sleep(5.0)
                 continue
 
-            # Submit the next task
-            task = self.pending_tasks.pop(0)
-            submission_task = asyncio.create_task(self._submit_task_to_source(task, source))
-            submission_tasks.append(submission_task)
+            # Submit task to source
+            await self._submit_task_to_source(task, source)
 
-            # Avoid overwhelming the submission process
-            if len(submission_tasks) >= 10:  # Submit in batches
-                await asyncio.gather(*submission_tasks, return_exceptions=True)
-                submission_tasks = []
+            # Brief pause to avoid overwhelming sources
+            await asyncio.sleep(0.1)
 
-        # Wait for any remaining submissions
-        if submission_tasks:
-            await asyncio.gather(*submission_tasks, return_exceptions=True)
+        logger.info("Task submission completed")
 
     async def _submit_task_to_source(self, task: Task, source: ComputeSource):
         """Submit a single task to a specific compute source."""
         try:
             # Update task output directory
-            task.output_dir = self.context.sweep_dir / "tasks" / task.task_id
+            task.output_dir = self.sweep_context.sweep_dir / "tasks" / task.task_id
             task.output_dir.mkdir(parents=True, exist_ok=True)
 
             # Submit task
@@ -309,29 +365,72 @@ class SweepEngine:
             self.failed_tasks[task.task_id] = task
 
     async def _select_compute_source(self) -> Optional[ComputeSource]:
-        """Select an available compute source based on the distribution strategy."""
-        available_sources = [source for source in self.sources.values() if source.is_available]
+        """Select an available compute source for task execution.
+
+        Returns:
+            ComputeSource if one is available, None otherwise
+        """
+        # Get available sources (not disabled, not at capacity)
+        available_sources = []
+        for source_name, source in self.sources.items():
+            if source_name in self.disabled_sources:
+                logger.debug(f"Skipping disabled source: {source_name}")
+                continue
+
+            # Check if source has capacity
+            if hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
+                active_tasks = source.stats.active_tasks
+                max_tasks = getattr(source.stats, "max_parallel_tasks", source.max_concurrent_tasks)
+                if active_tasks >= max_tasks:
+                    logger.debug(f"Source {source_name} at capacity: {active_tasks}/{max_tasks}")
+                    continue
+
+            available_sources.append((source_name, source))
 
         if not available_sources:
+            logger.warning("No available compute sources for task assignment")
+            if self.disabled_sources:
+                logger.warning(f"Disabled sources: {list(self.disabled_sources)}")
             return None
 
+        # Select source based on distribution strategy
         if self.distribution_strategy == DistributionStrategy.ROUND_ROBIN:
-            source = available_sources[self._round_robin_index % len(available_sources)]
+            # Round-robin selection
+            selected_name, selected_source = available_sources[
+                self._round_robin_index % len(available_sources)
+            ]
             self._round_robin_index += 1
-            return source
+            logger.debug(f"Selected source via round-robin: {selected_name}")
+            return selected_source
 
         elif self.distribution_strategy == DistributionStrategy.LEAST_LOADED:
-            return min(available_sources, key=lambda s: s.current_load)
+            # Select source with lowest utilization
+            def get_utilization(source_info):
+                source_name, source = source_info
+                if hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
+                    active = source.stats.active_tasks
+                    max_tasks = getattr(
+                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                    )
+                    return active / max_tasks if max_tasks > 0 else 0
+                return 0
+
+            selected_name, selected_source = min(available_sources, key=get_utilization)
+            logger.debug(f"Selected source via least-loaded: {selected_name}")
+            return selected_source
 
         elif self.distribution_strategy == DistributionStrategy.RANDOM:
+            # Random selection
             import random
 
-            return random.choice(available_sources)
+            selected_name, selected_source = random.choice(available_sources)
+            logger.debug(f"Selected source via random: {selected_name}")
+            return selected_source
 
         else:  # Default to round-robin
-            source = available_sources[self._round_robin_index % len(available_sources)]
-            self._round_robin_index += 1
-            return source
+            selected_name, selected_source = available_sources[0]
+            logger.debug(f"Selected source via default: {selected_name}")
+            return selected_source
 
     def _calculate_max_concurrent_tasks(self) -> int:
         """Calculate the maximum number of concurrent tasks."""
@@ -372,22 +471,73 @@ class SweepEngine:
         try:
             result = await source.get_task_status(task_id)
 
-            if result.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+            # Handle both TaskResult and TaskStatus returns for backward compatibility
+            if hasattr(result, "status"):
+                # It's a TaskResult
+                status = result.status
+                error_message = getattr(result, "error_message", None)
+                exit_code = getattr(result, "exit_code", None)
+            else:
+                # It's a TaskStatus (for backward compatibility)
+                status = result
+                error_message = None
+                exit_code = None
+
+            # Log status changes
+            if task_id in self.active_tasks:
+                current_task = self.active_tasks[task_id]
+                if hasattr(current_task, "status") and current_task.status != status:
+                    logger.debug(
+                        f"Task {task_id} status changed: {getattr(current_task, 'status', 'UNKNOWN')} -> {status}"
+                    )
+
+            if status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
                 # Task is done, move it to the appropriate collection
                 task = self.active_tasks.pop(task_id, None)
                 if task:
-                    if result.status == TaskStatus.COMPLETED:
+                    # Update task with final status information
+                    task.status = status
+                    if error_message:
+                        task.error_message = error_message
+                    if exit_code is not None:
+                        task.exit_code = exit_code
+
+                    if status == TaskStatus.COMPLETED:
                         self.completed_tasks[task_id] = task
                         logger.info(f"Task {task_id} completed successfully")
-                    elif result.status == TaskStatus.FAILED:
+                    elif status == TaskStatus.FAILED:
                         self.failed_tasks[task_id] = task
-                        logger.warning(f"Task {task_id} failed")
+                        if error_message:
+                            logger.warning(f"Task {task_id} failed: {error_message}")
+                        elif exit_code is not None:
+                            logger.warning(f"Task {task_id} failed with exit code {exit_code}")
+                        else:
+                            logger.warning(f"Task {task_id} failed")
                     else:  # CANCELLED
                         self.failed_tasks[task_id] = task  # Treat as failed
                         logger.info(f"Task {task_id} was cancelled")
 
+                    # Update source statistics
+                    if hasattr(source, "stats"):
+                        if status == TaskStatus.COMPLETED:
+                            source.stats.tasks_completed += 1
+                        else:
+                            source.stats.tasks_failed += 1
+
+            elif status == TaskStatus.RUNNING:
+                # Update task status if it's now running
+                if task_id in self.active_tasks:
+                    self.active_tasks[task_id].status = status
+
         except Exception as e:
             logger.error(f"Error updating status for task {task_id}: {e}")
+            # If we can't get status, assume the task failed
+            task = self.active_tasks.pop(task_id, None)
+            if task:
+                task.status = TaskStatus.FAILED
+                task.error_message = f"Status check failed: {str(e)}"
+                self.failed_tasks[task_id] = task
+                logger.error(f"Task {task_id} marked as failed due to status check error")
 
     async def _start_background_tasks(self):
         """Start background monitoring and collection tasks."""
@@ -396,11 +546,86 @@ class SweepEngine:
         self._monitor_task = asyncio.create_task(self._monitor_loop())
 
     async def _health_check_loop(self):
-        """Periodic health checking of compute sources."""
+        """Periodic health checking of compute sources with failure tracking."""
         while not self._shutdown_event.is_set():
             try:
-                for source in self.sources.values():
-                    await source.update_health_status()
+                # Update source failure tracking
+                self._update_source_failure_tracking()
+
+                # Check health of all sources
+                for source_name, source in self.sources.items():
+                    if source_name in self.disabled_sources:
+                        continue
+
+                    try:
+                        # Perform health check
+                        health_report = await source.health_check()
+
+                        # Initialize health failure tracking if needed
+                        if source_name not in self.source_health_failures:
+                            self.source_health_failures[source_name] = 0
+
+                        # Check health status
+                        if hasattr(health_report, "status"):
+                            health_status = health_report.status
+                        else:
+                            # For backward compatibility, assume healthy if no status
+                            health_status = "healthy"
+
+                        if health_status == "unhealthy":
+                            self.source_health_failures[source_name] += 1
+                            error_msg = getattr(health_report, "error", "Unknown error")
+                            logger.warning(
+                                f"Health check failed for {source_name}: {error_msg} "
+                                f"(consecutive failures: {self.source_health_failures[source_name]})"
+                            )
+
+                            # Disable source if too many consecutive failures
+                            if (
+                                self.auto_disable_unhealthy_sources
+                                and self.source_health_failures[source_name]
+                                >= self.health_check_failure_threshold
+                            ):
+                                logger.error(
+                                    f"Disabling source '{source_name}' due to {self.source_health_failures[source_name]} "
+                                    f"consecutive health check failures"
+                                )
+                                self.disabled_sources.add(source_name)
+
+                        elif health_status == "degraded":
+                            # Reset consecutive failures for degraded but functional sources
+                            self.source_health_failures[source_name] = max(
+                                0, self.source_health_failures[source_name] - 1
+                            )
+
+                            # Log degraded status with details
+                            warning_msg = getattr(health_report, "warning", "Degraded performance")
+                            logger.warning(f"Source {source_name} is degraded: {warning_msg}")
+
+                        else:  # healthy
+                            # Reset consecutive failures for healthy sources
+                            self.source_health_failures[source_name] = 0
+
+                        # Log critical issues
+                        if (
+                            hasattr(health_report, "disk_status")
+                            and health_report.disk_status == "critical"
+                        ):
+                            disk_msg = getattr(health_report, "disk_message", "Unknown disk issue")
+                            logger.error(
+                                f"CRITICAL: {source_name} has critical disk space shortage: {disk_msg}"
+                            )
+
+                    except Exception as e:
+                        logger.error(f"Health check error for {source_name}: {e}")
+                        # Treat health check errors as health failures
+                        if source_name not in self.source_health_failures:
+                            self.source_health_failures[source_name] = 0
+                        self.source_health_failures[source_name] += 1
+
+                # Log current disabled sources
+                if self.disabled_sources:
+                    logger.debug(f"Currently disabled sources: {', '.join(self.disabled_sources)}")
 
                 await asyncio.sleep(self.health_check_interval)
 
@@ -409,6 +634,98 @@ class SweepEngine:
             except Exception as e:
                 logger.error(f"Error in health check loop: {e}")
                 await asyncio.sleep(60)  # Back off on error
+
+    def _update_source_failure_tracking(self):
+        """Update source failure counts based on current task statuses."""
+        # Reset failure counts for each update
+        for source_name in self.sources.keys():
+            self.source_failure_counts[source_name] = 0
+            if source_name not in self.source_job_counts:
+                self.source_job_counts[source_name] = 0
+
+        # Count failures and total jobs per source
+        all_tasks = {**self.completed_tasks, **self.failed_tasks, **self.active_tasks}
+        for task_id, task in all_tasks.items():
+            source_name = self.task_to_source.get(task_id)
+            if source_name and source_name in self.sources:
+                # Count total jobs
+                self.source_job_counts[source_name] += 1
+
+                # Count failures
+                if hasattr(task, "status") and task.status in [
+                    TaskStatus.FAILED,
+                    TaskStatus.CANCELLED,
+                ]:
+                    self.source_failure_counts[source_name] += 1
+
+        # Check for sources that should be disabled due to high failure rate
+        if self.enable_source_failsafe:
+            self._check_source_failure_rates()
+
+    def _check_source_failure_rates(self):
+        """Check source failure rates and disable sources that exceed threshold."""
+        for source_name in list(self.source_job_counts.keys()):
+            if source_name in self.disabled_sources:
+                continue
+
+            job_count = self.source_job_counts[source_name]
+            failure_count = self.source_failure_counts.get(source_name, 0)
+
+            # Only check sources with minimum number of jobs
+            if job_count >= self.min_jobs_for_failsafe:
+                failure_rate = failure_count / job_count
+
+                if failure_rate >= self.source_failure_threshold:
+                    logger.warning(
+                        f"Disabling source '{source_name}' due to high failure rate: "
+                        f"{failure_count}/{job_count} ({failure_rate:.1%}) >= {self.source_failure_threshold:.1%}"
+                    )
+                    self.disabled_sources.add(source_name)
+
+                    # Log details about the failures
+                    failed_tasks = [
+                        task
+                        for task_id, task in {**self.failed_tasks}.items()
+                        if self.task_to_source.get(task_id) == source_name
+                    ]
+
+                    if failed_tasks:
+                        failed_names = [
+                            getattr(task, "task_id", "unknown") for task in failed_tasks[-3:]
+                        ]
+                        logger.info(f"Recent failures on {source_name}: {failed_names}")
+
+    def get_health_status(self) -> Dict[str, Any]:
+        """Get comprehensive health status of all sources."""
+        status = {
+            "sources": {},
+            "disabled_sources": list(self.disabled_sources),
+            "failure_tracking": {
+                "threshold": self.source_failure_threshold,
+                "min_jobs": self.min_jobs_for_failsafe,
+                "health_failure_threshold": self.health_check_failure_threshold,
+            },
+        }
+
+        for source_name, source in self.sources.items():
+            job_count = self.source_job_counts.get(source_name, 0)
+            failure_count = self.source_failure_counts.get(source_name, 0)
+            health_failures = self.source_health_failures.get(source_name, 0)
+
+            failure_rate = (failure_count / job_count) if job_count > 0 else 0.0
+
+            status["sources"][source_name] = {
+                "enabled": source_name not in self.disabled_sources,
+                "total_jobs": job_count,
+                "failed_jobs": failure_count,
+                "failure_rate": failure_rate,
+                "consecutive_health_failures": health_failures,
+                "health_status": getattr(source.stats, "health_status", "unknown").value
+                if hasattr(source, "stats")
+                else "unknown",
+            }
+
+        return status
 
     async def _result_collection_loop(self):
         """Periodic result collection from compute sources."""
@@ -437,7 +754,7 @@ class SweepEngine:
                 await asyncio.sleep(60)
 
     def _log_progress(self):
-        """Log current sweep progress."""
+        """Log current sweep progress with enhanced information."""
         total_tasks = (
             len(self.pending_tasks)
             + len(self.active_tasks)
@@ -449,10 +766,47 @@ class SweepEngine:
         active = len(self.active_tasks)
         pending = len(self.pending_tasks)
 
+        # Calculate progress percentage
+        finished = completed + failed
+        progress_pct = (finished / total_tasks * 100) if total_tasks > 0 else 0
+
+        # Log main progress
         logger.info(
-            f"Sweep progress: {completed + failed}/{total_tasks} tasks finished "
+            f"Sweep progress: {finished}/{total_tasks} tasks finished "
             f"({completed} completed, {failed} failed), {active} active, {pending} pending"
+            f" [{progress_pct:.1f}%]"
         )
+
+        # Log source utilization
+        if self.sources:
+            source_info = []
+            for source_name, source in self.sources.items():
+                if source_name in self.disabled_sources:
+                    source_info.append(f"{source_name}:DISABLED")
+                elif hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
+                    active_tasks = source.stats.active_tasks
+                    max_tasks = getattr(
+                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                    )
+                    source_info.append(f"{source_name}:{active_tasks}/{max_tasks}")
+                else:
+                    source_info.append(f"{source_name}:UNKNOWN")
+
+            logger.info(f"Source utilization: {', '.join(source_info)}")
+
+        # Log failure rates if we have enough data
+        if self.enable_source_failsafe:
+            high_failure_sources = []
+            for source_name in self.sources.keys():
+                job_count = self.source_job_counts.get(source_name, 0)
+                failure_count = self.source_failure_counts.get(source_name, 0)
+                if job_count >= 3:  # Only show if we have some data
+                    failure_rate = failure_count / job_count
+                    if failure_rate > 0.2:  # Show if > 20% failure rate
+                        high_failure_sources.append(f"{source_name}:{failure_rate:.1%}")
+
+            if high_failure_sources:
+                logger.warning(f"High failure rates: {', '.join(high_failure_sources)}")
 
     async def _collect_results_from_sources(self):
         """Collect results from all compute sources."""
@@ -544,7 +898,7 @@ class SweepEngine:
             }
 
         return SweepResult(
-            sweep_id=self.context.sweep_id,
+            sweep_id=self.sweep_context.sweep_id,
             status=self.status,
             total_tasks=total_tasks,
             completed_tasks=len(self.completed_tasks),
@@ -567,7 +921,7 @@ class SweepEngine:
         Returns:
             True if cancellation was successful
         """
-        logger.info(f"Cancelling sweep {self.context.sweep_id}")
+        logger.info(f"Cancelling sweep {self.sweep_context.sweep_id}")
 
         self.status = SweepStatus.CANCELLED
 
@@ -588,44 +942,49 @@ class SweepEngine:
         return True
 
     async def get_sweep_status(self) -> Dict[str, Any]:
-        """Get current sweep status information.
-
-        Returns:
-            Dictionary with current status information
-        """
+        """Get comprehensive sweep status including health information."""
+        # Calculate basic progress
         total_tasks = (
-            len(self.completed_tasks)
-            + len(self.failed_tasks)
+            len(self.pending_tasks)
             + len(self.active_tasks)
-            + len(self.pending_tasks)
+            + len(self.completed_tasks)
+            + len(self.failed_tasks)
         )
+        completed = len(self.completed_tasks)
+        failed = len(self.failed_tasks)
+        progress_pct = ((completed + failed) / total_tasks * 100) if total_tasks > 0 else 0
 
-        # Get source health
-        source_health = {}
-        for source_name, source in self.sources.items():
-            source_health[source_name] = {
-                "health": source.stats.health_status.value,
-                "active_tasks": len(source.active_tasks),
-                "available_slots": source.stats.available_slots,
-                "utilization": f"{source.current_load:.1f}%",
-            }
+        # Get health status
+        health_status = self.get_health_status()
 
         return {
-            "sweep_id": self.context.sweep_id,
+            "sweep_id": self.sweep_context.sweep_id,
             "status": self.status.value,
             "progress": {
                 "total_tasks": total_tasks,
-                "completed": len(self.completed_tasks),
-                "failed": len(self.failed_tasks),
+                "completed": completed,
+                "failed": failed,
                 "active": len(self.active_tasks),
                 "pending": len(self.pending_tasks),
-                "completion_rate": (len(self.completed_tasks) / total_tasks * 100)
-                if total_tasks > 0
-                else 0,
+                "progress_percentage": progress_pct,
             },
-            "sources": source_health,
-            "start_time": self.start_time.isoformat() if self.start_time else None,
-            "duration": (datetime.now() - self.start_time).total_seconds()
-            if self.start_time
-            else None,
+            "sources": {
+                source_name: {
+                    "enabled": source_name not in self.disabled_sources,
+                    "active_tasks": getattr(source.stats, "active_tasks", 0)
+                    if hasattr(source, "stats")
+                    else 0,
+                    "max_tasks": getattr(
+                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                    )
+                    if hasattr(source, "stats")
+                    else source.max_concurrent_tasks,
+                    "health_status": getattr(source.stats, "health_status", "unknown").value
+                    if hasattr(source, "stats")
+                    else "unknown",
+                }
+                for source_name, source in self.sources.items()
+            },
+            "health": health_status,
+            "distribution_strategy": self.distribution_strategy.value,
         }

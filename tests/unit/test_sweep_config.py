@@ -5,8 +5,6 @@ Unit tests for SweepConfig class.
 import pytest
 
 pytestmark = pytest.mark.unit
-import tempfile
-from pathlib import Path
 import yaml
 
 from hsm.config.sweep import SweepConfig

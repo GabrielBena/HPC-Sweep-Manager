@@ -10,8 +10,9 @@ from rich.table import Table
 
 from ..config.hsm import HSMConfig
 from ..config.sweep import SweepConfig
-from ..core.engine import DistributionStrategy, SweepEngine
+from ..core.engine import SweepEngine
 from ..utils.logging import get_logger
+from ..utils.common import create_sweep_id
 from .utils import create_compute_source, format_duration, parse_compute_sources
 
 
@@ -27,7 +28,7 @@ def sweep_cmd(ctx):
     "--config",
     "-c",
     type=click.Path(exists=True, path_type=Path),
-    default=Path("sweeps/sweep.yaml"),
+    default=Path("sweeps/sweep_config.yaml"),
     help="Path to sweep configuration file",
 )
 @click.option(
@@ -273,18 +274,18 @@ async def _run_sweep_async(
     logger,
 ):
     """Run sweep asynchronously."""
+    from pathlib import Path
+
     from ..compute.base import SweepContext
     from ..utils.params import ParameterGenerator
-    from pathlib import Path
-    import uuid
 
     # Generate sweep ID if not provided
     if not sweep_id:
-        sweep_id = f"sweep_{uuid.uuid4().hex[:8]}"
+        sweep_id = create_sweep_id()
 
-    # Setup output directory
+    # Setup output directory (use sweeps/outputs structure)
     if not output_dir:
-        output_dir = Path.cwd() / "outputs" / "sweeps" / sweep_id
+        output_dir = Path.cwd() / "sweeps" / "outputs" / sweep_id
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -313,12 +314,12 @@ async def _run_sweep_async(
     if max_tasks:
         task_params = task_params[:max_tasks]
 
-    # Create Task objects
+    # Create Task objects with simple task IDs
     from ..compute.base import Task
 
     tasks = []
     for i, params in enumerate(task_params):
-        task = Task(task_id=f"{sweep_id}_task_{i:04d}", params=params, sweep_id=sweep_id)
+        task = Task(task_id=f"task_{i + 1:03d}", params=params, sweep_id=sweep_id)
         tasks.append(task)
 
     # Run the sweep
@@ -334,11 +335,12 @@ async def _complete_sweep_async(
     logger,
 ):
     """Complete sweep asynchronously."""
-    from ..compute.base import SweepContext
     from pathlib import Path
 
-    # Find sweep directory
-    sweep_dir = Path.cwd() / "outputs" / "sweeps" / sweep_id
+    from ..compute.base import SweepContext
+
+    # Find sweep directory (use sweeps/outputs structure)
+    sweep_dir = Path.cwd() / "sweeps" / "outputs" / sweep_id
     if not sweep_dir.exists():
         raise RuntimeError(f"Sweep directory not found: {sweep_dir}")
 
@@ -362,8 +364,9 @@ async def _complete_sweep_async(
     console.print("[yellow]Sweep completion not yet fully implemented[/yellow]")
 
     # For now, return a basic result
-    from ..core.engine import SweepResult, SweepStatus
     from datetime import datetime
+
+    from ..core.engine import SweepResult, SweepStatus
 
     return SweepResult(
         sweep_id=sweep_id,
@@ -379,11 +382,12 @@ async def _complete_sweep_async(
 
 async def _cancel_sweep_async(sweep_id: str, console: Console, logger) -> bool:
     """Cancel sweep asynchronously."""
-    from ..compute.base import SweepContext
     from pathlib import Path
 
-    # Find sweep directory
-    sweep_dir = Path.cwd() / "outputs" / "sweeps" / sweep_id
+    from ..compute.base import SweepContext
+
+    # Find sweep directory (use sweeps/outputs structure)
+    sweep_dir = Path.cwd() / "sweeps" / "outputs" / sweep_id
     if not sweep_dir.exists():
         logger.warning(f"Sweep directory not found: {sweep_dir}")
         return False

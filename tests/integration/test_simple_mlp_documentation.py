@@ -6,10 +6,10 @@ in the getting started guide and README files.
 """
 
 import os
-import pytest
-import subprocess
 from pathlib import Path
-from click.testing import CliRunner
+import subprocess
+
+import pytest
 
 pytestmark = pytest.mark.integration
 
@@ -109,7 +109,7 @@ class TestSimpleMlpDocumentation:
             pytest.skip("requirements.txt not found")
 
         # Read requirements
-        with open(requirements_file, "r") as f:
+        with open(requirements_file) as f:
             requirements = f.read().strip()
 
         # Should contain essential packages
@@ -149,7 +149,7 @@ class TestSimpleMlpDocumentation:
         # Read and validate basic structure
         import yaml
 
-        with open(config_file, "r") as f:
+        with open(config_file) as f:
             config = yaml.safe_load(f)
 
         # Should have basic sections mentioned in docs
@@ -166,7 +166,7 @@ class TestSimpleMlpDocumentation:
 
         import yaml
 
-        with open(sweep_config_file, "r") as f:
+        with open(sweep_config_file) as f:
             all_configs = yaml.safe_load(f)
 
         # Should contain example sweep types mentioned in docs

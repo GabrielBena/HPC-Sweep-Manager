@@ -3,12 +3,11 @@ Tests for the config CLI commands.
 """
 
 import os
+
 import pytest
 
 pytestmark = pytest.mark.cli
-from click.testing import CliRunner
-from unittest.mock import patch, MagicMock
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from hsm.cli.config import config_cmd
 

@@ -6,12 +6,11 @@ This is a simple example for testing and demonstrating the HPC Sweep Manager (HS
 It trains a basic MLP on synthetic data with configurable hyperparameters.
 """
 
-import os
-import sys
 import logging
+import os
+from pathlib import Path
 import random
 import time
-from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -24,8 +23,8 @@ log = logging.getLogger(__name__)
 try:
     import torch
     import torch.nn as nn
-    import torch.optim as optim
     import torch.nn.functional as F
+    import torch.optim as optim
 
     TORCH_AVAILABLE = True
 except ImportError:

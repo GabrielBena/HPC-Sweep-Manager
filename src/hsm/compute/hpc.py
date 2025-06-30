@@ -1,25 +1,23 @@
 """HPC compute source implementation supporting PBS and Slurm schedulers."""
 
 import asyncio
-import json
+from datetime import datetime
 import logging
+from pathlib import Path
 import shutil
 import subprocess
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
-from ..config.hsm import HSMConfig
 from .base import (
+    CollectionResult,
     ComputeSource,
+    ComputeSourceStats,
+    HealthReport,
+    HealthStatus,
+    SweepContext,
     Task,
     TaskResult,
     TaskStatus,
-    HealthStatus,
-    HealthReport,
-    SweepContext,
-    ComputeSourceStats,
-    CollectionResult,
 )
 
 logger = logging.getLogger(__name__)

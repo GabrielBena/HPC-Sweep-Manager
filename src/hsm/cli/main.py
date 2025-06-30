@@ -55,7 +55,7 @@ cli.add_command(config_cmd)  # hsm config init/validate/show
     "--config",
     "-c",
     type=click.Path(exists=True),
-    default="sweeps/sweep.yaml",
+    default="sweeps/sweep_config.yaml",
     help="Path to sweep configuration file",
 )
 @click.option(

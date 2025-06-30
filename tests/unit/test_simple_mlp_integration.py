@@ -5,19 +5,19 @@ These tests cover the specific issues encountered when running the simple_mlp ex
 and ensure that the HSM v2 system works correctly for basic local execution.
 """
 
-import pytest
 import asyncio
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+import tempfile
+
+import pytest
 
 pytestmark = pytest.mark.unit
 
 from hsm.cli.utils import create_compute_source, parse_compute_sources
+from hsm.compute.base import HealthStatus, SweepContext, Task, TaskStatus
 from hsm.compute.local import LocalComputeSource
-from hsm.compute.base import SweepContext, Task, TaskStatus, HealthStatus
 from hsm.config.sweep import SweepConfig
-from hsm.core.engine import SweepEngine, DistributionStrategy
+from hsm.core.engine import DistributionStrategy, SweepEngine
 from hsm.utils.params import ParameterGenerator
 
 

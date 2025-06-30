@@ -11,9 +11,9 @@ from .base import (
     TaskResult,
     TaskStatus,
 )
+from .hpc import HPCComputeSource
 from .local import LocalComputeSource
 from .ssh import SSHComputeSource, SSHConfig
-from .hpc import HPCComputeSource
 
 __all__ = [
     # Base classes and enums

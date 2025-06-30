@@ -5,8 +5,7 @@ Tests for the main CLI entry point and command shortcuts.
 import pytest
 
 pytestmark = pytest.mark.cli
-from click.testing import CliRunner
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from hsm.cli.main import cli
 

@@ -3,15 +3,14 @@
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import click
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
-from rich.panel import Panel
 
-from ..core.tracker import SweepTracker, CompletionStatus, TaskStatus
+from ..core.tracker import CompletionStatus, SweepTracker, TaskStatus
 from ..utils.logging import get_logger
 
 
@@ -77,6 +76,43 @@ def errors_cmd(ctx, sweep_id: str, limit: int, pattern: Optional[str]):
         raise click.Abort()
 
 
+@monitor.command("health")
+@click.option(
+    "--sources",
+    "-s",
+    type=str,
+    help="Comma-separated list of compute sources to check (local,ssh:hostname,hpc:cluster)",
+)
+@click.option(
+    "--detailed",
+    "-d",
+    is_flag=True,
+    help="Show detailed health information including resource metrics",
+)
+@click.option("--watch", "-w", is_flag=True, help="Watch mode - continuously update health status")
+@click.option(
+    "--refresh", "-r", type=int, default=30, help="Refresh interval in seconds for watch mode"
+)
+@click.pass_context
+def health_cmd(ctx, sources: Optional[str], detailed: bool, watch: bool, refresh: int):
+    """Monitor compute source health and status."""
+    console: Console = ctx.obj["console"]
+    logger = get_logger()
+
+    try:
+        if watch:
+            _watch_source_health(console, sources, detailed, refresh)
+        else:
+            asyncio.run(_show_source_health_async(console, sources, detailed))
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Health monitoring stopped[/yellow]")
+    except Exception as e:
+        logger.error(f"Health monitoring failed: {e}")
+        console.print(f"[red]Error: {e}[/red]")
+        raise click.Abort()
+
+
 # Helper functions
 
 
@@ -110,6 +146,7 @@ def _discover_sweep_directories() -> List[Path]:
 
     search_paths = [
         Path("sweeps/outputs"),
+        Path("outputs/sweeps"),  # Keep as fallback
         Path("outputs"),
     ]
 
@@ -434,86 +471,253 @@ def _show_recent_sweeps(console: Console, days: int, limit: int):
 
 
 def _show_sweep_errors(console: Console, sweep_id: str, limit: int, pattern: Optional[str]):
-    """Show errors for a specific sweep."""
+    """Show sweep errors and failures."""
     sweep_dir = _find_sweep_directory(sweep_id)
     if not sweep_dir:
-        console.print(f"[red]Sweep '{sweep_id}' not found[/red]")
+        console.print(f"[red]Sweep {sweep_id} not found[/red]")
         return
 
     sweep_data = _load_sweep_data(sweep_dir)
     if not sweep_data:
-        console.print(f"[red]Could not load data for sweep '{sweep_id}'[/red]")
+        console.print(f"[red]Could not load sweep data for {sweep_id}[/red]")
         return
 
     tracker = sweep_data["tracker"]
-    failed_tasks = tracker.get_tasks_by_status(TaskStatus.FAILED)
+    error_info = asyncio.run(tracker.get_failed_task_info())
 
-    if not failed_tasks:
-        console.print(f"[green]No failed tasks found in sweep '{sweep_id}'[/green]")
+    if not error_info:
+        console.print(f"[green]No errors found for sweep {sweep_id}[/green]")
         return
 
-    # Load error details from task directories
-    errors = []
-    for task_id in failed_tasks[:limit]:  # Limit results
-        task_dir = sweep_dir / "tasks" / task_id
-        if task_dir.exists():
-            stderr_file = task_dir / "stderr.log"
-            status_file = task_dir / "status.yaml"
+    # Filter by pattern if provided
+    if pattern:
+        error_info = [
+            info for info in error_info if pattern.lower() in info.get("error_message", "").lower()
+        ]
 
-            error_msg = "Unknown error"
-            timestamp = "Unknown"
+    # Limit results
+    error_info = error_info[:limit]
 
-            # Try to get error from stderr
-            if stderr_file.exists():
-                try:
-                    with open(stderr_file) as f:
-                        stderr_content = f.read()
-                        if stderr_content.strip():
-                            # Get last few lines of stderr
-                            lines = stderr_content.strip().split("\n")
-                            error_msg = lines[-1][:100]  # Truncate long errors
-                except Exception:
-                    pass
+    # Create error table
+    table = Table(title=f"Errors for Sweep {sweep_id}")
+    table.add_column("Task ID", style="cyan")
+    table.add_column("Status", style="red")
+    table.add_column("Error Message", style="yellow")
+    table.add_column("Last Updated", style="dim")
 
-            # Try to get timestamp from status
-            if status_file.exists():
-                try:
-                    import yaml
-
-                    with open(status_file) as f:
-                        status_data = yaml.safe_load(f)
-                        if status_data and "failed_time" in status_data:
-                            timestamp = status_data["failed_time"]
-                except Exception:
-                    pass
-
-            # Apply pattern filter
-            if pattern and pattern.lower() not in error_msg.lower():
-                continue
-
-            errors.append({"task_id": task_id, "error_msg": error_msg, "timestamp": timestamp})
-
-    if not errors:
-        if pattern:
-            console.print(
-                f"[yellow]No errors matching pattern '{pattern}' found in sweep '{sweep_id}'[/yellow]"
-            )
-        else:
-            console.print(f"[yellow]Could not load error details for sweep '{sweep_id}'[/yellow]")
-        return
-
-    table = Table(title=f"Errors in {sweep_id}")
-    table.add_column("Task", style="cyan")
-    table.add_column("Error Message", style="red")
-    table.add_column("Time", style="blue")
-
-    for error in errors:
-        table.add_row(error["task_id"], error["error_msg"], error["timestamp"])
+    for info in error_info:
+        table.add_row(
+            info.get("task_id", "Unknown"),
+            info.get("status", "UNKNOWN"),
+            info.get("error_message", "No error message")[:80] + "..."
+            if len(info.get("error_message", "")) > 80
+            else info.get("error_message", ""),
+            info.get("last_updated", "Unknown"),
+        )
 
     console.print(table)
 
-    if pattern:
-        console.print(f"\n[dim]Filtered by pattern: {pattern}[/dim]")
 
-    if len(failed_tasks) > limit:
-        console.print(f"\n[dim]Showing {len(errors)} of {len(failed_tasks)} failed tasks[/dim]")
+async def _show_source_health_async(console: Console, sources_spec: Optional[str], detailed: bool):
+    """Show compute source health status."""
+    from ..cli.utils import parse_compute_sources
+    from ..core.engine import SweepEngine
+    from ..compute.base import SweepContext
+    from pathlib import Path
+
+    # Parse compute sources
+    if sources_spec:
+        source_specs = parse_compute_sources(sources_spec)
+    else:
+        # Default to local source for health check
+        source_specs = [("local", {})]
+
+    # Create compute sources
+    sources = []
+    for source_type, config in source_specs:
+        try:
+            if source_type == "local":
+                from ..compute.local import LocalComputeSource
+
+                source = LocalComputeSource(name="local", **config)
+            elif source_type == "ssh":
+                from ..compute.ssh import SSHComputeSource, SSHConfig
+
+                # Extract hostname correctly
+                hostname = config.get("hostname")
+                if not hostname:
+                    raise ValueError("SSH compute source requires 'hostname' in config")
+
+                ssh_config = SSHConfig(
+                    host=hostname,
+                    username=config.get("username"),
+                    port=config.get("port", 22),
+                    key_file=config.get("key_file"),
+                    password=config.get("password"),
+                    known_hosts=config.get("known_hosts"),
+                    project_dir=config.get("project_dir"),
+                    python_path=config.get("python_path"),
+                    conda_env=config.get("conda_env"),
+                )
+
+                source = SSHComputeSource(
+                    name=f"ssh-{hostname}",
+                    ssh_config=ssh_config,
+                    max_concurrent_tasks=config.get("max_concurrent_tasks", 4),
+                    script_path=config.get("script_path"),
+                    timeout=config.get("timeout", 3600),
+                    sync_interval=config.get("sync_interval", 30),
+                )
+            else:
+                console.print(
+                    f"[yellow]Source type '{source_type}' not supported for health monitoring yet[/yellow]"
+                )
+                continue
+
+            sources.append(source)
+        except Exception as e:
+            console.print(f"[red]Error creating {source_type} source: {e}[/red]")
+
+    if not sources:
+        console.print("[red]No valid sources to monitor[/red]")
+        return
+
+    # Create a minimal sweep context for health checking
+    dummy_context = SweepContext(
+        sweep_id="health_check",
+        sweep_dir=Path("/tmp/hsm_health_check"),
+        config={},
+    )
+
+    # Setup sources
+    health_reports = []
+    for source in sources:
+        try:
+            console.print(f"[cyan]Setting up {source.name}...[/cyan]")
+            setup_success = await source.setup(dummy_context)
+
+            if setup_success:
+                console.print(f"[green]✓ {source.name} setup successful[/green]")
+                health_report = await source.health_check()
+                health_reports.append((source, health_report))
+            else:
+                console.print(f"[red]✗ {source.name} setup failed[/red]")
+
+        except Exception as e:
+            console.print(f"[red]Error with {source.name}: {e}[/red]")
+
+    # Display health information
+    if health_reports:
+        _display_health_status(console, health_reports, detailed)
+    else:
+        console.print("[yellow]No health reports available[/yellow]")
+
+    # Cleanup sources
+    for source in sources:
+        try:
+            await source.cleanup()
+        except Exception as e:
+            logger = get_logger()
+            logger.debug(f"Cleanup error for {source.name}: {e}")
+
+
+def _display_health_status(console: Console, health_reports: List, detailed: bool):
+    """Display health status in a formatted table."""
+    # Main health status table
+    table = Table(title="Compute Source Health Status")
+    table.add_column("Source", style="cyan")
+    table.add_column("Status", style="bold")
+    table.add_column("Available/Max", style="green")
+    table.add_column("Message", style="dim")
+
+    if detailed:
+        table.add_column("CPU %", style="yellow")
+        table.add_column("Memory %", style="yellow")
+        table.add_column("Disk Free", style="yellow")
+
+    for source, health_report in health_reports:
+        # Get health status
+        if hasattr(health_report, "status"):
+            status = health_report.status
+            if hasattr(status, "value"):
+                status_str = status.value.upper()
+                if status_str == "HEALTHY":
+                    status_display = "[green]HEALTHY[/green]"
+                elif status_str == "DEGRADED":
+                    status_display = "[yellow]DEGRADED[/yellow]"
+                else:
+                    status_display = "[red]UNHEALTHY[/red]"
+            else:
+                status_display = str(status).upper()
+        else:
+            status_display = "[dim]UNKNOWN[/dim]"
+
+        # Get capacity info
+        available = getattr(health_report, "available_slots", "?")
+        max_slots = getattr(health_report, "max_slots", "?")
+        capacity = f"{available}/{max_slots}"
+
+        # Get message
+        message = getattr(health_report, "message", "No additional information")
+        if len(message) > 50:
+            message = message[:47] + "..."
+
+        row = [source.name, status_display, capacity, message]
+
+        if detailed:
+            # Add detailed metrics
+            cpu = getattr(health_report, "cpu_usage", None)
+            memory = getattr(health_report, "memory_usage", None)
+            disk_free = getattr(health_report, "disk_free_gb", None)
+
+            cpu_str = f"{cpu:.1f}" if cpu is not None else "N/A"
+            memory_str = f"{memory:.1f}" if memory is not None else "N/A"
+            disk_str = f"{disk_free:.1f}GB" if disk_free is not None else "N/A"
+
+            row.extend([cpu_str, memory_str, disk_str])
+
+        table.add_row(*row)
+
+    console.print(table)
+
+    # Show warnings if any
+    warnings = []
+    for source, health_report in health_reports:
+        if hasattr(health_report, "warnings") and health_report.warnings:
+            for warning in health_report.warnings:
+                warnings.append(f"{source.name}: {warning}")
+
+    if warnings:
+        console.print("\n[bold yellow]Warnings:[/bold yellow]")
+        for warning in warnings:
+            console.print(f"  ⚠️  {warning}")
+
+
+def _watch_source_health(
+    console: Console, sources_spec: Optional[str], detailed: bool, refresh: int
+):
+    """Watch source health in real-time."""
+    try:
+        with Live(console=console, refresh_per_second=1) as live:
+            while True:
+                # Create a fresh display each time
+                import io
+                from rich.console import Console as RichConsole
+
+                # Capture output to string
+                temp_console = RichConsole(file=io.StringIO(), width=console.options.max_width)
+
+                try:
+                    asyncio.run(_show_source_health_async(temp_console, sources_spec, detailed))
+                    output = temp_console.file.getvalue()
+                    live.update(output)
+                except Exception as e:
+                    live.update(f"[red]Error updating health status: {e}[/red]")
+
+                # Wait for refresh interval
+                import time
+
+                time.sleep(refresh)
+
+    except KeyboardInterrupt:
+        pass

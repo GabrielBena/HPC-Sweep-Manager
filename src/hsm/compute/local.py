@@ -147,9 +147,17 @@ class LocalComputeSource(ComputeSource):
             )
 
         try:
-            # Create task directory
-            task_dir = self._get_task_directory(task.task_id)
-            task_dir.mkdir(parents=True, exist_ok=True)
+            # Register task first
+            self.register_task(task)
+
+            # Ensure task directory exists (use the output_dir set by SweepEngine)
+            if task.output_dir:
+                task.output_dir.mkdir(parents=True, exist_ok=True)
+                task_dir = task.output_dir
+            else:
+                # Fallback: create a basic task directory
+                task_dir = self.project_dir / "tasks" / task.task_id
+                task_dir.mkdir(parents=True, exist_ok=True)
 
             # Write task parameters
             params_file = task_dir / "params.yaml"
@@ -162,8 +170,6 @@ class LocalComputeSource(ComputeSource):
             future = asyncio.create_task(self._execute_task(task))
             self.task_futures[task.task_id] = future
 
-            # Register task
-            self.register_task(task)
             self.stats.tasks_submitted += 1
 
             logger.debug(f"Task {task.task_id} submitted to local source {self.name}")
@@ -183,45 +189,73 @@ class LocalComputeSource(ComputeSource):
             )
 
     async def get_task_status(self, task_id: str) -> TaskResult:
-        """Get current status of a task.
+        """Get the current status of a task.
 
         Args:
-            task_id: ID of the task
+            task_id: ID of the task to check
 
         Returns:
-            TaskResult with current status
+            TaskResult with current status and metadata
         """
-        # Check if task is in our active tasks
-        if task_id in self.active_tasks:
-            task = self.active_tasks[task_id]
-            # Determine current status based on task state
-            if task_id in self.task_futures:
-                future = self.task_futures[task_id]
-                if future.done():
-                    status = TaskStatus.COMPLETED if not future.exception() else TaskStatus.FAILED
-                else:
-                    status = TaskStatus.RUNNING
-            else:
-                status = TaskStatus.PENDING
+        if task_id not in self.task_registry:
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.UNKNOWN,
+                error_message="Task not found in registry",
+            )
 
-            return TaskResult(task_id=task_id, status=status, timestamp=datetime.now())
+        current_status = self.task_registry[task_id]
 
-        # Check if task directory exists and has status file
-        task_dir = self._get_task_directory(task_id)
-        status_file = task_dir / "status.yaml"
+        # Check if task completed and we can read additional details
+        task_dir = self.context.sweep_dir / "tasks" / task_id if hasattr(self, "context") else None
 
-        if status_file.exists():
+        error_message = None
+        exit_code = None
+        complete_time = None
+
+        if task_dir and task_dir.exists():
             try:
-                with open(status_file) as f:
+                # Try to read status file for more details
+                status_file = task_dir / "status.yaml"
+                if status_file.exists():
                     import yaml
 
-                    status_data = yaml.safe_load(f)
-                    status = TaskStatus(status_data.get("status", "PENDING"))
-                    return TaskResult(task_id=task_id, status=status, timestamp=datetime.now())
-            except Exception as e:
-                logger.debug(f"Error reading status file for {task_id}: {e}")
+                    with open(status_file, "r") as f:
+                        status_data = yaml.safe_load(f)
 
-        return TaskResult(task_id=task_id, status=TaskStatus.UNKNOWN, timestamp=datetime.now())
+                    if status_data:
+                        error_message = status_data.get("error_message")
+                        exit_code = status_data.get("exit_code")
+                        if status_data.get("complete_time"):
+                            complete_time = datetime.fromisoformat(status_data["complete_time"])
+
+                # Also check for error files
+                if current_status == TaskStatus.FAILED and not error_message:
+                    error_file = task_dir / "stderr.log"
+                    if error_file.exists():
+                        try:
+                            with open(error_file, "r") as f:
+                                stderr_content = f.read().strip()
+                                if stderr_content:
+                                    # Take last few lines as error message
+                                    lines = stderr_content.split("\n")
+                                    error_message = (
+                                        "\n".join(lines[-3:]) if len(lines) > 3 else stderr_content
+                                    )
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                logger.debug(f"Error reading task details for {task_id}: {e}")
+
+        return TaskResult(
+            task_id=task_id,
+            status=current_status,
+            submit_time=datetime.now(),  # We should track this better
+            complete_time=complete_time,
+            exit_code=exit_code,
+            error_message=error_message,
+        )
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task.
@@ -264,13 +298,17 @@ class LocalComputeSource(ComputeSource):
             if task_id in self.active_tasks:
                 task = self.active_tasks[task_id]
                 self.update_task_status(task_id, TaskStatus.CANCELLED)
+
+                # Write status to file if we have a task directory
+                if task.output_dir:
+                    await self._write_task_status_to_dir(
+                        task.output_dir, task_id, TaskStatus.CANCELLED
+                    )
+
                 # Move to completed tasks as cancelled
                 del self.active_tasks[task_id]
 
             self.stats.tasks_cancelled += 1
-
-            # Write status to file
-            await self._write_task_status(task_id, TaskStatus.CANCELLED)
 
             return True
 
@@ -292,7 +330,13 @@ class LocalComputeSource(ComputeSource):
 
         for task_id in task_ids:
             try:
-                task_dir = self._get_task_directory(task_id)
+                # Get task output directory
+                task = self.active_tasks.get(task_id)
+                if not task or not task.output_dir:
+                    failed_tasks.append((task_id, "Task not found or no output directory"))
+                    continue
+
+                task_dir = task.output_dir
 
                 if not task_dir.exists():
                     failed_tasks.append((task_id, "Task directory not found"))
@@ -300,7 +344,7 @@ class LocalComputeSource(ComputeSource):
 
                 # Check if task is completed
                 status = await self.get_task_status(task_id)
-                if status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                if status.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
                     continue  # Skip tasks that are not done
 
                 # Results are already local, just verify they exist
@@ -308,7 +352,8 @@ class LocalComputeSource(ComputeSource):
                 if results_dir.exists():
                     collected_tasks.append(task_id)
                 else:
-                    failed_tasks.append((task_id, "Results directory not found"))
+                    # If no results directory, consider the task outputs as results
+                    collected_tasks.append(task_id)
 
             except Exception as e:
                 failed_tasks.append((task_id, str(e)))
@@ -402,21 +447,27 @@ class LocalComputeSource(ComputeSource):
             return False
 
     async def _execute_task(self, task: Task) -> None:
-        """Execute a task in a subprocess.
+        """Execute a single task.
 
         Args:
             task: Task to execute
         """
         async with self.semaphore:
-            task_dir = self._get_task_directory(task.task_id)
+            # Use the task's output_dir directly (set by SweepEngine)
+            task_dir = task.output_dir
+            if not task_dir:
+                logger.error(f"Task {task.task_id} has no output directory set")
+                return
+
             start_time = datetime.now()
 
             try:
                 # Update status to running
                 self.update_task_status(task.task_id, TaskStatus.RUNNING)
 
-                await self._write_task_status(
-                    task.task_id, TaskStatus.RUNNING, start_time=start_time
+                # Write initial status
+                await self._write_task_status_to_dir(
+                    task_dir, task.task_id, TaskStatus.RUNNING, start_time=start_time
                 )
 
                 # Build command
@@ -465,9 +516,10 @@ class LocalComputeSource(ComputeSource):
                 if task.task_id in self.active_tasks:
                     del self.active_tasks[task.task_id]
 
-                # Write outputs and status
-                await self._write_output_files(task.task_id, stdout_bytes, stderr_bytes)
-                await self._write_task_status(
+                # Write outputs and status to the task directory
+                await self._write_output_files_to_dir(task_dir, stdout_bytes, stderr_bytes)
+                await self._write_task_status_to_dir(
+                    task_dir,
                     task.task_id,
                     final_status,
                     start_time=start_time,
@@ -485,24 +537,14 @@ class LocalComputeSource(ComputeSource):
 
                 self.stats.tasks_failed += 1
 
-                await self._write_task_status(
+                await self._write_task_status_to_dir(
+                    task_dir,
                     task.task_id,
                     TaskStatus.FAILED,
                     start_time=start_time,
                     complete_time=datetime.now(),
                     error_message=str(e),
                 )
-
-    def _get_task_directory(self, task_id: str) -> Path:
-        """Get the directory for a task.
-
-        Args:
-            task_id: Task ID
-
-        Returns:
-            Path to task directory
-        """
-        return self.project_dir / "sweeps" / "outputs" / "tasks" / task_id
 
     def _detect_script_path(self, context: SweepContext) -> Optional[str]:
         """Auto-detect the training script path.
@@ -624,16 +666,16 @@ class LocalComputeSource(ComputeSource):
 
         return env
 
-    async def _write_output_files(self, task_id: str, stdout: bytes, stderr: bytes) -> None:
+    async def _write_output_files_to_dir(
+        self, task_dir: Path, stdout: bytes, stderr: bytes
+    ) -> None:
         """Write task output files.
 
         Args:
-            task_id: Task ID
+            task_dir: Task directory
             stdout: Standard output
             stderr: Standard error
         """
-        task_dir = self._get_task_directory(task_id)
-
         # Write stdout
         stdout_file = task_dir / "stdout.log"
         with open(stdout_file, "wb") as f:
@@ -644,8 +686,9 @@ class LocalComputeSource(ComputeSource):
         with open(stderr_file, "wb") as f:
             f.write(stderr)
 
-    async def _write_task_status(
+    async def _write_task_status_to_dir(
         self,
+        task_dir: Path,
         task_id: str,
         status: TaskStatus,
         start_time: Optional[datetime] = None,
@@ -656,6 +699,7 @@ class LocalComputeSource(ComputeSource):
         """Write task status to file.
 
         Args:
+            task_dir: Task directory
             task_id: Task ID
             status: Task status
             start_time: Task start time
@@ -663,7 +707,6 @@ class LocalComputeSource(ComputeSource):
             exit_code: Process exit code
             error_message: Error message if failed
         """
-        task_dir = self._get_task_directory(task_id)
         status_file = task_dir / "status.yaml"
 
         status_data = {
