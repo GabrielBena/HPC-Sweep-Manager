@@ -1,6 +1,6 @@
 # HSM Development Makefile
 
-.PHONY: help test test-unit test-integration test-cli test-coverage test-fast docs docs-build docs-serve clean install install-dev lint format check
+.PHONY: help test test-unit test-integration test-cli test-coverage test-fast test-simple-mlp docs docs-build docs-serve clean install install-dev lint format check verify-install
 
 # Default target
 help:
@@ -13,6 +13,7 @@ help:
 	@echo "  test-cli          Run CLI tests only"
 	@echo "  test-fast         Run fast tests (exclude slow/remote)"
 	@echo "  test-coverage     Run tests with detailed coverage report"
+	@echo "  test-simple-mlp   Run tests using simple_mlp example"
 	@echo ""
 	@echo "Code Quality (Ruff):"
 	@echo "  lint              Run linting checks"
@@ -33,23 +34,33 @@ help:
 
 # Test commands
 test:
-	pytest -v
+	@echo "Running all tests..."
+	pytest -v tests/
 
 test-unit:
-	pytest -v -m "unit" tests/unit/
+	@echo "Running unit tests..."
+	pytest -v tests/unit/
 
 test-integration:
-	pytest -v -m "integration" tests/
+	@echo "Running integration tests..."
+	pytest -v tests/integration/
 
 test-cli:
-	pytest -v -m "cli" tests/cli/
+	@echo "Running CLI tests..."
+	pytest -v tests/cli/
 
 test-fast:
-	pytest -v -m "not slow and not remote and not hpc"
+	@echo "Running fast tests (excluding slow tests)..."
+	pytest -v tests/ -m "not slow" --tb=short
 
 test-coverage:
-	pytest -v --cov-report=html --cov-report=term-missing
+	@echo "Running tests with coverage report..."
+	pytest -v tests/ --cov=hsm --cov-report=html --cov-report=term-missing
 	@echo "Coverage report generated in htmlcov/"
+
+test-simple-mlp:
+	@echo "Running tests with simple_mlp example..."
+	pytest -v tests/integration/test_simple_mlp_integration.py
 
 # Documentation commands
 docs:
@@ -68,7 +79,7 @@ install:
 
 install-dev:
 	pip install -e ".[dev]"
-	pip install pytest pytest-cov pytest-mock click paramiko pyyaml ruff
+	@echo "Development dependencies installed!"
 
 lint:
 	@echo "Running linting checks with ruff..."
@@ -133,15 +144,19 @@ build:
 
 # Installation verification
 verify-install:
-	python -c "import hpc_sweep_manager; print('HSM installed successfully')"
+	@echo "Verifying HSM installation..."
+	python -c "import hsm; print('HSM package imported successfully')"
 	hsm --help
+	@echo "HSM installation verified!"
 
 # Coverage targets
 coverage-unit:
-	pytest tests/unit/ --cov=hpc_sweep_manager --cov-report=term-missing
+	@echo "Running unit tests with coverage..."
+	pytest tests/unit/ --cov=hsm --cov-report=term-missing
 
 coverage-integration:
-	pytest tests/ -m integration --cov=hpc_sweep_manager --cov-report=term-missing
+	@echo "Running integration tests with coverage..."
+	pytest tests/integration/ --cov=hsm --cov-report=term-missing
 
 # Ruff-specific targets
 ruff-all:

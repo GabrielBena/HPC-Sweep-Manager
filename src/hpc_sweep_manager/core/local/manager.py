@@ -4,6 +4,7 @@ from datetime import datetime
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ..common.path_detector import PathDetector
+from ..common.sweep_tracker import SweepTaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,9 @@ class LocalJobManager:
         self.show_output = show_output
         self.total_jobs_planned = 0
         self.jobs_completed = 0
+
+        # Task tracking for sweep-wide visibility
+        self.task_tracker = None  # Will be initialized when sweep starts
 
         # Validate and fix paths for cross-machine compatibility
         self._validate_and_fix_paths()
@@ -120,8 +125,21 @@ class LocalJobManager:
         logs_dir.mkdir(parents=True, exist_ok=True)
         pbs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create task directory for organized outputs
-        task_dir = sweep_dir / "tasks" / f"task_{self.job_counter + 1:03d}"
+        # Extract task name from job_name for distributed consistency
+        # Job names from distributed manager: "sweep_20250625_214125_task_001"
+        # We want to extract: "task_001"
+        task_match = re.search(r"task_(\d+)", job_name)
+        if task_match:
+            task_name = f"task_{task_match.group(1)}"
+        else:
+            # Fallback to job counter if pattern not found (for standalone local jobs)
+            task_name = f"task_{self.job_counter + 1:03d}"
+            logger.warning(
+                f"Could not extract task name from job name {job_name}, using fallback: {task_name}"
+            )
+
+        # Create task directory for organized outputs using extracted task name
+        task_dir = sweep_dir / "tasks" / task_name
         task_dir.mkdir(parents=True, exist_ok=True)
 
         # Increment job counter
@@ -131,6 +149,12 @@ class LocalJobManager:
         # Determine the effective wandb group
         effective_wandb_group = wandb_group or sweep_id
 
+        # Register task submission in tracker if available
+        if self.task_tracker:
+            self.task_tracker.register_task_submission(
+                task_name=task_name, compute_source="local", job_id=job_id, params=params
+            )
+
         # Create a shell script for the job (for consistency with HPC)
         script_content = f"""#!/bin/bash
 # Local job script for {job_name}
@@ -139,8 +163,30 @@ class LocalJobManager:
 # Change to project directory
 cd {self.project_dir}
 
+# Set up JAX/CUDA environment variables to help with compilation issues
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_TRACEBACK_FILTERING=off
+export JAX_PLATFORMS=gpu,cpu
+
+# Always use task directory for temporary files (avoid /tmp completely)
+export TMPDIR={task_dir}/tmp
+export TEMP={task_dir}/tmp
+export TMP={task_dir}/tmp
+mkdir -p {task_dir}/tmp
+
+# Check disk space for debugging
+echo "Disk space check at $(date):" >> {task_dir}/task_info.txt
+df -h . >> {task_dir}/task_info.txt
+echo "Using task directory for all temporary files: {task_dir}/tmp" >> {task_dir}/task_info.txt
+
+# Set up CUDA cache and compilation directories within task directory
+export CUDA_CACHE_PATH={task_dir}/cuda_cache
+export XLA_FLAGS="--xla_gpu_cuda_data_dir={task_dir}/cuda_cache"
+mkdir -p {task_dir}/cuda_cache
+
 # Create task info file
 echo "Job ID: {job_id}" > {task_dir}/task_info.txt
+echo "Task Name: {task_name}" >> {task_dir}/task_info.txt
 echo "Task Directory: {task_dir}" >> {task_dir}/task_info.txt
 echo "Start Time: $(date)" >> {task_dir}/task_info.txt
 echo "Parameters: {self._params_to_string(params)}" >> {task_dir}/task_info.txt
@@ -253,8 +299,10 @@ fi
             print(f"Max parallel jobs: {self.max_parallel_jobs}")
 
         job_ids = []
+        task_names = []
         for i, params in enumerate(param_combinations):
             job_name = f"{sweep_id}_task_{i + 1:03d}"
+            task_names.append(f"task_{i + 1:03d}")
 
             # Wait if we've reached max parallel jobs
             while len(self.running_processes) >= self.max_parallel_jobs:
@@ -265,6 +313,13 @@ fi
                 params, job_name, sweep_dir, sweep_id, wandb_group, pbs_dir, logs_dir
             )
             job_ids.append(job_id)
+
+        # Register all tasks in batch for efficiency
+        if self.task_tracker:
+            self.task_tracker.register_task_batch(
+                task_names=task_names, compute_source="local", job_ids=job_ids
+            )
+            self.task_tracker.save_mapping()
 
         # Return a synthetic array job ID
         array_job_id = f"local_array_{sweep_id}"
@@ -307,8 +362,28 @@ fi
             if process.poll() is not None:
                 completed_jobs.append(job_id)
 
-        # Remove completed jobs
+        # Remove completed jobs and update task tracker
         for job_id in completed_jobs:
+            job_info = self.running_processes[job_id]
+            process = job_info["process"]
+
+            # Determine task status based on exit code
+            exit_code = process.returncode
+            status = "COMPLETED" if exit_code == 0 else "FAILED"
+
+            # Extract task name from job name for tracking
+            task_match = re.search(r"task_(\d+)", job_info["job_name"])
+            if task_match:
+                task_name = f"task_{task_match.group(1)}"
+
+                # Update task tracker if available
+                if self.task_tracker:
+                    self.task_tracker.update_task_status(
+                        task_name=task_name, status=status, complete_time=datetime.now()
+                    )
+                    # Save the updated mapping
+                    self.task_tracker.save_mapping()
+
             del self.running_processes[job_id]
             self.jobs_completed += 1
             if self.show_progress:
@@ -628,6 +703,12 @@ fi
         logs_dir: Optional[Path] = None,
     ) -> List[str]:
         """Submit a complete sweep - either individual jobs or array job."""
+        # Initialize task tracker for unified sweep tracking
+        self.task_tracker = SweepTaskTracker(sweep_dir, sweep_id)
+        self.task_tracker.initialize_sweep(
+            total_tasks=len(param_combinations), compute_source="local", mode="local"
+        )
+
         # Use provided directories or default to sweep_dir subdirectories
         if pbs_dir is None:
             pbs_dir = sweep_dir / "scripts"

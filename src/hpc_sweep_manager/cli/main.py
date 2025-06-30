@@ -129,6 +129,104 @@ def cleanup_compat(ctx, days: int, dry_run: bool, force: bool):
     ctx.invoke(monitor.commands["cleanup"], days=days, dry_run=dry_run, force=force)
 
 
+# Add backwards compatibility for the original sweep command
+@cli.command("run")
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True),
+    default="sweeps/sweep.yaml",
+    help="Path to sweep configuration file",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "individual", "array", "local", "remote", "distributed"]),
+    default="auto",
+    help="Job submission mode",
+)
+@click.option("--dry-run", "-d", is_flag=True, help="Show what would be executed without running")
+@click.option("--count-only", is_flag=True, help="Count combinations and exit")
+@click.option("--max-runs", type=int, help="Maximum number of runs to execute")
+@click.option("--walltime", help="Job walltime (overrides config default)")
+@click.option("--resources", help="Job resources (overrides config default)")
+@click.option("--group", help="W&B group name for this sweep")
+@click.option("--priority", type=int, help="Job priority")
+@click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
+@click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
+@click.option("--no-progress", is_flag=True, help="Disable progress tracking")
+@click.option("--remote", help="Remote machine name for remote mode")
+@click.option("--no-verify-sync", is_flag=True, help="Skip project synchronization verification")
+@click.option(
+    "--auto-sync",
+    is_flag=True,
+    help="Automatically sync mismatched files to remote without prompting",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress non-error output")
+@click.pass_context
+def run_compat(ctx, **kwargs):
+    """Run parameter sweep (shortcut for 'hsm sweep run')."""
+    ctx.invoke(sweep_cmd.commands["run"], **kwargs)
+
+
+# Add shortcuts for new completion functionality
+@cli.command("complete")
+@click.argument("sweep_id")
+@click.option(
+    "--mode",
+    type=click.Choice(["auto", "local", "remote", "distributed"]),
+    default="local",
+    help="Job submission mode for completion",
+)
+@click.option("--dry-run", "-d", is_flag=True, help="Show what would be completed without running")
+@click.option(
+    "--no-retry-failed", is_flag=True, help="Don't retry failed combinations, only missing ones"
+)
+@click.option("--walltime", help="Job walltime for completion jobs")
+@click.option("--resources", help="Job resources for completion jobs")
+@click.option("--group", help="W&B group name for completion jobs")
+@click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs for completion")
+@click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
+@click.option("--no-progress", is_flag=True, help="Disable progress tracking")
+@click.option("--remote", help="Remote machine name for remote completion")
+@click.option("--no-verify-sync", is_flag=True, help="Skip project synchronization verification")
+@click.option(
+    "--auto-sync",
+    is_flag=True,
+    help="Automatically sync mismatched files to remote without prompting",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress non-error output")
+@click.pass_context
+def complete_compat(ctx, **kwargs):
+    """Complete a partially finished sweep (shortcut for 'hsm sweep complete')."""
+    ctx.invoke(sweep_cmd.commands["complete"], **kwargs)
+
+
+@cli.command("status")
+@click.argument("sweep_id", required=False)
+@click.option("--all", "-a", is_flag=True, help="Show status of all sweeps")
+@click.option("--incomplete-only", is_flag=True, help="Show only incomplete sweeps")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress non-error output")
+@click.pass_context
+def status_compat(ctx, **kwargs):
+    """Show completion status of sweep(s) (shortcut for 'hsm sweep status')."""
+    ctx.invoke(sweep_cmd.commands["status"], **kwargs)
+
+
+@cli.command("errors")
+@click.argument("sweep_id")
+@click.option("--all", "-a", is_flag=True, help="Show all error details")
+@click.option("--pattern", help="Filter errors by pattern (e.g., 'ImportError')")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress non-error output")
+@click.pass_context
+def errors_compat(ctx, **kwargs):
+    """Show error summaries for a specific sweep (shortcut for 'hsm sweep errors')."""
+    ctx.invoke(sweep_cmd.commands["errors"], **kwargs)
+
+
 def main():
     """Main entry point for the CLI."""
     try:

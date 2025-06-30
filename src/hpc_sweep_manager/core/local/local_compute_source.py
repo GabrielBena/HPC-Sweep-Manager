@@ -101,7 +101,7 @@ class LocalComputeSource(ComputeSource):
             self.active_jobs[job_id] = job_info
             self.stats.total_submitted += 1
 
-            logger.info(f"Job {job_name} submitted to local source {self.name} with ID {job_id}")
+            logger.debug(f"Job {job_name} submitted to local source {self.name} with ID {job_id}")
             return job_id
 
         except Exception as e:

@@ -420,30 +420,109 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
         table.add_column("Source", style="cyan")
         table.add_column("Type", style="blue")
         table.add_column("Status", style="green")
-        table.add_column("Utilization", style="yellow")
+        table.add_column("Disk Space", style="yellow")
+        table.add_column("System", style="magenta")
+        table.add_column("Failures", style="red")
         table.add_column("Details", style="dim")
 
         for name, health in health_report.items():
             source_type = "Local" if name == "local" else "SSH"
-            status_style = "green" if health.get("status") == "healthy" else "red"
-            status = f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
 
-            utilization = health.get("utilization", "N/A")
-            details = ""
+            # Status with appropriate styling
+            status = health.get("status", "unknown")
+            if status == "healthy":
+                status_display = f"[green]✓ {status}[/green]"
+            elif status == "degraded":
+                status_display = f"[yellow]⚠ {status}[/yellow]"
+            elif status == "unhealthy":
+                status_display = f"[red]✗ {status}[/red]"
+            else:
+                status_display = f"[dim]{status}[/dim]"
 
+            # Disk space information
+            disk_info = "N/A"
+            if "disk_status" in health:
+                disk_status = health["disk_status"]
+                disk_message = health.get("disk_message", "")
+
+                if disk_status == "critical":
+                    disk_info = f"[red]⚠ {disk_message}[/red]"
+                elif disk_status == "warning":
+                    disk_info = f"[yellow]⚠ {disk_message}[/yellow]"
+                elif disk_status == "healthy":
+                    disk_info = f"[green]✓ {disk_message}[/green]"
+                else:
+                    disk_info = f"[dim]{disk_message}[/dim]"
+
+            # System information
+            system_info = "N/A"
             if "system" in health:
-                sys_info = health["system"]
-                details = f"CPU: {sys_info.get('cpu_percent', 'N/A')}%, RAM: {sys_info.get('memory_percent', 'N/A')}%"
+                sys_data = health["system"]
+                cpu = sys_data.get("cpu_percent", "N/A")
+                ram = sys_data.get("memory_percent", "N/A")
+                system_info = f"CPU: {cpu}%, RAM: {ram}%"
+            elif "load_average" in health and "memory_percent" in health:
+                load = health.get("load_average", "N/A")
+                ram = health.get("memory_percent", "N/A")
+                system_info = f"Load: {load:.1f}, RAM: {ram:.1f}%"
             elif "remote_time" in health:
-                details = f"Connected - {health.get('remote_time', 'N/A')}"
+                system_info = f"Connected"
+
+            # Failure rate information
+            failure_info = "N/A"
+            if "disk_failure_rate" in health:
+                failure_rate = health["disk_failure_rate"]
+                if failure_rate > 0:
+                    if failure_rate > 0.3:
+                        failure_info = f"[red]{failure_rate:.1%}[/red]"
+                    elif failure_rate > 0.1:
+                        failure_info = f"[yellow]{failure_rate:.1%}[/yellow]"
+                    else:
+                        failure_info = f"{failure_rate:.1%}"
+                else:
+                    failure_info = "0%"
+
+            # Additional details
+            details = ""
+            if "warning" in health:
+                details = (
+                    health["warning"][:40] + "..."
+                    if len(health["warning"]) > 40
+                    else health["warning"]
+                )
             elif "error" in health:
                 details = (
-                    health["error"][:50] + "..." if len(health["error"]) > 50 else health["error"]
+                    health["error"][:40] + "..." if len(health["error"]) > 40 else health["error"]
                 )
+            elif health.get("utilization"):
+                details = f"Utilization: {health['utilization']}"
 
-            table.add_row(name, source_type, status, utilization, details)
+            table.add_row(
+                name, source_type, status_display, disk_info, system_info, failure_info, details
+            )
 
         console.print(table)
+
+        # Show summary of issues
+        issues = []
+        for name, health in health_report.items():
+            if health.get("status") == "unhealthy":
+                issues.append(f"[red]✗ {name}: {health.get('error', 'Unknown error')}[/red]")
+            elif health.get("status") == "degraded":
+                issues.append(
+                    f"[yellow]⚠ {name}: {health.get('warning', 'Degraded performance')}[/yellow]"
+                )
+            elif health.get("disk_status") == "critical":
+                issues.append(
+                    f"[red]⚠ {name}: Critical disk space - {health.get('disk_message', '')}[/red]"
+                )
+
+        if issues:
+            console.print("\n[bold]Issues detected:[/bold]")
+            for issue in issues:
+                console.print(f"  {issue}")
+        else:
+            console.print("\n[green]✓ All sources appear healthy[/green]")
 
     if watch:
         console.print(

@@ -260,15 +260,26 @@ class RemoteJobManager:
                                 logger.error("Failed to sync changes to remote")
                                 return False
                         elif can_offer_sync and interactive:
-                            sync_choice = self._prompt_for_sync(sync_result)
+                            sync_choice = self._prompt_for_sync(sync_result, conn)
                             if sync_choice is True:
-                                logger.info("Syncing local changes to remote machine...")
+                                logger.info("Syncing changes between local and remote...")
                                 sync_success = await self._sync_mismatched_files(conn, sync_result)
                                 if sync_success:
-                                    logger.info("✓ Successfully synced local changes to remote")
+                                    logger.info("✓ Successfully synchronized local and remote")
                                     sync_performed = True
                                 else:
-                                    logger.error("Failed to sync changes to remote")
+                                    logger.error("Failed to sync changes")
+                                    return False
+                            elif sync_choice == "reverse":
+                                logger.info("Bringing remote changes to local...")
+                                sync_success = await self._reverse_sync_from_remote(
+                                    conn, sync_result
+                                )
+                                if sync_success:
+                                    logger.info("✓ Successfully brought remote changes to local")
+                                    sync_performed = True
+                                else:
+                                    logger.error("Failed to bring remote changes to local")
                                     return False
                             else:
                                 # User declined sync - show error and exit (no skip option)
@@ -403,7 +414,7 @@ class RemoteJobManager:
         self.job_counter += 1
         job_id = f"remote_{self.remote_config.name}_{self.job_counter}"
 
-        logger.info(f"Submitting job {job_name} to remote {self.remote_config.name}")
+        logger.debug(f"Submitting job {job_name} to remote {self.remote_config.name}")
 
         try:
             # Extract task number from job name (e.g., "sweep_20250625_210408_task_002" -> "task_002")
@@ -493,7 +504,7 @@ class RemoteJobManager:
 
                 self.running_jobs[job_id] = job_info
 
-                logger.info(f"Job {job_name} started on remote with PID {remote_pid}")
+                logger.debug(f"Job {job_name} started on remote with PID {remote_pid}")
                 return job_id
 
         except Exception as e:
@@ -532,6 +543,87 @@ set -m
 # Set up environment
 cd {self.remote_config.project_root}
 
+# Pure bash disk space checking function (no bc dependency)
+check_disk_space() {{
+    local dir="$1"
+    local min_free_mb="$2"  # Now in MB for easier bash arithmetic
+    
+    # Get available space in KB and convert to MB
+    local available_kb=$(df "$dir" | tail -1 | awk '{{print $4}}')
+    local available_mb=$((available_kb / 1024))
+    local available_gb=$((available_mb / 1024))
+    
+    # Get percentage used 
+    local used_percent=$(df "$dir" | tail -1 | awk '{{print int($3/$2*100)}}')
+    local free_percent=$((100 - used_percent))
+    
+    echo "Disk space check for $dir at $(date):" >> {task_dir}/task_info.txt
+    printf "  Available: %d MB (%d GB, %d%% free)\\n" "$available_mb" "$available_gb" "$free_percent" >> {task_dir}/task_info.txt
+    
+    # Check if we have sufficient space (using integer comparison)
+    if [ "$available_mb" -lt "$min_free_mb" ]; then
+        printf "ERROR: Insufficient disk space! Available: %d MB, Required: %d MB\\n" "$available_mb" "$min_free_mb" >> {task_dir}/task_info.txt
+        echo "Disk space check FAILED at $(date)" >> {task_dir}/task_info.txt
+        update_status "FAILED_DISK_SPACE"
+        exit 1
+    fi
+    
+    echo "Disk space check PASSED" >> {task_dir}/task_info.txt
+    return 0
+}}
+
+# Initial disk space check (require at least 2GB = 2048MB free for training)
+check_disk_space "{self.remote_config.project_root}" "2048"
+
+# Also check task directory location (require at least 1GB = 1024MB)
+check_disk_space "{task_dir}" "1024"
+
+# Enhanced JAX/CUDA environment setup for better compatibility
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_TRACEBACK_FILTERING=off
+
+# Set JAX platforms - try GPU first, fall back to CPU if GPU fails
+export JAX_PLATFORMS=cpu  # Start with CPU as fallback
+export JAX_ENABLE_X64=true
+
+# Attempt to detect and configure GPU if available
+if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "NVIDIA GPU detected, trying GPU configuration" >> {task_dir}/task_info.txt
+    export JAX_PLATFORMS=gpu,cpu
+elif command -v rocm-smi >/dev/null 2>&1; then
+    echo "AMD GPU detected, trying GPU configuration" >> {task_dir}/task_info.txt
+    export JAX_PLATFORMS=rocm,cpu
+else
+    echo "No GPU detected, using CPU-only mode" >> {task_dir}/task_info.txt
+fi
+
+# Always use task directory for temporary files (avoid /tmp completely)
+export TMPDIR={task_dir}/tmp
+export TEMP={task_dir}/tmp  
+export TMP={task_dir}/tmp
+mkdir -p {task_dir}/tmp
+echo "Using task directory for all temporary files: {task_dir}/tmp" >> {task_dir}/task_info.txt
+
+# Set CUDA cache and compilation directories within task directory
+export CUDA_CACHE_PATH={task_dir}/cuda_cache
+export XLA_FLAGS="--xla_gpu_cuda_data_dir={task_dir}/cuda_cache --xla_force_host_platform_device_count=1"
+mkdir -p {task_dir}/cuda_cache
+
+# Create additional JAX/CUDA directories to prevent compilation issues
+mkdir -p {task_dir}/jax_cache
+export JAX_COMPILATION_CACHE_DIR={task_dir}/jax_cache
+
+# Log environment variables for debugging
+echo "Environment variables:" >> {task_dir}/task_info.txt
+echo "XLA_PYTHON_CLIENT_PREALLOCATE=$XLA_PYTHON_CLIENT_PREALLOCATE" >> {task_dir}/task_info.txt
+echo "JAX_TRACEBACK_FILTERING=$JAX_TRACEBACK_FILTERING" >> {task_dir}/task_info.txt
+echo "JAX_PLATFORMS=$JAX_PLATFORMS" >> {task_dir}/task_info.txt
+echo "JAX_ENABLE_X64=$JAX_ENABLE_X64" >> {task_dir}/task_info.txt
+echo "TMPDIR=$TMPDIR" >> {task_dir}/task_info.txt
+echo "CUDA_CACHE_PATH=$CUDA_CACHE_PATH" >> {task_dir}/task_info.txt
+echo "XLA_FLAGS=$XLA_FLAGS" >> {task_dir}/task_info.txt
+echo "JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR" >> {task_dir}/task_info.txt
+
 # Create task info file with initial status
 echo "Job Name: {job_name}" > {task_dir}/task_info.txt
 echo "Remote Machine: {self.remote_config.name}" >> {task_dir}/task_info.txt
@@ -552,6 +644,41 @@ update_status() {{
     local status="$1"
     echo "Status: $status" >> {task_dir}/task_info.txt
     echo "End Time: $(date)" >> {task_dir}/task_info.txt
+    
+    # Immediately create error flag for failed jobs to help with error collection
+    if [[ "$status" == FAILED* ]]; then
+        echo "$status" > {task_dir}/error_flag.txt
+        echo "$(date)" >> {task_dir}/error_flag.txt
+    fi
+}}
+
+# Function to capture comprehensive error information
+capture_error_info() {{
+    local exit_code="$1"
+    echo "Capturing error information (exit code: $exit_code)" >> {task_dir}/task_info.txt
+    
+    # Save exit code
+    echo "$exit_code" > {task_dir}/exit_code.txt
+    
+    # Capture any stderr that might be available
+    if [ -f "{task_dir}/stderr.log" ]; then
+        cp {task_dir}/stderr.log {task_dir}/error_stderr.log 2>/dev/null || true
+    fi
+    
+    # Capture last part of any log files
+    find {task_dir} -name "*.log" -exec tail -50 {{}} \\; > {task_dir}/error_logs.txt 2>/dev/null || true
+    
+    # Capture system information
+    echo "=== System Info at Failure ===" >> {task_dir}/error_system.txt
+    echo "Date: $(date)" >> {task_dir}/error_system.txt
+    echo "Disk space:" >> {task_dir}/error_system.txt
+    df -h {task_dir} >> {task_dir}/error_system.txt 2>/dev/null || true
+    echo "Memory:" >> {task_dir}/error_system.txt
+    free -h >> {task_dir}/error_system.txt 2>/dev/null || true
+    echo "Python process status:" >> {task_dir}/error_system.txt
+    ps aux | grep python | grep -v grep >> {task_dir}/error_system.txt 2>/dev/null || true
+    
+    echo "Error information captured" >> {task_dir}/task_info.txt
 }}
 
 # Function to handle cancellation signals
@@ -606,34 +733,68 @@ trap 'handle_cancellation' TERM INT
 
 # Start the Python training process in the background and capture its PID
 echo "Starting training script at $(date)" >> {task_dir}/task_info.txt
-{self.remote_config.python_interpreter} {self.remote_config.train_script} {params_str} output.dir={task_dir} wandb.group={effective_wandb_group} &
+
+# Redirect stderr to a file for error capture
+{self.remote_config.python_interpreter} {self.remote_config.train_script} {params_str} output.dir={task_dir} wandb.group={effective_wandb_group} 2>{task_dir}/stderr.log &
 
 # Store the Python process PID
 PYTHON_PID=$!
 echo "$PYTHON_PID" > {task_dir}/python.pid
 echo "Python process PID: $PYTHON_PID" >> {task_dir}/task_info.txt
 
+# Start periodic disk space monitoring in background
+(
+    while kill -0 "$PYTHON_PID" 2>/dev/null; do
+        sleep 300  # Check every 5 minutes
+        
+        # Quick disk space check (pure bash, no bc)
+        available_kb=$(df "{task_dir}" | tail -1 | awk '{{print $4}}')
+        available_mb=$((available_kb / 1024))
+        
+        if [ "$available_mb" -lt 512 ]; then  # Less than 512 MB
+            printf "WARNING: Low disk space detected: %d MB remaining at $(date)\\n" "$available_mb" >> {task_dir}/task_info.txt
+            
+            # If critically low (< 200MB), terminate the job
+            if [ "$available_mb" -lt 200 ]; then
+                printf "CRITICAL: Terminating job due to critically low disk space: %d MB\\n" "$available_mb" >> {task_dir}/task_info.txt
+                update_status "FAILED_DISK_SPACE"
+                kill -TERM "$PYTHON_PID" 2>/dev/null || true
+                break
+            fi
+        fi
+    done
+) &
+MONITOR_PID=$!
+
 # Wait for the Python process to complete
 if wait $PYTHON_PID; then
+    # Kill the monitoring process
+    kill $MONITOR_PID 2>/dev/null || true
     # Training completed successfully
     update_status "COMPLETED"
     echo "Training script completed successfully at $(date)" >> {task_dir}/task_info.txt
     exit 0
 else
+    # Kill the monitoring process
+    kill $MONITOR_PID 2>/dev/null || true
     # Training failed or was interrupted
     exit_code=$?
-    if [ $exit_code -eq 143 ] || [ $exit_code -eq 130 ]; then
-        # Process was terminated or interrupted
+    echo "Training script failed with exit code: $exit_code at $(date)" >> {task_dir}/task_info.txt
+    
+    # Capture comprehensive error information
+    capture_error_info "$exit_code"
+    
+    # Update status based on exit code
+    if [ "$exit_code" -eq 143 ]; then
         update_status "CANCELLED"
-        echo "Training script was cancelled at $(date)" >> {task_dir}/task_info.txt
     else
-        # Process failed
         update_status "FAILED"
-        echo "Training script failed at $(date) with exit code $exit_code" >> {task_dir}/task_info.txt
     fi
+    
     exit $exit_code
 fi
 """
+
         return script_content
 
     async def get_job_status(self, job_id: str) -> str:
@@ -1075,7 +1236,7 @@ fi
         if job_ids is None:
             job_ids = list(self.running_jobs.keys())
 
-        logger.info(f"Collecting results from {len(job_ids)} jobs on {self.remote_config.name}")
+        logger.debug(f"Collecting results from {len(job_ids)} jobs on {self.remote_config.name}")
 
         try:
             # Create local remote tasks directory
@@ -1084,6 +1245,7 @@ fi
             )
             local_remote_tasks.mkdir(parents=True, exist_ok=True)
 
+            success_count = 0
             # Use rsync to collect all task directories
             if self.remote_tasks_dir:
                 rsync_cmd = (
@@ -1099,23 +1261,126 @@ fi
                 result = subprocess.run(rsync_cmd, shell=True, capture_output=True, text=True)
 
                 if result.returncode == 0:
-                    logger.info(f"Results collected successfully from {self.remote_config.name}")
+                    logger.debug(f"Results collected successfully from {self.remote_config.name}")
+                    success_count += 1
+
+                    # Also collect error summaries if they exist
+                    await self._collect_error_summaries()
+
+                    # Show summary of what was collected
+                    self._show_collection_summary(local_remote_tasks)
 
                     # Clean up remote sweep directory if requested and sync was successful
                     if cleanup_after_sync:
                         await self.cleanup_remote_environment()
 
-                    return True
                 else:
                     logger.error(f"Result collection failed: {result.stderr}")
-                    return False
-            else:
-                logger.warning("Remote tasks directory not set, cannot collect results")
-                return False
+
+            # Check if we have a failed_tasks directory that was immediately synced
+            failed_tasks_dir = self.local_sweep_dir / "failed_tasks"
+            if failed_tasks_dir.exists():
+                failed_task_count = len([d for d in failed_tasks_dir.iterdir() if d.is_dir()])
+                if failed_task_count > 0:
+                    logger.info(
+                        f"📁 {failed_task_count} failed task(s) already collected to: {failed_tasks_dir}"
+                    )
+                    success_count += 1
+
+            # Check if we have error summaries
+            error_dir = self.local_sweep_dir / "errors"
+            if error_dir.exists():
+                error_count = len(list(error_dir.glob("*_error.txt")))
+                if error_count > 0:
+                    logger.info(f"📄 {error_count} error summary(ies) available in: {error_dir}")
+                    success_count += 1
+
+            return success_count > 0
 
         except Exception as e:
             logger.error(f"Error collecting results from {self.remote_config.name}: {e}")
             return False
+
+    def _show_collection_summary(self, local_tasks_dir: Path):
+        """Show a summary of what was collected."""
+        try:
+            if not local_tasks_dir.exists():
+                return
+
+            task_dirs = [d for d in local_tasks_dir.iterdir() if d.is_dir()]
+            if not task_dirs:
+                logger.info(f"📁 No task directories found in {local_tasks_dir}")
+                return
+
+            completed_count = 0
+            failed_count = 0
+
+            for task_dir in task_dirs:
+                task_info_file = task_dir / "task_info.txt"
+                if task_info_file.exists():
+                    try:
+                        with open(task_info_file, "r") as f:
+                            content = f.read()
+                            if "Status: COMPLETED" in content:
+                                completed_count += 1
+                            elif "Status: FAILED" in content:
+                                failed_count += 1
+                    except Exception:
+                        pass
+
+            logger.info(f"📁 Collected {len(task_dirs)} task directories from remote:")
+            logger.info(f"   • ✓ {completed_count} completed")
+            logger.info(f"   • ✗ {failed_count} failed")
+            logger.info(f"   • ? {len(task_dirs) - completed_count - failed_count} unknown status")
+
+        except Exception as e:
+            logger.debug(f"Error showing collection summary: {e}")
+
+    async def _collect_error_summaries(self):
+        """Collect error summary files from remote to local sweep directory."""
+        try:
+            async with await create_ssh_connection(
+                self.remote_config.host,
+                self.remote_config.ssh_key,
+                self.remote_config.ssh_port,
+            ) as conn:
+                # Check if there are error summary files on remote
+                if self.remote_sweep_dir:
+                    remote_error_dir = f"{self.remote_sweep_dir}/errors"
+                    check_cmd = f"test -d {remote_error_dir} && ls {remote_error_dir}/*.txt 2>/dev/null || echo 'no_errors'"
+
+                    result = await conn.run(check_cmd, check=False)
+
+                    if result.returncode == 0 and "no_errors" not in result.stdout:
+                        # Error files exist, sync them
+                        local_error_dir = self.local_sweep_dir / "errors"
+                        local_error_dir.mkdir(exist_ok=True)
+
+                        rsync_cmd = (
+                            f"rsync -avz --compress-level=6 "
+                            f"{self.remote_config.host}:{remote_error_dir}/ "
+                            f"{local_error_dir}/"
+                        )
+
+                        import subprocess
+
+                        error_result = subprocess.run(
+                            rsync_cmd, shell=True, capture_output=True, text=True
+                        )
+
+                        if error_result.returncode == 0:
+                            logger.info(
+                                f"📁 Collected error summaries from {self.remote_config.name}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Failed to collect error summaries: {error_result.stderr}"
+                            )
+                    else:
+                        logger.debug("No error summary files found on remote")
+
+        except Exception as e:
+            logger.warning(f"Error collecting error summaries: {e}")
 
     async def cleanup_remote_environment(self):
         """Clean up remote sweep directory after successful result collection."""
@@ -1328,6 +1593,16 @@ fi
                         if not job_info.get("counted", False):
                             self.jobs_completed += 1
                             job_info["counted"] = True
+                            job_info["status"] = status
+
+                            # For failed jobs, collect error information immediately and synchronously
+                            if status == "FAILED":
+                                try:
+                                    await self._collect_and_log_job_error_sync(job_id, job_info)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Error collecting failure details for job {job_id}: {e}"
+                                    )
 
                             # Update Rich progress bar
                             if self._progress and self._task_id is not None:
@@ -1383,6 +1658,347 @@ fi
                 self._progress = None
                 self._task_id = None
 
+    async def _collect_and_log_job_error_sync(self, job_id: str, job_info: dict):
+        """Collect and log error information for a failed job - synchronous version."""
+        try:
+            async with await create_ssh_connection(
+                self.remote_config.host,
+                self.remote_config.ssh_key,
+                self.remote_config.ssh_port,
+            ) as conn:
+                task_dir = job_info.get("task_dir")
+                job_name = job_info.get("job_name", job_id)
+
+                if not task_dir:
+                    logger.warning(f"No task directory found for failed job {job_name}")
+                    return
+
+                # Collect error information from various sources
+                error_info = await self._gather_job_error_details(conn, task_dir, job_name)
+
+                if error_info:
+                    # Log the error details immediately
+                    logger.error(f"❌ Job {job_name} failed - Error details:")
+
+                    if error_info.get("stderr"):
+                        logger.error(f"Standard Error: {error_info['stderr'][:500]}...")
+
+                    if error_info.get("last_logs"):
+                        logger.error(f"Last logs: {error_info['last_logs'][:500]}...")
+
+                    if error_info.get("exit_code"):
+                        logger.error(f"Exit code: {error_info['exit_code']}")
+
+                    if error_info.get("error_patterns"):
+                        logger.error(
+                            f"Error patterns found: {error_info['error_patterns'][:300]}..."
+                        )
+
+                    # Store error info for later collection
+                    job_info["error_details"] = error_info
+
+                    # Save error summary to local file immediately
+                    await self._save_error_summary_locally_sync(job_name, error_info)
+
+                    # Also immediately sync the task directory back to local
+                    await self._sync_failed_task_immediately(conn, task_dir, job_name)
+                else:
+                    logger.warning(f"Could not collect error details for failed job {job_name}")
+
+        except Exception as e:
+            logger.warning(f"Error collecting failure details for job {job_id}: {e}")
+
+    async def _sync_failed_task_immediately(self, conn, remote_task_dir: str, job_name: str):
+        """Immediately sync a failed task directory back to local storage."""
+        try:
+            # Create local directory for this specific failed task
+            local_failed_tasks = self.local_sweep_dir / "failed_tasks"
+            local_failed_tasks.mkdir(exist_ok=True)
+
+            local_task_dir = local_failed_tasks / job_name
+            local_task_dir.mkdir(exist_ok=True)
+
+            # Use rsync to copy the task directory immediately
+            rsync_cmd = (
+                f"rsync -avz --compress-level=6 "
+                f"{self.remote_config.host}:{remote_task_dir}/ "
+                f"{local_task_dir}/"
+            )
+
+            logger.debug(f"Immediate failed task sync: {rsync_cmd}")
+
+            import subprocess
+
+            result = subprocess.run(rsync_cmd, shell=True, capture_output=True, text=True)
+
+            if result.returncode == 0:
+                logger.info(f"📁 Immediately synced failed task {job_name} to {local_task_dir}")
+            else:
+                logger.warning(f"Failed to sync failed task {job_name}: {result.stderr}")
+
+        except Exception as e:
+            logger.warning(f"Error syncing failed task {job_name}: {e}")
+
+    async def _save_error_summary_locally_sync(self, job_name: str, error_info: dict):
+        """Save error summary to local file immediately - synchronous version."""
+        try:
+            error_dir = self.local_sweep_dir / "errors"
+            error_dir.mkdir(exist_ok=True)
+
+            error_file = error_dir / f"{job_name}_error.txt"
+
+            with open(error_file, "w") as f:
+                f.write(f"Error Summary for Job: {job_name}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Collected at: {datetime.now()}\n")
+                f.write(f"Remote machine: {self.remote_config.name}\n\n")
+
+                # Quick diagnosis section
+                if error_info.get("jax_error_type") or error_info.get("shell_error_type"):
+                    f.write("QUICK DIAGNOSIS:\n")
+                    f.write("=" * 16 + "\n")
+
+                    if error_info.get("jax_error_type"):
+                        f.write(f"JAX Error: {error_info['jax_error_type']}\n")
+                        f.write(f"Suggestion: {error_info.get('jax_suggestion', 'Unknown')}\n")
+
+                    if error_info.get("shell_error_type"):
+                        f.write(f"Shell Error: {error_info['shell_error_type']}\n")
+                        f.write(f"Suggestion: {error_info.get('shell_suggestion', 'Unknown')}\n")
+
+                    f.write("\n")
+
+                if error_info.get("exit_code"):
+                    f.write(f"Exit Code: {error_info['exit_code']}\n\n")
+
+                if error_info.get("error_flag"):
+                    f.write(f"Error Flag: {error_info['error_flag']}\n\n")
+
+                if error_info.get("stderr"):
+                    f.write("Standard Error Output:\n")
+                    f.write("-" * 25 + "\n")
+                    f.write(error_info["stderr"])
+                    f.write("\n\n")
+
+                if error_info.get("captured_logs"):
+                    f.write("Captured Error Logs:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["captured_logs"])
+                    f.write("\n\n")
+
+                if error_info.get("error_patterns"):
+                    f.write("Error Patterns Found:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["error_patterns"])
+                    f.write("\n\n")
+
+                if error_info.get("last_logs"):
+                    f.write("Last Log Entries:\n")
+                    f.write("-" * 17 + "\n")
+                    f.write(error_info["last_logs"])
+                    f.write("\n\n")
+
+                if error_info.get("system_info"):
+                    f.write("System Info at Failure:\n")
+                    f.write("-" * 23 + "\n")
+                    f.write(error_info["system_info"])
+                    f.write("\n\n")
+
+                if error_info.get("task_info"):
+                    f.write("Task Info:\n")
+                    f.write("-" * 10 + "\n")
+                    f.write(error_info["task_info"])
+                    f.write("\n\n")
+
+                if error_info.get("disk_info"):
+                    f.write("Disk Space Info:\n")
+                    f.write("-" * 16 + "\n")
+                    f.write(error_info["disk_info"])
+                    f.write("\n\n")
+
+                if error_info.get("collection_error"):
+                    f.write("Error Collection Issues:\n")
+                    f.write("-" * 25 + "\n")
+                    f.write(error_info["collection_error"])
+                    f.write("\n\n")
+
+                f.write("=" * 50 + "\n")
+                f.write("End of Error Summary\n")
+                f.write("\nTo see the full task directory with all files, check:\n")
+                f.write(f"./failed_tasks/{job_name}/\n")
+
+            logger.info(f"📄 Error summary saved: {error_file}")
+
+        except Exception as e:
+            logger.warning(f"Error saving error summary for {job_name}: {e}")
+
+    # Keep the original async version for backwards compatibility
+    async def _collect_and_log_job_error(self, job_id: str, job_info: dict):
+        """Collect and log error information for a failed job."""
+        return await self._collect_and_log_job_error_sync(job_id, job_info)
+
+    async def _gather_job_error_details(self, conn, task_dir: str, job_name: str) -> dict:
+        """Gather detailed error information from a failed job."""
+        error_info = {}
+
+        try:
+            # First check if there's an error flag (created by our improved script)
+            error_flag_cmd = f"cat {task_dir}/error_flag.txt 2>/dev/null || echo 'no_flag'"
+            error_flag_result = await conn.run(error_flag_cmd, check=False)
+            if error_flag_result.returncode == 0 and "no_flag" not in error_flag_result.stdout:
+                error_info["error_flag"] = error_flag_result.stdout.strip()
+
+            # Get exit code from our improved script
+            exit_code_cmd = f"cat {task_dir}/exit_code.txt 2>/dev/null || echo 'unknown'"
+            exit_code_result = await conn.run(exit_code_cmd, check=False)
+            if exit_code_result.returncode == 0 and exit_code_result.stdout.strip() != "unknown":
+                error_info["exit_code"] = exit_code_result.stdout.strip()
+
+            # Check for stderr output from our improved script
+            stderr_cmd = f"cat {task_dir}/stderr.log 2>/dev/null || echo 'no_stderr'"
+            stderr_result = await conn.run(stderr_cmd, check=False)
+            if stderr_result.returncode == 0 and "no_stderr" not in stderr_result.stdout:
+                # Get last 50 lines to avoid overwhelming output
+                stderr_content = stderr_result.stdout.strip()
+                error_info["stderr"] = (
+                    stderr_content[-3000:] if len(stderr_content) > 3000 else stderr_content
+                )
+
+            # Check for captured error logs from our improved script
+            error_logs_cmd = f"cat {task_dir}/error_logs.txt 2>/dev/null || echo 'no_error_logs'"
+            error_logs_result = await conn.run(error_logs_cmd, check=False)
+            if (
+                error_logs_result.returncode == 0
+                and "no_error_logs" not in error_logs_result.stdout
+            ):
+                error_info["captured_logs"] = error_logs_result.stdout.strip()
+
+            # Check for system info at failure
+            error_system_cmd = (
+                f"cat {task_dir}/error_system.txt 2>/dev/null || echo 'no_system_info'"
+            )
+            error_system_result = await conn.run(error_system_cmd, check=False)
+            if (
+                error_system_result.returncode == 0
+                and "no_system_info" not in error_system_result.stdout
+            ):
+                error_info["system_info"] = error_system_result.stdout.strip()
+
+            # Look for any other stderr files (fallback)
+            if not error_info.get("stderr"):
+                stderr_find_cmd = f"find {task_dir} -name '*.err' -o -name 'stderr*' | head -1"
+                stderr_find_result = await conn.run(stderr_find_cmd, check=False)
+
+                if stderr_find_result.returncode == 0 and stderr_find_result.stdout.strip():
+                    stderr_file = stderr_find_result.stdout.strip()
+                    stderr_content = await conn.run(f"tail -30 {stderr_file}", check=False)
+                    if stderr_content.returncode == 0 and stderr_content.stdout.strip():
+                        error_info["stderr"] = stderr_content.stdout.strip()
+
+            # Check for log files with error patterns
+            log_cmd = f"find {task_dir} -name '*.log' -not -name 'stderr.log' | head -1"
+            log_result = await conn.run(log_cmd, check=False)
+
+            if log_result.returncode == 0 and log_result.stdout.strip():
+                log_file = log_result.stdout.strip()
+                # Look for error patterns in logs
+                error_grep = await conn.run(
+                    f"grep -i 'error\\|exception\\|failed\\|traceback\\|ImportError\\|ModuleNotFoundError\\|AttributeError\\|RuntimeError' {log_file} | tail -15",
+                    check=False,
+                )
+                if error_grep.returncode == 0 and error_grep.stdout.strip():
+                    error_info["error_patterns"] = error_grep.stdout.strip()
+
+                # Also get last 20 lines of log
+                last_logs = await conn.run(f"tail -20 {log_file}", check=False)
+                if last_logs.returncode == 0 and last_logs.stdout.strip():
+                    error_info["last_logs"] = last_logs.stdout.strip()
+
+            # Check task_info.txt for any recorded errors
+            task_info_cmd = f"cat {task_dir}/task_info.txt 2>/dev/null || echo 'no_task_info'"
+            task_info_result = await conn.run(task_info_cmd, check=False)
+            if task_info_result.returncode == 0 and "no_task_info" not in task_info_result.stdout:
+                error_info["task_info"] = task_info_result.stdout.strip()
+
+            # Check for disk space issues (common cause of failures)
+            disk_check_cmd = f"df -h {task_dir} | tail -1"
+            disk_result = await conn.run(disk_check_cmd, check=False)
+            if disk_result.returncode == 0:
+                error_info["disk_info"] = disk_result.stdout.strip()
+
+            # Look for specific JAX/CUDA errors in stderr
+            if error_info.get("stderr"):
+                stderr_lower = error_info["stderr"].lower()
+                if "gpuallocatorconfig" in stderr_lower:
+                    error_info["jax_error_type"] = "GPU Allocator Config Error"
+                    error_info["jax_suggestion"] = (
+                        "JAX/CUDA compatibility issue. Try setting JAX_PLATFORMS=cpu"
+                    )
+                elif "module 'jaxlib.xla_extension' has no attribute" in stderr_lower:
+                    error_info["jax_error_type"] = "JAX Extension Error"
+                    error_info["jax_suggestion"] = (
+                        "JAX/JAXlib version mismatch. Update or reinstall JAX"
+                    )
+                elif "no such file or directory" in stderr_lower and "bc" in stderr_lower:
+                    error_info["shell_error_type"] = "Missing bc command"
+                    error_info["shell_suggestion"] = "Install bc package: apt-get install bc"
+
+        except Exception as e:
+            logger.debug(f"Error gathering job error details: {e}")
+            error_info["collection_error"] = str(e)
+
+        return error_info
+
+    async def _save_error_summary_locally(self, job_name: str, error_info: dict):
+        """Save error summary to local file for review."""
+        try:
+            error_dir = self.local_sweep_dir / "errors"
+            error_dir.mkdir(exist_ok=True)
+
+            error_file = error_dir / f"{job_name}_error.txt"
+
+            with open(error_file, "w") as f:
+                f.write(f"Error Summary for Job: {job_name}\n")
+                f.write("=" * 50 + "\n\n")
+
+                if error_info.get("exit_code"):
+                    f.write(f"Exit Code: {error_info['exit_code']}\n\n")
+
+                if error_info.get("error_patterns"):
+                    f.write("Error Patterns Found:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["error_patterns"])
+                    f.write("\n\n")
+
+                if error_info.get("stderr"):
+                    f.write("Standard Error Output:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["stderr"])
+                    f.write("\n\n")
+
+                if error_info.get("last_logs"):
+                    f.write("Last Log Lines:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["last_logs"])
+                    f.write("\n\n")
+
+                if error_info.get("disk_info"):
+                    f.write("Disk Information:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["disk_info"])
+                    f.write("\n\n")
+
+                if error_info.get("task_info"):
+                    f.write("Task Information:\n")
+                    f.write("-" * 20 + "\n")
+                    f.write(error_info["task_info"])
+                    f.write("\n")
+
+            logger.info(f"📁 Error details saved to: {error_file}")
+
+        except Exception as e:
+            logger.warning(f"Could not save error summary for {job_name}: {e}")
+
     async def _show_progress_summary(self):
         """Display a summary of current progress."""
         running_count = 0
@@ -1399,17 +2015,53 @@ fi
 
     def _can_offer_sync(self, sync_result: Dict[str, Any]) -> bool:
         """Determine if we can safely offer to sync based on the mismatch type."""
-        # More strict criteria - only allow sync for safe scenarios
+        # More flexible criteria - allow sync for more scenarios
         if sync_result["method"] == "git":
             details = sync_result["details"]
+
             # Don't offer sync if commits are different (too risky)
             if details.get("local_commit") != details.get("remote_commit"):
                 return False
-            # Don't allow sync if remote has uncommitted changes
-            if details.get("remote_status"):
-                return False
-            # Only offer if there are just local uncommitted changes
-            return bool(details.get("local_status"))
+
+            # If we have both local and remote changes, check if they might be compatible
+            has_local_changes = bool(details.get("local_status"))
+            has_remote_changes = bool(details.get("remote_status"))
+            commits_match = details.get("local_commit") == details.get("remote_commit")
+
+            if commits_match and has_local_changes and not has_remote_changes:
+                # Safe case: commits match, only local changes
+                return True
+            elif commits_match and has_local_changes and has_remote_changes:
+                # Potentially safe case: commits match, both have changes
+                # Check if remote changes appear to be config files (likely from previous sync)
+                remote_files = self._parse_git_status_files(details.get("remote_status", ""))
+                local_files = self._parse_git_status_files(details.get("local_status", ""))
+
+                # If remote changes are only config files and we also have config changes,
+                # this might be a continuation of iterative config development
+                remote_config_files = [f for f in remote_files if self._is_config_file(f)]
+                local_config_files = [f for f in local_files if self._is_config_file(f)]
+
+                # Allow sync if:
+                # 1. Remote only has config file changes, OR
+                # 2. There's significant overlap in changed files (suggesting continuation)
+                if (len(remote_config_files) == len(remote_files) and len(remote_files) > 0) or (
+                    len(set(remote_files) & set(local_files)) >= len(remote_files) * 0.5
+                ):
+                    return True
+
+            elif commits_match and not has_local_changes and has_remote_changes:
+                # Remote has changes but we don't - might be from previous sync
+                # Check if remote changes are config files (likely from HSM sync)
+                remote_files = self._parse_git_status_files(details.get("remote_status", ""))
+                remote_config_files = [f for f in remote_files if self._is_config_file(f)]
+
+                # If remote only has config changes, allow "reverse sync" to bring them local
+                if len(remote_config_files) == len(remote_files) and len(remote_files) > 0:
+                    return True
+
+            return False
+
         elif sync_result["method"] == "checksum":
             details = sync_result["details"]
             # Offer sync if we have specific file mismatches (not missing files)
@@ -1417,7 +2069,38 @@ fi
 
         return False
 
-    def _prompt_for_sync(self, sync_result: Dict[str, Any]) -> bool:
+    def _parse_git_status_files(self, git_status: str) -> List[str]:
+        """Parse git status output to extract list of changed files."""
+        files = []
+        for line in git_status.split("\n"):
+            if not line.strip():
+                continue
+            # Git status format: XY filename
+            if len(line) > 3:
+                filename = line[3:].strip()
+                if filename:
+                    files.append(filename)
+        return files
+
+    def _is_config_file(self, filename: str) -> bool:
+        """Check if a file is a configuration file."""
+        config_patterns = [
+            "config",
+            "Config",
+            "CONFIG",
+            ".yaml",
+            ".yml",
+            ".json",
+            "requirements.txt",
+            "pyproject.toml",
+            "hyperparams",
+            "experiment",
+            "train_config",
+            "model_config",
+        ]
+        return any(pattern in filename for pattern in config_patterns)
+
+    def _prompt_for_sync(self, sync_result: Dict[str, Any], conn) -> bool:
         """Prompt user whether to sync local changes to remote with detailed diff display."""
         print("\n" + "=" * 80)
         print("🔄 PROJECT SYNC REQUIRED - UNCOMMITTED CHANGES DETECTED")
@@ -1452,7 +2135,7 @@ fi
                 for mismatch in details["mismatched_files"]:
                     file_path = mismatch["file"]
                     print(f"  📄 {file_path}")
-                    # Show content diff for important files
+                    # Show actual diff preview for important files
                     self._show_file_content_diff(file_path, mismatch)
 
         print("\n" + "⚠️" * 25)
@@ -1460,23 +2143,51 @@ fi
         print("Config changes can significantly affect experiment results.")
         print("⚠️" * 25)
 
+        # Determine available options based on the sync situation
+        details = sync_result.get("details", {})
+        has_local_changes = bool(details.get("local_status"))
+        has_remote_changes = bool(details.get("remote_status"))
+
         print("\nOptions:")
-        print("  ✅ [Y] Sync local changes to remote (after reviewing above)")
+        if has_local_changes and not has_remote_changes:
+            print("  ✅ [Y] Sync local changes to remote (after reviewing above)")
+        elif not has_local_changes and has_remote_changes:
+            print("  ✅ [Y] Bring remote changes to local (after reviewing above)")
+            print("  🔄 [r] Reverse sync: pull remote changes to local")
+        elif has_local_changes and has_remote_changes:
+            print("  ✅ [Y] Sync local changes to remote (will overwrite remote changes)")
+            print(
+                "  🔄 [r] Reverse sync: bring remote changes to local (will overwrite local changes)"
+            )
+        else:
+            print("  ✅ [Y] Proceed with sync")
+
         print("  ❌ [n] Cancel sweep execution")
         print("  🔍 [d] Show detailed diff for all changed files")
 
         while True:
             try:
-                choice = input("\nChoose [Y/n/d]: ").strip().lower()
+                if has_remote_changes and (not has_local_changes or has_local_changes):
+                    choice = input("\nChoose [Y/n/d/r]: ").strip().lower()
+                else:
+                    choice = input("\nChoose [Y/n/d]: ").strip().lower()
+
                 if choice in ["", "y", "yes"]:
                     return True
                 elif choice in ["n", "no"]:
                     return False
+                elif choice in ["r", "reverse"] and has_remote_changes:
+                    return "reverse"
                 elif choice in ["d", "diff"]:
-                    self._show_full_detailed_diff(sync_result)
+                    import asyncio
+
+                    asyncio.run(self._show_full_detailed_diff_async(sync_result, conn))
                     continue
                 else:
-                    print("Please enter Y, n, or d")
+                    if has_remote_changes:
+                        print("Please enter Y, n, d, or r")
+                    else:
+                        print("Please enter Y, n, or d")
             except (EOFError, KeyboardInterrupt):
                 print("\nOperation cancelled by user")
                 return False
@@ -1564,31 +2275,121 @@ fi
         """Show content differences for files when using checksum method."""
         try:
             local_file = Path.cwd() / file_path
-            if local_file.exists() and any(
-                pattern in file_path.lower() for pattern in ["config", ".yaml", ".yml", ".json"]
-            ):
-                print(f"\n🔍 Preview of {file_path}:")
-                with open(local_file, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    lines = content.split("\n")
-                    total_lines = len(lines)
-
-                    if total_lines <= 10:
-                        for i, line in enumerate(lines, 1):
-                            print(f"    {i:2d}: {line}")
-                    else:
-                        # Show first 5 and last 5 lines
-                        for i in range(5):
-                            print(f"    {i + 1:2d}: {lines[i]}")
-                        print(f"    ... ({total_lines - 10} more lines)")
-                        for i in range(total_lines - 5, total_lines):
-                            print(f"    {i + 1:2d}: {lines[i]}")
-
+            if local_file.exists():
+                print(f"\n🔍 File differs: {file_path}")
                 print(
-                    f"    Checksum mismatch: local={mismatch_info.get('local_checksum', 'unknown')[:8]}... vs remote={mismatch_info.get('remote_checksum', 'unknown')[:8]}..."
+                    f"    📍 Type: {'Config file' if self._is_config_file(file_path) else 'Regular file'}"
                 )
+                print(
+                    f"    🔢 Checksum mismatch: local={mismatch_info.get('local_checksum', 'unknown')[:8]}... vs remote={mismatch_info.get('remote_checksum', 'unknown')[:8]}..."
+                )
+
+                # For config files, show a preview of local content
+                if self._is_config_file(file_path):
+                    print(f"    📋 Local content preview:")
+                    try:
+                        with open(local_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            lines = content.split("\n")
+                            total_lines = len(lines)
+
+                            # Show a reasonable preview
+                            max_preview_lines = 8
+                            if total_lines <= max_preview_lines:
+                                for i, line in enumerate(lines, 1):
+                                    print(f"      {i:2d}: {line}")
+                            else:
+                                # Show first few and last few lines
+                                show_lines = max_preview_lines // 2
+                                for i in range(show_lines):
+                                    if i < len(lines):
+                                        print(f"      {i + 1:2d}: {lines[i]}")
+
+                                if total_lines > max_preview_lines:
+                                    print(
+                                        f"      ... ({total_lines - max_preview_lines} more lines)"
+                                    )
+
+                                for i in range(total_lines - show_lines, total_lines):
+                                    if i >= 0 and i < len(lines):
+                                        print(f"      {i + 1:2d}: {lines[i]}")
+                    except Exception as read_error:
+                        print(f"      ⚠️ Could not read file content: {read_error}")
+
+                print(f"    💡 Use [d] option to see detailed diff between local and remote")
+            else:
+                print(f"\n⚠️ Local file not found: {file_path}")
         except Exception as e:
             print(f"    ⚠️ Could not preview {file_path}: {e}")
+
+    async def _show_file_content_diff_async(self, conn, file_path: str, mismatch_info: dict):
+        """Show actual diff between local and remote file content."""
+        try:
+            local_file = Path.cwd() / file_path
+            if not local_file.exists():
+                print(f"    ⚠️ Local file not found: {file_path}")
+                return
+
+            # Read local content
+            with open(local_file, "r", encoding="utf-8") as f:
+                local_content = f.read().splitlines()
+
+            # Get remote content
+            remote_file_path = f"{self.remote_config.project_root}/{file_path}"
+            remote_result = await conn.run(f"cat '{remote_file_path}'", check=False)
+
+            if remote_result.returncode != 0:
+                print(f"    ⚠️ Could not read remote file: {file_path}")
+                return
+
+            remote_content = remote_result.stdout.splitlines()
+
+            # Generate diff
+            import difflib
+
+            diff = list(
+                difflib.unified_diff(
+                    remote_content,
+                    local_content,
+                    fromfile=f"remote:{file_path}",
+                    tofile=f"local:{file_path}",
+                    lineterm="",
+                )
+            )
+
+            if not diff:
+                print(
+                    f"    📄 Files appear identical (checksum difference may be due to line endings)"
+                )
+                return
+
+            print(f"\n🔍 Detailed changes in {file_path}:")
+            print("    " + "-" * 60)
+
+            shown_lines = 0
+            max_preview_lines = 20
+
+            for line in diff:
+                if shown_lines >= max_preview_lines:
+                    remaining = len(diff) - diff.index(line)
+                    print(f"    ... ({remaining} more diff lines, use 'd' for complete diff)")
+                    break
+
+                if line.startswith("@@"):
+                    print(f"    📍 {line}")
+                elif line.startswith("+") and not line.startswith("+++"):
+                    print(f"    🟢 {line}")
+                elif line.startswith("-") and not line.startswith("---"):
+                    print(f"    🔴 {line}")
+                elif not line.startswith("---") and not line.startswith("+++"):
+                    print(f"      {line}")
+
+                shown_lines += 1
+
+            print("    " + "-" * 60)
+
+        except Exception as e:
+            print(f"    ⚠️ Could not show diff for {file_path}: {e}")
 
     def _show_full_detailed_diff(self, sync_result: Dict[str, Any]):
         """Show complete detailed diff for all changed files."""
@@ -1627,6 +2428,56 @@ fi
 
                     except Exception as e:
                         print(f"Error showing diff for {filename}: {e}")
+
+        print("=" * 80)
+        input("Press Enter to continue...")
+
+    async def _show_full_detailed_diff_async(self, sync_result: Dict[str, Any], conn):
+        """Show complete detailed diff for all changed files (async version)."""
+        import subprocess
+
+        print("\n" + "=" * 80)
+        print("📋 COMPLETE DETAILED DIFF")
+        print("=" * 80)
+
+        if sync_result["method"] == "git":
+            details = sync_result["details"]
+            git_status = details.get("local_status", "")
+
+            for line in git_status.split("\n"):
+                if not line.strip():
+                    continue
+
+                status = line[:2]
+                filename = line[3:] if len(line) > 3 else ""
+
+                if status.strip() in ["M", "MM"]:
+                    try:
+                        print(f"\n{'=' * 20} {filename} {'=' * 20}")
+                        diff_result = subprocess.run(
+                            ["git", "diff", "HEAD", "--", filename],
+                            cwd=self.local_project_root,
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                        )
+
+                        if diff_result.returncode == 0:
+                            print(diff_result.stdout)
+                        else:
+                            print(f"Could not get diff for {filename}")
+
+                    except Exception as e:
+                        print(f"Error showing diff for {filename}: {e}")
+
+        elif sync_result["method"] == "checksum":
+            details = sync_result["details"]
+            mismatched_files = details.get("mismatched_files", [])
+
+            for mismatch in mismatched_files:
+                file_path = mismatch["file"]
+                print(f"\n{'=' * 20} {file_path} {'=' * 20}")
+                await self._show_file_content_diff_async(conn, file_path, mismatch)
 
         print("=" * 80)
         input("Press Enter to continue...")
@@ -1713,17 +2564,204 @@ HSMSYNCEOF"""
                 return True
 
             elif sync_result["method"] == "git":
-                # For git mismatches, we could add specific git operations here
-                # For now, just handle uncommitted changes by syncing them
-                logger.info("Syncing uncommitted changes...")
-                # This is more complex and would require careful git operations
-                # For safety, we'll fall back to manual instructions
-                return False
+                # Handle git uncommitted changes by syncing specific files
+                logger.info("Syncing git uncommitted changes...")
+                details = sync_result["details"]
+                local_status = details.get("local_status", "")
+
+                if not local_status:
+                    logger.warning("No git changes detected to sync")
+                    return True
+
+                # Parse git status to get list of changed files
+                changed_files = []
+                for line in local_status.split("\n"):
+                    if not line.strip():
+                        continue
+
+                    # Git status format: XY filename
+                    # X = staged status, Y = unstaged status
+                    status = line[:2]
+                    filename = line[3:] if len(line) > 3 else ""
+
+                    # Only sync modified and added files (not deleted)
+                    if status.strip() in ["M", "MM", "A", "AM", "??"]:
+                        changed_files.append(filename)
+
+                if not changed_files:
+                    logger.warning("No syncable files found in git changes")
+                    return True
+
+                logger.info(f"Syncing {len(changed_files)} changed files to remote")
+
+                # Sync each changed file
+                sync_success = True
+                for file_path in changed_files:
+                    try:
+                        local_file = self.local_project_root / file_path
+
+                        if not local_file.exists():
+                            logger.warning(f"Local file not found: {file_path}")
+                            continue
+
+                        logger.info(f"Syncing: {file_path}")
+
+                        # Read local file content
+                        with open(local_file, encoding="utf-8", errors="replace") as f:
+                            content = f.read()
+
+                        # Write to remote using a here-document to handle special characters
+                        remote_file_path = f"{self.remote_config.project_root}/{file_path}"
+
+                        # Ensure remote directory exists
+                        remote_dir = str(Path(remote_file_path).parent)
+                        await conn.run(f"mkdir -p '{remote_dir}'")
+
+                        # Write file content to remote
+                        cmd = f"""cat > '{remote_file_path}' << 'HSMSYNCEOF'
+{content}
+HSMSYNCEOF"""
+
+                        result = await conn.run(cmd, check=False)
+                        if result.returncode != 0:
+                            logger.error(f"Failed to sync {file_path}: {result.stderr}")
+                            sync_success = False
+                        else:
+                            logger.debug(f"✓ Successfully synced {file_path}")
+
+                    except Exception as e:
+                        logger.error(f"Error syncing {file_path}: {e}")
+                        sync_success = False
+
+                if sync_success:
+                    logger.info(
+                        f"✓ Successfully synced all {len(changed_files)} git changes to remote"
+                    )
+                else:
+                    logger.error("Some files failed to sync")
+
+                return sync_success
 
             return False
 
         except Exception as e:
             logger.error(f"Error during file sync: {e}")
+            return False
+
+    async def _reverse_sync_from_remote(self, conn, sync_result: Dict[str, Any]) -> bool:
+        """Sync remote changes to local (reverse sync)."""
+        try:
+            if sync_result["method"] == "git":
+                # Handle reverse sync for git repositories
+                logger.info("Performing reverse sync: bringing remote changes to local...")
+                details = sync_result["details"]
+                remote_status = details.get("remote_status", "")
+
+                if not remote_status:
+                    logger.warning("No remote changes detected to sync")
+                    return True
+
+                # Parse remote git status to get list of changed files
+                changed_files = []
+                for line in remote_status.split("\n"):
+                    if not line.strip():
+                        continue
+
+                    # Git status format: XY filename
+                    status = line[:2]
+                    filename = line[3:] if len(line) > 3 else ""
+
+                    # Only sync modified and added files (not deleted)
+                    if status.strip() in ["M", "MM", "A", "AM", "??"]:
+                        changed_files.append(filename)
+
+                if not changed_files:
+                    logger.warning("No syncable files found in remote changes")
+                    return True
+
+                logger.info(f"Bringing {len(changed_files)} changed files from remote to local")
+
+                # Sync each changed file from remote to local
+                sync_success = True
+                for file_path in changed_files:
+                    try:
+                        logger.info(f"Reverse syncing: {file_path}")
+
+                        # Get remote file content
+                        remote_file_path = f"{self.remote_config.project_root}/{file_path}"
+                        get_content_cmd = f"cat '{remote_file_path}'"
+
+                        remote_result = await conn.run(get_content_cmd, check=False)
+                        if remote_result.returncode != 0:
+                            logger.error(
+                                f"Failed to read remote file {file_path}: {remote_result.stderr}"
+                            )
+                            sync_success = False
+                            continue
+
+                        # Write to local file
+                        local_file = self.local_project_root / file_path
+
+                        # Ensure local directory exists
+                        local_file.parent.mkdir(parents=True, exist_ok=True)
+
+                        # Write content to local file
+                        with open(local_file, "w", encoding="utf-8") as f:
+                            f.write(remote_result.stdout)
+
+                        logger.debug(f"✓ Successfully reverse synced {file_path}")
+
+                    except Exception as e:
+                        logger.error(f"Error reverse syncing {file_path}: {e}")
+                        sync_success = False
+
+                if sync_success:
+                    logger.info(
+                        f"✓ Successfully reverse synced all {len(changed_files)} files from remote"
+                    )
+                else:
+                    logger.error("Some files failed to reverse sync")
+
+                return sync_success
+
+            elif sync_result["method"] == "checksum":
+                # Handle reverse sync for checksum-based verification
+                details = sync_result["details"]
+                mismatched_files = details.get("mismatched_files", [])
+
+                for mismatch in mismatched_files:
+                    file_path = mismatch["file"]
+                    logger.info(f"Reverse syncing: {file_path}")
+
+                    # Get remote file content
+                    remote_file_path = f"{self.remote_config.project_root}/{file_path}"
+                    get_content_cmd = f"cat '{remote_file_path}'"
+
+                    remote_result = await conn.run(get_content_cmd, check=False)
+                    if remote_result.returncode != 0:
+                        logger.error(
+                            f"Failed to read remote file {file_path}: {remote_result.stderr}"
+                        )
+                        continue
+
+                    # Write to local file
+                    local_file = Path.cwd() / file_path
+                    local_file.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(local_file, "w", encoding="utf-8") as f:
+                        f.write(remote_result.stdout)
+
+                    logger.debug(f"✓ Successfully reverse synced {file_path}")
+
+                logger.info(
+                    f"✓ Successfully reverse synced {len(mismatched_files)} files from remote"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error during reverse sync: {e}")
             return False
 
     def _show_sync_error_details(self, sync_result: Dict[str, Any]):
@@ -1767,6 +2805,37 @@ class ProjectStateChecker:
     def __init__(self, local_project_root: str, remote_config: RemoteConfig):
         self.local_project_root = Path(local_project_root)
         self.remote_config = remote_config
+
+    def _parse_git_status_files(self, git_status: str) -> List[str]:
+        """Parse git status output to extract list of changed files."""
+        files = []
+        for line in git_status.split("\n"):
+            if not line.strip():
+                continue
+            # Git status format: XY filename
+            if len(line) > 3:
+                filename = line[3:].strip()
+                if filename:
+                    files.append(filename)
+        return files
+
+    def _is_config_file(self, filename: str) -> bool:
+        """Check if a file is a configuration file."""
+        config_patterns = [
+            "config",
+            "Config",
+            "CONFIG",
+            ".yaml",
+            ".yml",
+            ".json",
+            "requirements.txt",
+            "pyproject.toml",
+            "hyperparams",
+            "experiment",
+            "train_config",
+            "model_config",
+        ]
+        return any(pattern in filename for pattern in config_patterns)
 
     async def verify_project_sync(self, conn) -> Dict[str, Any]:
         """
@@ -1910,9 +2979,78 @@ class ProjectStateChecker:
                     f"Git commits differ: local={result['local_commit'][:8]} vs remote={result['remote_commit'][:8]}"
                 )
 
-            # Projects are in sync if commits match, regardless of uncommitted changes
-            # We'll handle uncommitted changes through the checksum verification
-            result["in_sync"] = result["local_commit"] == result["remote_commit"]
+            # For distributed sweeps, analyze the nature of uncommitted changes
+            commits_match = result["local_commit"] == result["remote_commit"]
+            has_local_changes = bool(result["local_status"])
+            has_remote_changes = bool(result["remote_status"])
+
+            # Parse changed files to understand the nature of changes
+            local_files = (
+                self._parse_git_status_files(result.get("local_status", ""))
+                if has_local_changes
+                else []
+            )
+            remote_files = (
+                self._parse_git_status_files(result.get("remote_status", ""))
+                if has_remote_changes
+                else []
+            )
+
+            local_config_files = [f for f in local_files if self._is_config_file(f)]
+            remote_config_files = [f for f in remote_files if self._is_config_file(f)]
+
+            # More nuanced sync determination
+            if commits_match and not has_local_changes and not has_remote_changes:
+                # Perfect sync
+                result["in_sync"] = True
+            elif commits_match and has_local_changes and not has_remote_changes:
+                # Only local changes - standard case requiring sync
+                result["in_sync"] = False
+                result["errors"].append(
+                    "Local uncommitted changes detected - sync required for distributed execution"
+                )
+            elif commits_match and not has_local_changes and has_remote_changes:
+                # Only remote changes - check if they're config files from previous sync
+                if len(remote_config_files) == len(remote_files) and len(remote_files) > 0:
+                    # Remote only has config changes - likely from previous HSM sync
+                    result["in_sync"] = False  # Still offer sync options
+                    result["warnings"].append(
+                        "Remote has config changes (likely from previous sync) - sync options available"
+                    )
+                else:
+                    # Remote has non-config changes - more concerning
+                    result["in_sync"] = False
+                    result["errors"].append(
+                        "Remote uncommitted changes detected - review needed before sync"
+                    )
+            elif commits_match and has_local_changes and has_remote_changes:
+                # Both have changes - analyze overlap and file types
+                files_overlap = set(local_files) & set(remote_files)
+                overlap_ratio = len(files_overlap) / max(len(remote_files), 1)
+
+                if (
+                    len(remote_config_files) == len(remote_files)
+                    and len(local_config_files) > 0
+                    and overlap_ratio >= 0.5
+                ):
+                    # Both sides have config changes with good overlap - iterative development
+                    result["in_sync"] = False  # Still offer sync
+                    result["warnings"].append(
+                        "Both local and remote have config changes - iterative development detected"
+                    )
+                else:
+                    # More complex changes - be cautious
+                    result["in_sync"] = False
+                    result["errors"].append(
+                        "Both local and remote have uncommitted changes - careful review required"
+                    )
+            else:
+                # Commits don't match or other edge cases
+                result["in_sync"] = False
+                if not commits_match:
+                    result["errors"].append(
+                        f"Git commits differ: local={result['local_commit'][:8]} vs remote={result['remote_commit'][:8]}"
+                    )
 
         except subprocess.TimeoutExpired:
             result["errors"].append("Git command timeout")
@@ -1943,24 +3081,63 @@ class ProjectStateChecker:
         if self.remote_config.config_dir:
             try:
                 config_base = Path(self.remote_config.config_dir).name
+                # Add comprehensive config file patterns
                 key_files.extend(
                     [
                         f"{config_base}/config.yaml",
+                        f"{config_base}/config.yml",
                         f"{config_base}/model/self_attention.yaml",
                         f"{config_base}/model/gnn.yaml",
+                        f"{config_base}/model/config.yaml",
+                        f"{config_base}/training/config.yaml",
+                        f"{config_base}/training/training.yaml",
+                        f"{config_base}/experiment/config.yaml",
+                        f"{config_base}/hyperparams.yaml",
                     ]
                 )
-            except:
-                pass
+
+                # Also check for any .yaml/.yml files in the config directory recursively
+                config_dir_path = Path(self.remote_config.config_dir)
+                if config_dir_path.exists():
+                    for config_file in config_dir_path.rglob("*.yaml"):
+                        rel_path = config_file.relative_to(self.local_project_root)
+                        key_files.append(str(rel_path))
+                    for config_file in config_dir_path.rglob("*.yml"):
+                        rel_path = config_file.relative_to(self.local_project_root)
+                        key_files.append(str(rel_path))
+            except Exception as e:
+                logger.debug(f"Could not enumerate config directory: {e}")
         else:
-            # Fallback to standard config location if no config_dir discovered
-            key_files.append("configs/config.yaml")
+            # Fallback to standard config locations if no config_dir discovered
+            key_files.extend(
+                [
+                    "configs/config.yaml",
+                    "configs/config.yml",
+                    "config/config.yaml",
+                    "config.yaml",
+                    "config.yml",
+                ]
+            )
+
+        # Also check for common ML/training config patterns
+        key_files.extend(
+            [
+                "train_config.yaml",
+                "train_config.yml",
+                "model_config.yaml",
+                "model_config.yml",
+                "experiment_config.yaml",
+                "hyperparameters.yaml",
+                "hyperparams.yml",
+            ]
+        )
 
         # Remove duplicates while preserving order
         seen = set()
         key_files = [f for f in key_files if f and f not in seen and not seen.add(f)]
 
-        logger.debug(f"Checking sync for files: {key_files}")
+        logger.info(f"Checking sync for {len(key_files)} key files (including config files)")
+        logger.debug(f"Key files being checked: {key_files}")
 
         for file_path in key_files:
             if not file_path:

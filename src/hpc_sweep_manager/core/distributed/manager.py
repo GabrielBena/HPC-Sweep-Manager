@@ -47,6 +47,12 @@ class DistributedSweepConfig:
     max_retries: int = 3
     enable_auto_sync: bool = False
     enable_interactive_sync: bool = True
+    # Failsafe configuration
+    enable_source_failsafe: bool = True
+    source_failure_threshold: float = 0.4  # Disable source if 40% of jobs fail
+    min_jobs_for_failsafe: int = 5  # Need at least 5 jobs before considering failsafe
+    auto_disable_unhealthy_sources: bool = True
+    health_check_failure_threshold: int = 3  # Disable after 3 consecutive health check failures
 
 
 class DistributedJobManager:
@@ -67,7 +73,7 @@ class DistributedJobManager:
         self.source_by_name: Dict[str, ComputeSource] = {}
 
         # Job tracking
-        self.job_queue = asyncio.Queue()
+        self.job_queue = asyncio.PriorityQueue()
         self.all_jobs: Dict[str, JobInfo] = {}  # job_id -> job_info
         self.job_to_source: Dict[str, str] = {}  # job_id -> source_name
         self.task_to_source: Dict[str, str] = {}  # task_name -> source_name
@@ -86,6 +92,13 @@ class DistributedJobManager:
         self._distribution_task = None
         self._monitoring_task = None
         self._collection_task = None
+        self._health_check_task = None
+
+        # Source failure tracking
+        self.source_failure_counts = {}  # source_name -> failure_count
+        self.source_job_counts = {}  # source_name -> total_job_count
+        self.source_health_failures = {}  # source_name -> consecutive_health_failures
+        self.disabled_sources = set()  # Set of disabled source names
 
         # Round-robin state
         self._round_robin_index = 0
@@ -94,6 +107,7 @@ class DistributedJobManager:
         self._progress = None
         self._task_id = None
         self._console = Console() if RICH_AVAILABLE else None
+        self._original_log_level = None
 
     def add_compute_source(self, source: ComputeSource):
         """Add a compute source to the distributed manager."""
@@ -161,6 +175,14 @@ class DistributedJobManager:
 
         # Setup Rich progress bar if available
         if RICH_AVAILABLE and self.show_progress and self._console:
+            # Configure the console to handle logging properly
+            import logging
+
+            # Temporarily reduce log level to WARNING during progress display
+            # to prevent interference with progress bar
+            self._original_log_level = logging.getLogger().level
+            logging.getLogger().setLevel(logging.WARNING)
+
             self._progress = Progress(
                 SpinnerColumn(),
                 TextColumn("[bold blue]{task.description}"),
@@ -180,6 +202,7 @@ class DistributedJobManager:
         for i, params in enumerate(param_combinations):
             job_name = f"{sweep_id}_task_{i + 1:03d}"
             task_name = f"task_{i + 1:03d}"
+            task_priority = i + 1  # Priority = task number (1, 2, 3, ...)
             job_info = JobInfo(
                 job_id="",  # Will be set when submitted
                 job_name=job_name,
@@ -188,12 +211,14 @@ class DistributedJobManager:
                 status="QUEUED",
                 submit_time=datetime.now(),
             )
-            await self.job_queue.put((job_info, sweep_id, wandb_group, task_name))
+            await self.job_queue.put((task_priority, (job_info, sweep_id, wandb_group, task_name)))
 
         # Start background tasks
         self._distribution_task = asyncio.create_task(self._distribute_jobs())
         self._monitoring_task = asyncio.create_task(self._monitor_jobs())
         self._collection_task = asyncio.create_task(self._collect_results_continuously())
+        if self.config.enable_source_failsafe or self.config.auto_disable_unhealthy_sources:
+            self._health_check_task = asyncio.create_task(self._monitor_source_health())
 
         # Wait for all jobs to complete or be cancelled
         try:
@@ -203,9 +228,14 @@ class DistributedJobManager:
             self._cancelled = True
         finally:
             await self._cleanup_tasks()
-            # Stop progress bar
+            # Stop progress bar and restore logging level
             if self._progress:
                 self._progress.stop()
+                # Restore original logging level
+                if hasattr(self, "_original_log_level"):
+                    import logging
+
+                    logging.getLogger().setLevel(self._original_log_level)
 
         # Normalize results structure
         await self._normalize_results_structure()
@@ -228,9 +258,10 @@ class DistributedJobManager:
                 try:
                     # Get next job from queue (with timeout to check for cancellation)
                     try:
-                        job_info, sweep_id, wandb_group, task_name = await asyncio.wait_for(
-                            self.job_queue.get(), timeout=1.0
-                        )
+                        (
+                            priority,
+                            (job_info, sweep_id, wandb_group, task_name),
+                        ) = await asyncio.wait_for(self.job_queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
                         continue
 
@@ -238,7 +269,9 @@ class DistributedJobManager:
                     source = await self._select_compute_source()
                     if not source:
                         # No sources available, put job back and wait
-                        await self.job_queue.put((job_info, sweep_id, wandb_group, task_name))
+                        await self.job_queue.put(
+                            (priority, (job_info, sweep_id, wandb_group, task_name))
+                        )
                         await asyncio.sleep(2)
                         continue
 
@@ -263,6 +296,12 @@ class DistributedJobManager:
                         self.task_to_source[task_name] = source.name
                         self.jobs_submitted += 1
 
+                        # Initialize source tracking if needed
+                        if source.name not in self.source_job_counts:
+                            self.source_job_counts[source.name] = 0
+                            self.source_failure_counts[source.name] = 0
+                        self.source_job_counts[source.name] += 1
+
                         # Update progress bar instead of logging
                         if self._progress and self._task_id is not None:
                             self._progress.update(
@@ -278,7 +317,9 @@ class DistributedJobManager:
                         retry_count = self.failed_jobs.get(job_info.job_name, 0)
                         if retry_count < self.config.max_retries:
                             self.failed_jobs[job_info.job_name] = retry_count + 1
-                            await self.job_queue.put((job_info, sweep_id, wandb_group, task_name))
+                            await self.job_queue.put(
+                                (priority, (job_info, sweep_id, wandb_group, task_name))
+                            )
                             logger.debug(
                                 f"Job {job_info.job_name} queued for retry ({retry_count + 1}/{self.config.max_retries})"
                             )
@@ -300,7 +341,9 @@ class DistributedJobManager:
 
     async def _select_compute_source(self) -> Optional[ComputeSource]:
         """Select an available compute source based on the configured strategy."""
-        available_sources = [s for s in self.sources if s.is_available]
+        available_sources = [
+            s for s in self.sources if s.is_available and s.name not in self.disabled_sources
+        ]
 
         if not available_sources:
             return None
@@ -414,6 +457,9 @@ class DistributedJobManager:
         self.jobs_failed = failed
         self.jobs_cancelled = cancelled
 
+        # Update source failure tracking
+        self._update_source_failure_tracking()
+
     def _sync_job_statuses_from_sources(self):
         """Synchronize job statuses from compute sources to distributed manager tracking."""
         for source in self.sources:
@@ -496,6 +542,7 @@ class DistributedJobManager:
             self._distribution_task,
             self._monitoring_task,
             self._collection_task,
+            self._health_check_task,
         ]:
             if task and not task.done():
                 task.cancel()
@@ -539,6 +586,12 @@ class DistributedJobManager:
 
         # Cleanup tasks
         await self._cleanup_tasks()
+
+        # Restore logging level if it was modified
+        if hasattr(self, "_original_log_level") and self._original_log_level is not None:
+            import logging
+
+            logging.getLogger().setLevel(self._original_log_level)
 
         logger.info(
             f"Job cancellation complete: {results['cancelled']} cancelled, {results['failed']} failed"
@@ -605,6 +658,139 @@ class DistributedJobManager:
             "strategy": self.config.strategy.value,
             "timestamp": datetime.now().isoformat(),
         }
+
+    def _update_source_failure_tracking(self):
+        """Update source failure counts based on current job statuses."""
+        # Reset failure counts for each update
+        for source_name in self.source_job_counts:
+            self.source_failure_counts[source_name] = 0
+
+        # Count failures per source
+        for job in self.all_jobs.values():
+            if job.source_name and job.status in ["FAILED", "CANCELLED"]:
+                if job.source_name not in self.source_failure_counts:
+                    self.source_failure_counts[job.source_name] = 0
+                self.source_failure_counts[job.source_name] += 1
+
+        # Check for sources that should be disabled due to high failure rate
+        if self.config.enable_source_failsafe:
+            self._check_source_failure_rates()
+
+    def _check_source_failure_rates(self):
+        """Check source failure rates and disable sources that exceed threshold."""
+        for source_name in list(self.source_job_counts.keys()):
+            if source_name in self.disabled_sources:
+                continue
+
+            job_count = self.source_job_counts[source_name]
+            failure_count = self.source_failure_counts.get(source_name, 0)
+
+            # Only check sources with minimum number of jobs
+            if job_count >= self.config.min_jobs_for_failsafe:
+                failure_rate = failure_count / job_count
+
+                if failure_rate >= self.config.source_failure_threshold:
+                    logger.warning(
+                        f"Disabling source '{source_name}' due to high failure rate: "
+                        f"{failure_count}/{job_count} ({failure_rate:.1%}) >= {self.config.source_failure_threshold:.1%}"
+                    )
+                    self.disabled_sources.add(source_name)
+
+                    # Log details about the failures
+                    failed_jobs = [
+                        job
+                        for job in self.all_jobs.values()
+                        if job.source_name == source_name and job.status in ["FAILED", "CANCELLED"]
+                    ]
+
+                    if failed_jobs:
+                        logger.info(
+                            f"Recent failures on {source_name}: {[job.job_name for job in failed_jobs[-3:]]}"
+                        )
+
+    async def _monitor_source_health(self):
+        """Background task to monitor source health and disable unhealthy sources."""
+        logger.debug("Started source health monitoring task")
+
+        try:
+            while self._running and not self._cancelled:
+                try:
+                    # Check health of all sources
+                    for source in self.sources:
+                        if source.name in self.disabled_sources:
+                            continue
+
+                        try:
+                            health_info = await source.health_check()
+
+                            # Initialize health failure tracking if needed
+                            if source.name not in self.source_health_failures:
+                                self.source_health_failures[source.name] = 0
+
+                            # Check health status
+                            if health_info.get("status") == "unhealthy":
+                                self.source_health_failures[source.name] += 1
+                                logger.warning(
+                                    f"Health check failed for {source.name}: {health_info.get('error', 'Unknown error')} "
+                                    f"(consecutive failures: {self.source_health_failures[source.name]})"
+                                )
+
+                                # Disable source if too many consecutive failures
+                                if (
+                                    self.config.auto_disable_unhealthy_sources
+                                    and self.source_health_failures[source.name]
+                                    >= self.config.health_check_failure_threshold
+                                ):
+                                    logger.error(
+                                        f"Disabling source '{source.name}' due to {self.source_health_failures[source.name]} "
+                                        f"consecutive health check failures"
+                                    )
+                                    self.disabled_sources.add(source.name)
+
+                            elif health_info.get("status") == "degraded":
+                                # Reset consecutive failures for degraded but functional sources
+                                self.source_health_failures[source.name] = max(
+                                    0, self.source_health_failures[source.name] - 1
+                                )
+
+                                # Log degraded status with details
+                                warning_msg = health_info.get("warning", "Degraded performance")
+                                logger.warning(f"Source {source.name} is degraded: {warning_msg}")
+
+                            else:  # healthy
+                                # Reset consecutive failures for healthy sources
+                                self.source_health_failures[source.name] = 0
+
+                            # Log critical disk space issues
+                            if health_info.get("disk_status") == "critical":
+                                logger.error(
+                                    f"CRITICAL: {source.name} has critical disk space shortage: "
+                                    f"{health_info.get('disk_message', 'Unknown disk issue')}"
+                                )
+
+                        except Exception as e:
+                            logger.error(f"Health check error for {source.name}: {e}")
+                            # Treat health check errors as health failures
+                            if source.name not in self.source_health_failures:
+                                self.source_health_failures[source.name] = 0
+                            self.source_health_failures[source.name] += 1
+
+                    # Log current status
+                    if self.disabled_sources:
+                        logger.debug(
+                            f"Currently disabled sources: {', '.join(self.disabled_sources)}"
+                        )
+
+                    await asyncio.sleep(self.config.health_check_interval)
+
+                except Exception as e:
+                    logger.error(f"Error in source health monitoring loop: {e}")
+                    await asyncio.sleep(10)
+
+        except Exception as e:
+            logger.error(f"Critical error in source health monitoring: {e}")
+        finally:
+            logger.debug("Source health monitoring task completed")
 
     async def _normalize_results_structure(self):
         """

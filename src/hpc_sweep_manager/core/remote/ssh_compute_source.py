@@ -46,21 +46,34 @@ class SSHComputeSource(ComputeSource):
                 show_progress=False,  # We'll handle progress at distributed level
             )
 
-            # Setup remote environment
+            # For distributed sweeps, we want strict sync verification
+            # to ensure all compute sources have the same config state
+            logger.info(
+                f"Verifying project sync for {self.name} (ensuring consistent config across all GPUs)"
+            )
+
+            # Setup remote environment with strict sync verification
             setup_success = await self.remote_manager.setup_remote_environment(
-                verify_sync=True,  # Enable sync verification
-                auto_sync=False,  # Don't auto-sync, may prompt user
-                interactive=True,  # Allow user interaction for sync decisions
+                verify_sync=True,  # Always verify sync for distributed execution
+                auto_sync=False,  # Don't auto-sync, show user what will be synced
+                interactive=True,  # Allow user to review config changes before syncing
             )
 
             if setup_success:
                 self.stats.health_status = "healthy"
                 self.stats.last_health_check = datetime.now()
-                logger.debug(f"✓ SSH compute source {self.name} setup successful")
+                logger.info(
+                    f"✓ SSH compute source {self.name} setup successful - project state synchronized"
+                )
                 return True
             else:
                 self.stats.health_status = "unhealthy"
-                logger.error(f"✗ SSH compute source {self.name} setup failed")
+                logger.error(
+                    f"✗ SSH compute source {self.name} setup failed - project sync required"
+                )
+                logger.error(
+                    f"  Ensure config changes are synchronized before running distributed sweep"
+                )
                 return False
 
         except Exception as e:
@@ -103,7 +116,7 @@ class SSHComputeSource(ComputeSource):
             self.active_jobs[job_id] = job_info
             self.stats.total_submitted += 1
 
-            logger.info(f"Job {job_name} submitted to SSH source {self.name} with ID {job_id}")
+            logger.debug(f"Job {job_name} submitted to SSH source {self.name} with ID {job_id}")
             return job_id
 
         except Exception as e:
@@ -158,7 +171,9 @@ class SSHComputeSource(ComputeSource):
                 cleanup_after_sync=False,  # Don't cleanup yet, may have more jobs
             )
 
-            logger.info(f"Result collection from {self.name}: {'success' if success else 'failed'}")
+            logger.debug(
+                f"Result collection from {self.name}: {'success' if success else 'failed'}"
+            )
             return success
 
         except Exception as e:
@@ -166,7 +181,7 @@ class SSHComputeSource(ComputeSource):
             return False
 
     async def health_check(self) -> Dict[str, Any]:
-        """Perform health check and return status."""
+        """Perform comprehensive health check including disk space monitoring."""
         try:
             if not self.remote_manager:
                 return {
@@ -176,7 +191,6 @@ class SSHComputeSource(ComputeSource):
                 }
 
             # Use remote manager's health check capabilities
-            # For now, we'll do a simple connectivity test
             from .discovery import create_ssh_connection
 
             async with await create_ssh_connection(
@@ -184,20 +198,43 @@ class SSHComputeSource(ComputeSource):
                 self.remote_config.ssh_key,
                 self.remote_config.ssh_port,
             ) as conn:
-                # Simple health check - run date command
-                result = await conn.run("date")
-
                 health_info = {
                     "status": "healthy",
                     "timestamp": datetime.now().isoformat(),
-                    "remote_time": result.stdout.strip(),
                     "connection": "ok",
                     "active_jobs": len(self.active_jobs),
                     "max_jobs": self.max_parallel_jobs,
                     "utilization": f"{self.utilization:.1%}",
                 }
 
-                self.stats.health_status = "healthy"
+                # Basic connectivity test
+                result = await conn.run("date")
+                health_info["remote_time"] = result.stdout.strip()
+
+                # Enhanced disk space checking
+                disk_health = await self._check_disk_space_health(conn)
+                health_info.update(disk_health)
+
+                # System load and memory check
+                system_health = await self._check_system_health(conn)
+                health_info.update(system_health)
+
+                # Check for recent job failures due to disk space
+                failure_rate = await self._check_disk_failure_rate(conn)
+                health_info["disk_failure_rate"] = failure_rate
+
+                # Determine overall health status
+                if disk_health.get("disk_status") == "critical":
+                    health_info["status"] = "unhealthy"
+                    health_info["error"] = "Critical disk space shortage"
+                elif disk_health.get("disk_status") == "warning" and failure_rate > 0.3:
+                    health_info["status"] = "degraded"
+                    health_info["warning"] = "High disk failure rate with low space"
+                elif failure_rate > 0.5:
+                    health_info["status"] = "degraded"
+                    health_info["warning"] = f"High failure rate: {failure_rate:.1%}"
+
+                self.stats.health_status = health_info["status"]
                 self.stats.last_health_check = datetime.now()
 
                 return health_info
@@ -215,6 +252,124 @@ class SSHComputeSource(ComputeSource):
             self.stats.last_health_check = datetime.now()
 
             return health_info
+
+    async def _check_disk_space_health(self, conn) -> Dict[str, Any]:
+        """Check disk space health on remote machine."""
+        try:
+            # Check project root disk space
+            project_result = await conn.run(
+                f"df {self.remote_config.project_root} | tail -1 | awk '{{print $4/1024/1024, 100-($3/$2*100)}}'"
+            )
+            project_space_gb, project_space_percent = map(
+                float, project_result.stdout.strip().split()
+            )
+
+            # Check tmp/home space
+            home_result = await conn.run(
+                "df ~ | tail -1 | awk '{print $4/1024/1024, 100-($3/$2*100)}'"
+            )
+            home_space_gb, home_space_percent = map(float, home_result.stdout.strip().split())
+
+            disk_info = {
+                "project_space_gb": project_space_gb,
+                "project_space_percent": project_space_percent,
+                "home_space_gb": home_space_gb,
+                "home_space_percent": home_space_percent,
+            }
+
+            # Determine disk status
+            min_space_gb = min(project_space_gb, home_space_gb)
+            min_space_percent = min(project_space_percent, home_space_percent)
+
+            if min_space_gb < 1.0 or min_space_percent < 5:
+                disk_info["disk_status"] = "critical"
+                disk_info["disk_message"] = (
+                    f"Critical: {min_space_gb:.1f}GB ({min_space_percent:.1f}%) free"
+                )
+            elif min_space_gb < 3.0 or min_space_percent < 10:
+                disk_info["disk_status"] = "warning"
+                disk_info["disk_message"] = (
+                    f"Warning: {min_space_gb:.1f}GB ({min_space_percent:.1f}%) free"
+                )
+            else:
+                disk_info["disk_status"] = "healthy"
+                disk_info["disk_message"] = (
+                    f"Healthy: {min_space_gb:.1f}GB ({min_space_percent:.1f}%) free"
+                )
+
+            return disk_info
+
+        except Exception as e:
+            logger.warning(f"Disk space check failed for {self.name}: {e}")
+            return {
+                "disk_status": "unknown",
+                "disk_message": f"Check failed: {e}",
+            }
+
+    async def _check_system_health(self, conn) -> Dict[str, Any]:
+        """Check system load and memory health."""
+        try:
+            # Get load average
+            load_result = await conn.run(
+                "uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ','"
+            )
+            load_avg = float(load_result.stdout.strip())
+
+            # Get memory usage
+            mem_result = await conn.run("free | grep Mem | awk '{print $3/$2 * 100.0}'")
+            memory_percent = float(mem_result.stdout.strip())
+
+            return {
+                "load_average": load_avg,
+                "memory_percent": memory_percent,
+                "system_health": "healthy"
+                if load_avg < 5.0 and memory_percent < 85
+                else "overloaded",
+            }
+
+        except Exception as e:
+            logger.warning(f"System health check failed for {self.name}: {e}")
+            return {
+                "system_health": "unknown",
+                "system_message": f"Check failed: {e}",
+            }
+
+    async def _check_disk_failure_rate(self, conn) -> float:
+        """Check recent job failure rate due to disk space issues."""
+        try:
+            if not self.remote_manager or not self.remote_manager.remote_sweep_dir:
+                return 0.0
+
+            # Look for recent disk space failures in task directories
+            check_cmd = f"""
+            find {self.remote_manager.remote_sweep_dir}/tasks -name "task_info.txt" -type f 2>/dev/null | \
+            xargs grep -l "FAILED_DISK_SPACE\\|no space left on device" 2>/dev/null | wc -l
+            """
+
+            failed_result = await conn.run(check_cmd)
+            failed_count = int(failed_result.stdout.strip() or "0")
+
+            # Count total tasks
+            total_cmd = f"""
+            find {self.remote_manager.remote_sweep_dir}/tasks -name "task_info.txt" -type f 2>/dev/null | wc -l
+            """
+
+            total_result = await conn.run(total_cmd)
+            total_count = int(total_result.stdout.strip() or "0")
+
+            if total_count == 0:
+                return 0.0
+
+            failure_rate = failed_count / total_count
+            logger.debug(
+                f"Disk failure rate for {self.name}: {failed_count}/{total_count} = {failure_rate:.2%}"
+            )
+
+            return failure_rate
+
+        except Exception as e:
+            logger.warning(f"Disk failure rate check failed for {self.name}: {e}")
+            return 0.0
 
     async def cleanup(self):
         """Cleanup resources."""

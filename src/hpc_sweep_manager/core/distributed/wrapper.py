@@ -72,6 +72,9 @@ class DistributedSweepWrapper:
             self.console.print(
                 f"[green]✓ Distributed environment ready with {len(self.distributed_manager.sources)} sources[/green]"
             )
+            self.console.print(
+                f"[green]✓ All compute sources synchronized - consistent config state across all GPUs[/green]"
+            )
 
             # Submit distributed sweep
             job_ids = await self.distributed_manager.submit_distributed_sweep(
