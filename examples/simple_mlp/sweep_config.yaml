@@ -1,0 +1,67 @@
+# Example Sweep Configuration for Simple MLP
+# This demonstrates different sweep strategies for hyperparameter tuning
+
+# Basic grid sweep example
+grid_sweep:
+  method: grid
+  parameters:
+    seed:
+      values: [42, 123, 456]
+    training.lr:
+      values: [0.001, 0.01, 0.1]
+    model.hidden_dim:
+      values: [32, 64, 128]
+  # This creates 3 * 3 * 3 = 27 total runs
+
+# Random sweep example  
+random_sweep:
+  method: random
+  count: 20  # Number of random combinations to try
+  parameters:
+    seed:
+      distribution: int_uniform
+      min: 1
+      max: 1000
+    training.lr:
+      distribution: log_uniform
+      min: 0.0001
+      max: 0.1
+    model.hidden_dim:
+      distribution: categorical
+      values: [16, 32, 64, 128, 256]
+    training.gamma:
+      distribution: uniform
+      min: 0.9
+      max: 0.999
+
+# Bayesian optimization sweep example (if using W&B)
+bayes_sweep:
+  method: bayes
+  metric:
+    name: final_loss
+    goal: minimize
+  parameters:
+    training.lr:
+      distribution: log_uniform
+      min: 0.0001
+      max: 0.1
+    model.hidden_dim:
+      distribution: int_uniform
+      min: 16
+      max: 256
+    training.gamma:
+      distribution: uniform
+      min: 0.9
+      max: 0.999
+
+# Small test sweep for quick validation
+test_sweep:
+  method: grid
+  parameters:
+    seed:
+      values: [42, 123]
+    training.lr:
+      values: [0.001, 0.01]
+    model.hidden_dim:
+      values: [32, 64]
+  # This creates 2 * 2 * 2 = 8 total runs 

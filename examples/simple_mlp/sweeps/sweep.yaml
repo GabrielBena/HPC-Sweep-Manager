@@ -1,0 +1,23 @@
+metadata:
+  description: Example hyperparameter sweep
+  tags:
+  - example
+  - baseline
+parameters:
+  batch_size:
+    values:
+    - 32
+    - 64
+  learning_rate:
+    values:
+    - 0.001
+    - 0.01
+    - 0.1
+  seed:
+    values:
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+strategy: grid

@@ -1,0 +1,49 @@
+# Configuration for Simple MLP Example
+# This is a minimal example for demonstrating HSM functionality
+
+# Random seed for reproducibility
+seed: 42
+
+# Model architecture
+model:
+  input_dim: 10
+  hidden_dim: 64
+  output_dim: 1
+
+# Data configuration
+data:
+  n_samples: 1000
+
+# Training parameters
+training:
+  epochs: 100
+  lr: 0.001
+  gamma: 0.99  # Decay factor for mock training loss
+  simulate_time: 0.01  # Seconds to sleep per epoch (to simulate computation)
+
+# Output configuration
+output:
+  dir: "./outputs"
+  save_results: true
+
+# Logging configuration
+logging:
+  log_interval: 10
+  
+  # W&B configuration
+  wandb:
+    enabled: true
+    project: "hsm-simple-mlp"
+    entity: "m2snn"  # Your W&B username/team
+    run_name: null  # Auto-generated if null
+    tags: ["simple-mlp", "hsm-example", "minimal"]
+
+# Hydra configuration
+hydra:
+  job:
+    chdir: true  # Change to output directory
+  run:
+    dir: ${output.dir}/run_${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: ${output.dir}/sweep_${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${hydra.job.num} 

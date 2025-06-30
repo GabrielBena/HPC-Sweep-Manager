@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hpc-sweep-manager"
-version = "0.1.0"
+version = "2.0.0"
 description = "Automated hyperparameter sweeps on HPC systems using Hydra configs and W&B tracking"
 readme = "README.md"
 license = {text = "MIT"}
@@ -12,7 +12,7 @@ authors = [
     {name = "Gabriel Bena", email = "gabriel.bena@gmail.com"}
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -37,12 +37,14 @@ dependencies = [
     "pandas>=1.5.0",
     "numpy>=1.21.0",
     "psutil>=5.9.0",
+    "asyncssh>=2.13.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
@@ -52,6 +54,11 @@ docs = [
     "sphinx-rtd-theme>=1.2.0",
     "myst-parser>=1.0.0",
 ]
+examples = [
+    "torch>=1.9.0",
+    "numpy>=1.20.0", 
+    "wandb>=0.15.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/yourusername/hpc-sweep-manager"
@@ -60,13 +67,13 @@ Repository = "https://github.com/yourusername/hpc-sweep-manager"
 Changelog = "https://github.com/yourusername/hpc-sweep-manager/blob/main/CHANGELOG.md"
 
 [project.scripts]
-hsm = "hpc_sweep_manager.cli.main:main"
+hsm = "hsm.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-hpc_sweep_manager = ["templates/*.j2"]
+hsm = ["templates/*.j2"]
 
 # Ruff configuration
 [tool.ruff]
@@ -142,7 +149,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.ruff.lint.isort]
-known-first-party = ["hpc_sweep_manager"]
+known-first-party = ["hsm"]
 force-sort-within-sections = true
 split-on-trailing-comma = true
 
@@ -159,8 +166,16 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = [
-    "--cov=hpc_sweep_manager",
+    "--cov=hsm",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-fail-under=80"
+]
+markers = [
+    "slow: marks tests as slow (may take several seconds)",
+    "remote: marks tests as requiring remote SSH access",
+    "hpc: marks tests as requiring HPC environment",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "cli: marks tests as CLI tests"
 ] 
