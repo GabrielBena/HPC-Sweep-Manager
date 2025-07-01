@@ -186,6 +186,196 @@ class PathDetector:
 
         return paths
 
+    def detect_hydra_configs(self) -> List[Path]:
+        """Find all Hydra config files in the project."""
+        config_files = []
+
+        # Look in config directory first
+        config_dir = self.detect_config_dir()
+        if config_dir:
+            # Main config files
+            for pattern in ["config.yaml", "config.yml", "main.yaml", "main.yml"]:
+                config_file = config_dir / pattern
+                if config_file.exists():
+                    config_files.append(config_file)
+
+            # Also check subdirectories for more configs
+            for config_file in config_dir.rglob("*.yaml"):
+                if config_file not in config_files:
+                    config_files.append(config_file)
+            for config_file in config_dir.rglob("*.yml"):
+                if config_file not in config_files:
+                    config_files.append(config_file)
+
+        # Also look for configs in common locations
+        common_locations = [
+            self.project_root / "config.yaml",
+            self.project_root / "config.yml",
+            self.project_root / "conf" / "config.yaml",
+            self.project_root / "cfg" / "config.yaml",
+        ]
+
+        for config_file in common_locations:
+            if config_file.exists() and config_file not in config_files:
+                config_files.append(config_file)
+
+        return config_files
+
+    def extract_config_parameters(self) -> Dict[str, Any]:
+        """Extract parameters from existing Hydra config files."""
+        import yaml
+
+        config_files = self.detect_hydra_configs()
+        extracted_params = {}
+
+        for config_file in config_files:
+            try:
+                with open(config_file) as f:
+                    config_data = yaml.safe_load(f)
+
+                if config_data:
+                    # Extract interesting parameters for sweep potential
+                    params = self._extract_sweep_candidates(config_data, str(config_file))
+                    extracted_params[str(config_file.relative_to(self.project_root))] = params
+
+            except Exception as e:
+                logger.debug(f"Could not parse config file {config_file}: {e}")
+
+        return extracted_params
+
+    def _extract_sweep_candidates(
+        self, config_data: Dict[str, Any], source_file: str
+    ) -> Dict[str, Any]:
+        """Extract parameters that are good candidates for sweeping."""
+        candidates = {}
+
+        # Flatten the config to find numeric/categorical parameters
+        flattened = self._flatten_dict(config_data)
+
+        # Look for common parameters that are often swept
+        sweep_worthy_patterns = [
+            "lr",
+            "learning_rate",
+            "learning_rates",
+            "batch_size",
+            "batch_sizes",
+            "hidden_dim",
+            "hidden_size",
+            "embed_dim",
+            "dropout",
+            "dropout_rate",
+            "weight_decay",
+            "l2_reg",
+            "epochs",
+            "max_epochs",
+            "seed",
+            "random_seed",
+            "gamma",
+            "alpha",
+            "beta",
+            "temperature",
+            "tau",
+            "momentum",
+            "optimizer",
+            "scheduler",
+            "activation",
+            "loss_function",
+        ]
+
+        for key, value in flattened.items():
+            # Skip certain keys
+            if any(skip in key.lower() for skip in ["dir", "path", "file", "name", "id"]):
+                continue
+
+            # Include if it matches common patterns
+            if (
+                any(pattern in key.lower() for pattern in sweep_worthy_patterns)
+                or isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                candidates[key] = {
+                    "current_value": value,
+                    "type": type(value).__name__,
+                    "source": source_file,
+                }
+            # Include string values that look like choices
+            elif isinstance(value, str) and value.lower() in [
+                "adam",
+                "sgd",
+                "adamw",
+                "rmsprop",  # optimizers
+                "relu",
+                "gelu",
+                "tanh",
+                "sigmoid",  # activations
+                "mse",
+                "cross_entropy",
+                "bce",  # losses
+                "cosine",
+                "step",
+                "exponential",  # schedulers
+            ]:
+                candidates[key] = {
+                    "current_value": value,
+                    "type": "categorical",
+                    "source": source_file,
+                }
+
+        return candidates
+
+    def suggest_sweep_parameters(self) -> Dict[str, Any]:
+        """Suggest parameters for sweeping based on detected configs."""
+        extracted = self.extract_config_parameters()
+        suggestions = {}
+
+        for config_file, params in extracted.items():
+            for param_name, param_info in params.items():
+                current_value = param_info["current_value"]
+                param_type = param_info["type"]
+
+                # Suggest sweep values based on type and current value
+                if param_type in ["int", "float"]:
+                    if "lr" in param_name.lower() or "learning_rate" in param_name.lower():
+                        # Learning rate suggestions
+                        if isinstance(current_value, float):
+                            suggestions[param_name] = [
+                                current_value * 0.1,
+                                current_value * 0.5,
+                                current_value,
+                                current_value * 2,
+                                current_value * 10,
+                            ]
+                    elif "batch_size" in param_name.lower():
+                        # Batch size suggestions
+                        if isinstance(current_value, int):
+                            suggestions[param_name] = [
+                                max(1, current_value // 2),
+                                current_value,
+                                current_value * 2,
+                            ]
+                    elif "seed" in param_name.lower():
+                        # Multiple seeds
+                        suggestions[param_name] = [1, 2, 3, 4, 5]
+                    elif "dropout" in param_name.lower():
+                        # Dropout rates
+                        suggestions[param_name] = [0.0, 0.1, 0.2, 0.3, 0.5]
+                    else:
+                        # Generic numeric suggestions
+                        if isinstance(current_value, (int, float)):
+                            suggestions[param_name] = [
+                                current_value * 0.5,
+                                current_value,
+                                current_value * 2,
+                            ]
+                elif param_type == "categorical":
+                    # Add common alternatives for categorical values
+                    if "optimizer" in param_name.lower():
+                        suggestions[param_name] = ["adam", "sgd", "adamw"]
+                    elif "activation" in param_name.lower():
+                        suggestions[param_name] = ["relu", "gelu", "tanh"]
+
+        return suggestions
+
     def get_project_info(self) -> Dict[str, Any]:
         """Get comprehensive project information."""
         info = {
@@ -205,6 +395,11 @@ class PathDetector:
         info["has_requirements"] = (self.project_root / "requirements.txt").exists()
         info["has_pyproject"] = (self.project_root / "pyproject.toml").exists()
         info["has_conda_env"] = (self.project_root / "environment.yml").exists()
+
+        # Add config detection
+        info["hydra_configs"] = self.detect_hydra_configs()
+        info["config_parameters"] = self.extract_config_parameters()
+        info["sweep_suggestions"] = self.suggest_sweep_parameters()
 
         return info
 
@@ -259,10 +454,23 @@ class PathDetector:
         return suggestions
 
     def get_default_resources(self, hpc_system: str) -> str:
-        """Get default resource specification for HPC system."""
+        """Get default HPC resource specifications."""
         if hpc_system == "pbs":
             return "select=1:ncpus=4:mem=16gb"
         elif hpc_system == "slurm":
             return "--nodes=1 --ntasks=4 --mem=16G"
         else:
-            return "local"
+            return ""
+
+    def _flatten_dict(
+        self, d: Dict[str, Any], parent_key: str = "", sep: str = "."
+    ) -> Dict[str, Any]:
+        """Flatten nested dictionary with dot notation."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(self._flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)

@@ -1,22 +1,9 @@
 defaults:
 - override: 'hydra/launcher: basic'
 metadata:
-  description: Example hyperparameter sweep
-  tags:
-  - example
-  - baseline
+  description: Hyperparameter sweep for simple_mlp (auto-generated from detected parameters)
+  tags: ['auto-generated', 'baseline']
+  auto_detected_params: ['seed', 'model.input_dim', 'model.output_dim', 'data.n_samples', 'training.epochs', 'training.lr', 'training.gamma', 'training.simulate_time', 'logging.log_interval']
 sweep:
   grid:
-    batch_size:
-    - 32
-    - 64
-    learning_rate:
-    - 0.001
-    - 0.01
-    - 0.1
-    seed:
-    - 1
-    - 2
-    - 3
-    - 4
-    - 5
+    seed: [1, 2, 3, 4, 5]

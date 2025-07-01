@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from ..compute.base import Task, TaskStatus
+import contextlib
 
 logger = logging.getLogger(__name__)
 
@@ -200,19 +201,15 @@ class SweepTracker:
 
                             # Parse timestamps
                             if task_data.get("start_time"):
-                                try:
+                                with contextlib.suppress(Exception):
                                     tracking.start_time = datetime.fromisoformat(
                                         task_data["start_time"]
                                     )
-                                except:
-                                    pass
                             if task_data.get("complete_time"):
-                                try:
+                                with contextlib.suppress(Exception):
                                     tracking.complete_time = datetime.fromisoformat(
                                         task_data["complete_time"]
                                     )
-                                except:
-                                    pass
 
                             self.task_tracking[task_id] = tracking
 
@@ -316,10 +313,9 @@ class SweepTracker:
                 tracking.complete_time = datetime.now()
 
                 # Mark sweep as completed if all tasks are done
-                if self._check_completion():
-                    if self.metadata:
-                        self.metadata.completed_time = datetime.now()
-                        await self._save_metadata()
+                if self._check_completion() and self.metadata:
+                    self.metadata.completed_time = datetime.now()
+                    await self._save_metadata()
 
             logger.debug(f"Updated task status: {task_id} {old_status.value} -> {status.value}")
             await self._save_mapping()

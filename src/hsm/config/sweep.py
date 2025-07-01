@@ -121,6 +121,92 @@ class SweepConfig:
             },
         )
 
+    @classmethod
+    def from_detected_parameters(
+        cls,
+        project_root: Union[str, Path],
+        max_params: int = 5,
+        include_seeds: bool = True,
+        description: Optional[str] = None,
+    ) -> "SweepConfig":
+        """Create sweep config from auto-detected project parameters.
+
+        Args:
+            project_root: Path to project root directory
+            max_params: Maximum number of parameters to include in sweep
+            include_seeds: Whether to include seed parameter if not detected
+            description: Custom description for the sweep
+
+        Returns:
+            SweepConfig instance with auto-detected parameters
+        """
+        from ..utils.paths import PathDetector
+
+        detector = PathDetector(Path(project_root))
+        project_info = detector.get_project_info()
+        sweep_suggestions = project_info.get("sweep_suggestions", {})
+
+        # Select the most relevant parameters
+        grid_params = {}
+        param_count = 0
+
+        # Prioritize certain parameter types
+        priority_patterns = [
+            "learning_rate",
+            "lr",
+            "batch_size",
+            "dropout",
+            "seed",
+            "hidden_dim",
+            "weight_decay",
+            "epochs",
+        ]
+
+        # First, add high-priority parameters
+        for pattern in priority_patterns:
+            for param_name, values in sweep_suggestions.items():
+                if (
+                    param_count < max_params
+                    and pattern in param_name.lower()
+                    and param_name not in grid_params
+                ):
+                    grid_params[param_name] = values
+                    param_count += 1
+
+        # Then add other parameters to fill up to max_params
+        for param_name, values in sweep_suggestions.items():
+            if param_count >= max_params:
+                break
+            if param_name not in grid_params:
+                grid_params[param_name] = values
+                param_count += 1
+
+        # Add seed if requested and not already present
+        if include_seeds and "seed" not in grid_params:
+            grid_params["seed"] = [1, 2, 3, 4, 5]
+
+        # Create metadata
+        project_name = project_info.get("project_name", "Unknown Project")
+        if description is None:
+            description = f"Auto-generated hyperparameter sweep for {project_name}"
+
+        metadata = {
+            "description": description,
+            "tags": ["auto-generated", "baseline"],
+            "auto_detected_params": list(sweep_suggestions.keys()),
+            "total_detected_params": len(sweep_suggestions),
+            "selected_params": list(grid_params.keys()),
+            "project_root": str(project_root),
+            "generated_by": "HSM PathDetector",
+        }
+
+        return cls(
+            grid=grid_params,
+            paired=[],
+            defaults={"override": "hydra/launcher: basic"},
+            metadata=metadata,
+        )
+
     def validate(self) -> List[str]:
         """Validate the sweep configuration and return any errors.
 

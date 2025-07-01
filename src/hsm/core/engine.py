@@ -19,6 +19,8 @@ from ..compute.base import (
     Task,
     TaskStatus,
 )
+from .result_collector import ResultCollectionManager
+from .sync_manager import ProjectStateChecker
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,11 @@ class SweepResult:
 
     # Result collection info
     collection_results: List[CollectionResult] = field(default_factory=list)
+
+    # Enhanced sync and collection status
+    project_sync_verified: bool = False
+    project_sync_warnings: List[str] = field(default_factory=list)
+    comprehensive_collection_used: bool = False
 
     @property
     def success_rate(self) -> float:
@@ -112,7 +119,12 @@ class SweepEngine:
         self.sweep_context = sweep_context
         self.sources = {source.name: source for source in sources}
         self.distribution_strategy = distribution_strategy
-        self.max_concurrent_tasks = max_concurrent_tasks or self._calculate_max_concurrent_tasks()
+        # Calculate max concurrent tasks if not provided
+        if max_concurrent_tasks is not None:
+            self.max_concurrent_tasks = max_concurrent_tasks
+        else:
+            # Calculate based on available sources
+            self.max_concurrent_tasks = self._calculate_max_concurrent_tasks_from_sources()
         self.health_check_interval = health_check_interval
         self.result_collection_interval = result_collection_interval
 
@@ -139,6 +151,13 @@ class SweepEngine:
 
         # Round-robin state
         self._round_robin_index = 0
+
+        # Advanced result collection and sync management
+        self.result_collection_manager: Optional[ResultCollectionManager] = None
+        self.project_state_checker: Optional[ProjectStateChecker] = None
+        self.project_sync_verified: bool = False
+        self.project_sync_warnings: List[str] = []
+        self.comprehensive_collection_used: bool = False
 
         # Enhanced health monitoring and failure tracking
         self.source_failure_counts: Dict[str, int] = {}  # source_name -> failure_count
@@ -239,10 +258,20 @@ class SweepEngine:
         # Initialize sweep state
         self.status = SweepStatus.RUNNING
         self.start_time = datetime.now()
-        self.pending_tasks = tasks.copy()
+        self.pending_tasks = {task.task_id: task for task in tasks}
 
         # Create sweep directory structure
         await self._setup_sweep_directories()
+
+        # Initialize advanced result collection and sync management
+        self.result_collection_manager = ResultCollectionManager(self.sweep_context.sweep_dir)
+
+        # Check project sync status for remote sources before starting
+        await self._verify_project_sync()
+
+        # Initialize sweep logging and configuration
+        await self._setup_sweep_logging()
+        await self._write_sweep_config()
 
         try:
             # Start background tasks
@@ -274,6 +303,7 @@ class SweepEngine:
             raise
         finally:
             self.end_time = datetime.now()
+            await self._generate_sweep_summary()
             await self._cleanup()
 
         return self._create_result()
@@ -298,6 +328,295 @@ class SweepEngine:
             directory.mkdir(parents=True, exist_ok=True)
 
         logger.debug(f"Created sweep directory structure at {base_dir}")
+
+    async def _verify_project_sync(self):
+        """Verify project synchronization status for remote sources."""
+        try:
+            # Check if we have any SSH or remote sources that need sync verification
+            remote_sources = []
+            for source in self.sources.values():
+                if hasattr(source, "ssh_config") and source.source_type == "ssh":
+                    remote_sources.append(source)
+
+            if not remote_sources:
+                logger.debug("No remote sources detected, skipping project sync verification")
+                return
+
+            # Verify sync status for each remote source
+            self.project_sync_warnings = []
+            for source in remote_sources:
+                try:
+                    # Create project state checker for this remote
+                    from pathlib import Path
+
+                    local_project_dir = Path.cwd()
+
+                    self.project_state_checker = ProjectStateChecker(
+                        local_project_dir=str(local_project_dir),
+                        ssh_config=source.ssh_config,
+                    )
+
+                    # Check if projects are in sync
+                    sync_status = await self.project_state_checker.check_project_state()
+
+                    if sync_status.get("in_sync"):
+                        logger.info(f"✓ Project sync verified for {source.name}")
+                    else:
+                        warning_msg = f"⚠ Project sync warning for {source.name}: {sync_status.get('message', 'Unknown sync issue')}"
+                        logger.warning(warning_msg)
+                        self.project_sync_warnings.append(warning_msg)
+
+                except Exception as e:
+                    warning_msg = f"Could not verify project sync for {source.name}: {e}"
+                    logger.warning(warning_msg)
+                    self.project_sync_warnings.append(warning_msg)
+
+            # Mark sync as verified (even if there were warnings)
+            self.project_sync_verified = True
+
+            if self.project_sync_warnings:
+                logger.warning(
+                    f"Project sync verification completed with {len(self.project_sync_warnings)} warnings"
+                )
+
+        except Exception as e:
+            logger.warning(f"Error during project sync verification: {e}")
+
+    async def _setup_sweep_logging(self):
+        """Setup sweep-level logging files."""
+        logs_dir = self.sweep_context.sweep_dir / "logs"
+
+        # Task assignment log
+        self.task_assignment_log = logs_dir / "task_assignments.log"
+        with open(self.task_assignment_log, "w") as f:
+            f.write(f"# Task Assignment Log for Sweep {self.sweep_context.sweep_id}\n")
+            f.write(f"# Started: {self.start_time.isoformat()}\n")
+            f.write("# Format: timestamp | task_id | source | status | message\n\n")
+
+        # Source utilization log
+        self.source_util_log = logs_dir / "source_utilization.log"
+        with open(self.source_util_log, "w") as f:
+            f.write(f"# Source Utilization Log for Sweep {self.sweep_context.sweep_id}\n")
+            f.write(f"# Started: {self.start_time.isoformat()}\n")
+            f.write("# Format: timestamp | source | active_tasks | max_tasks | utilization_pct\n\n")
+
+        # Health status log
+        self.health_log = logs_dir / "health_status.log"
+        with open(self.health_log, "w") as f:
+            f.write(f"# Health Status Log for Sweep {self.sweep_context.sweep_id}\n")
+            f.write(f"# Started: {self.start_time.isoformat()}\n")
+            f.write("# Format: timestamp | source | health_status | message\n\n")
+
+    async def _write_sweep_config(self):
+        """Write the sweep configuration to the output directory."""
+        import yaml
+
+        config_file = self.sweep_context.sweep_dir / "sweep_config.yaml"
+
+        # Create comprehensive sweep configuration
+        sweep_config = {
+            "sweep_info": {
+                "sweep_id": self.sweep_context.sweep_id,
+                "start_time": self.start_time.isoformat(),
+                "distribution_strategy": self.distribution_strategy.value,
+                "max_concurrent_tasks": self.max_concurrent_tasks,
+                "health_check_interval": self.health_check_interval,
+                "result_collection_interval": self.result_collection_interval,
+            },
+            "sources": {
+                source_name: {
+                    "source_type": source.source_type,
+                    "max_parallel_tasks": source.max_parallel_tasks,
+                    "health_check_interval": source.health_check_interval,
+                }
+                for source_name, source in self.sources.items()
+            },
+            "context": {
+                "sweep_dir": str(self.sweep_context.sweep_dir),
+                "python_path": self.sweep_context.python_path,
+                "script_path": self.sweep_context.script_path,
+                "project_dir": self.sweep_context.project_dir,
+            },
+            "original_config": self.sweep_context.config,
+            "tasks": {
+                "total_tasks": len(self.pending_tasks),
+                "task_ids": list(self.pending_tasks.keys()),
+            },
+        }
+
+        with open(config_file, "w") as f:
+            yaml.dump(sweep_config, f, default_flow_style=False, indent=2)
+
+        logger.debug(f"Wrote sweep configuration to {config_file}")
+
+    async def _log_task_assignment(
+        self, task_id: str, source_name: str, status: TaskStatus, message: str
+    ):
+        """Log task assignment and status changes."""
+        timestamp = datetime.now().isoformat()
+        log_entry = f"{timestamp} | {task_id} | {source_name} | {status.value} | {message}\n"
+
+        try:
+            with open(self.task_assignment_log, "a") as f:
+                f.write(log_entry)
+        except Exception as e:
+            logger.debug(f"Failed to write task assignment log: {e}")
+
+    async def _log_source_utilization(self):
+        """Log current source utilization."""
+        timestamp = datetime.now().isoformat()
+
+        try:
+            with open(self.source_util_log, "a") as f:
+                for source_name, source in self.sources.items():
+                    if hasattr(source, "stats"):
+                        active_tasks = source.stats.active_tasks
+                        max_tasks = source.stats.max_parallel_tasks
+                        utilization_pct = (active_tasks / max_tasks * 100) if max_tasks > 0 else 0
+
+                        log_entry = f"{timestamp} | {source_name} | {active_tasks} | {max_tasks} | {utilization_pct:.1f}\n"
+                        f.write(log_entry)
+        except Exception as e:
+            logger.debug(f"Failed to write source utilization log: {e}")
+
+    async def _log_health_status(self, source_name: str, health_status: str, message: str):
+        """Log health status events."""
+        timestamp = datetime.now().isoformat()
+        log_entry = f"{timestamp} | {source_name} | {health_status} | {message}\n"
+
+        try:
+            with open(self.health_log, "a") as f:
+                f.write(log_entry)
+        except Exception as e:
+            logger.debug(f"Failed to write health status log: {e}")
+
+    async def _generate_sweep_summary(self):
+        """Generate comprehensive sweep summary report."""
+        import yaml
+        from pathlib import Path
+
+        reports_dir = self.sweep_context.sweep_dir / "reports"
+        summary_file = reports_dir / "sweep_summary.yaml"
+
+        # Calculate totals
+        total_tasks = (
+            len(self.completed_tasks)
+            + len(self.failed_tasks)
+            + len(self.active_tasks)
+            + len(self.pending_tasks)
+        )
+
+        # Calculate duration
+        duration_seconds = None
+        if self.start_time and self.end_time:
+            duration_seconds = (self.end_time - self.start_time).total_seconds()
+
+        # Task assignments by source
+        task_assignments = {}
+        for task_id, source_name in self.task_to_source.items():
+            if source_name not in task_assignments:
+                task_assignments[source_name] = {"completed": 0, "failed": 0, "other": 0}
+
+            if task_id in self.completed_tasks:
+                task_assignments[source_name]["completed"] += 1
+            elif task_id in self.failed_tasks:
+                task_assignments[source_name]["failed"] += 1
+            else:
+                task_assignments[source_name]["other"] += 1
+
+        # Source statistics
+        source_stats = {}
+        for source_name, source in self.sources.items():
+            if hasattr(source, "stats"):
+                stats = source.stats
+                source_stats[source_name] = {
+                    "tasks_submitted": stats.tasks_submitted,
+                    "tasks_completed": stats.tasks_completed,
+                    "tasks_failed": stats.tasks_failed,
+                    "tasks_cancelled": stats.tasks_cancelled,
+                    "success_rate": (stats.tasks_completed / max(1, stats.tasks_submitted)) * 100,
+                    "average_duration": stats.average_task_duration,
+                    "final_health_status": stats.health_status.value,
+                    "max_parallel_tasks": stats.max_parallel_tasks,
+                }
+
+        # Create summary
+        summary = {
+            "sweep_info": {
+                "sweep_id": self.sweep_context.sweep_id,
+                "status": self.status.value,
+                "start_time": self.start_time.isoformat() if self.start_time else None,
+                "end_time": self.end_time.isoformat() if self.end_time else None,
+                "duration_seconds": duration_seconds,
+                "duration_human": f"{duration_seconds:.1f}s" if duration_seconds else None,
+            },
+            "task_summary": {
+                "total_tasks": total_tasks,
+                "completed": len(self.completed_tasks),
+                "failed": len(self.failed_tasks),
+                "active": len(self.active_tasks),
+                "pending": len(self.pending_tasks),
+                "success_rate": (len(self.completed_tasks) / max(1, total_tasks)) * 100,
+            },
+            "task_assignments": task_assignments,
+            "source_statistics": source_stats,
+            "configuration": {
+                "distribution_strategy": self.distribution_strategy.value,
+                "max_concurrent_tasks": self.max_concurrent_tasks,
+                "health_check_interval": self.health_check_interval,
+                "result_collection_interval": self.result_collection_interval,
+            },
+            "disabled_sources": list(self.disabled_sources),
+            "task_list": {
+                "completed": list(self.completed_tasks.keys()),
+                "failed": list(self.failed_tasks.keys()),
+                "active": list(self.active_tasks.keys()),
+                "pending": list(self.pending_tasks.keys())
+                if isinstance(self.pending_tasks, dict)
+                else [],
+            },
+        }
+
+        # Write summary
+        try:
+            with open(summary_file, "w") as f:
+                yaml.dump(summary, f, default_flow_style=False, indent=2)
+
+            # Also create a human-readable text summary
+            text_summary_file = reports_dir / "sweep_summary.txt"
+            with open(text_summary_file, "w") as f:
+                f.write(f"Sweep Summary: {self.sweep_context.sweep_id}\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Status: {self.status.value}\n")
+                f.write(
+                    f"Duration: {duration_seconds:.1f}s\n"
+                    if duration_seconds
+                    else "Duration: Unknown\n"
+                )
+                f.write(
+                    f"Tasks: {len(self.completed_tasks)} completed, {len(self.failed_tasks)} failed, {total_tasks} total\n"
+                )
+                f.write(
+                    f"Success Rate: {(len(self.completed_tasks) / max(1, total_tasks)) * 100:.1f}%\n\n"
+                )
+
+                f.write("Task Assignments by Source:\n")
+                f.write("-" * 30 + "\n")
+                for source_name, counts in task_assignments.items():
+                    total_source = sum(counts.values())
+                    f.write(
+                        f"{source_name}: {total_source} tasks ({counts['completed']} completed, {counts['failed']} failed)\n"
+                    )
+
+                if self.disabled_sources:
+                    f.write(f"\nDisabled Sources: {', '.join(self.disabled_sources)}\n")
+
+                f.write(f"\nGenerated: {datetime.now().isoformat()}\n")
+
+            logger.info(f"Generated sweep summary at {summary_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate sweep summary: {e}")
 
     async def _execute_tasks(self):
         """Execute all pending tasks using available compute sources."""
@@ -353,16 +672,32 @@ class SweepEngine:
                 self.active_tasks[task.task_id] = task
                 self.task_to_source[task.task_id] = source.name
                 logger.info(f"Task {task.task_id} submitted to {source.name}")
+
+                # Log task assignment
+                await self._log_task_assignment(
+                    task.task_id, source.name, result.status, "Task submitted successfully"
+                )
             else:
                 # Submission failed
                 self.failed_tasks[task.task_id] = task
-                logger.error(
+                error_msg = (
                     f"Failed to submit task {task.task_id} to {source.name}: {result.message}"
+                )
+                logger.error(error_msg)
+
+                # Log failed assignment
+                await self._log_task_assignment(
+                    task.task_id, source.name, result.status, result.message or "Submission failed"
                 )
 
         except Exception as e:
             logger.error(f"Exception submitting task {task.task_id} to {source.name}: {e}")
             self.failed_tasks[task.task_id] = task
+
+            # Log exception
+            await self._log_task_assignment(
+                task.task_id, source.name, TaskStatus.FAILED, f"Exception: {str(e)}"
+            )
 
     async def _select_compute_source(self) -> Optional[ComputeSource]:
         """Select an available compute source for task execution.
@@ -380,7 +715,7 @@ class SweepEngine:
             # Check if source has capacity
             if hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
                 active_tasks = source.stats.active_tasks
-                max_tasks = getattr(source.stats, "max_parallel_tasks", source.max_concurrent_tasks)
+                max_tasks = getattr(source.stats, "max_parallel_tasks", source.max_parallel_tasks)
                 if active_tasks >= max_tasks:
                     logger.debug(f"Source {source_name} at capacity: {active_tasks}/{max_tasks}")
                     continue
@@ -410,7 +745,7 @@ class SweepEngine:
                 if hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
                     active = source.stats.active_tasks
                     max_tasks = getattr(
-                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                        source.stats, "max_parallel_tasks", source.max_parallel_tasks
                     )
                     return active / max_tasks if max_tasks > 0 else 0
                 return 0
@@ -432,14 +767,15 @@ class SweepEngine:
             logger.debug(f"Selected source via default: {selected_name}")
             return selected_source
 
-    def _calculate_max_concurrent_tasks(self) -> int:
-        """Calculate the maximum number of concurrent tasks."""
-        if self.max_concurrent_tasks:
-            return self.max_concurrent_tasks
-
-        # Sum available slots across all sources
-        total_slots = sum(source.stats.available_slots for source in self.sources.values())
+    def _calculate_max_concurrent_tasks_from_sources(self) -> int:
+        """Calculate the maximum number of concurrent tasks from source capacities."""
+        # Sum max parallel tasks across all sources
+        total_slots = sum(source.max_parallel_tasks for source in self.sources.values())
         return max(1, total_slots)
+
+    def _calculate_max_concurrent_tasks(self) -> int:
+        """Get the current maximum number of concurrent tasks."""
+        return self.max_concurrent_tasks
 
     async def _wait_for_completion(self):
         """Wait for all active tasks to complete."""
@@ -505,17 +841,40 @@ class SweepEngine:
                     if status == TaskStatus.COMPLETED:
                         self.completed_tasks[task_id] = task
                         logger.info(f"Task {task_id} completed successfully")
+                        await self._log_task_assignment(
+                            task_id,
+                            self.task_to_source.get(task_id, "unknown"),
+                            status,
+                            "Task completed successfully",
+                        )
                     elif status == TaskStatus.FAILED:
                         self.failed_tasks[task_id] = task
+                        failure_msg = (
+                            error_message or f"Exit code {exit_code}"
+                            if exit_code is not None
+                            else "Unknown failure"
+                        )
                         if error_message:
                             logger.warning(f"Task {task_id} failed: {error_message}")
                         elif exit_code is not None:
                             logger.warning(f"Task {task_id} failed with exit code {exit_code}")
                         else:
                             logger.warning(f"Task {task_id} failed")
+                        await self._log_task_assignment(
+                            task_id,
+                            self.task_to_source.get(task_id, "unknown"),
+                            status,
+                            failure_msg,
+                        )
                     else:  # CANCELLED
                         self.failed_tasks[task_id] = task  # Treat as failed
                         logger.info(f"Task {task_id} was cancelled")
+                        await self._log_task_assignment(
+                            task_id,
+                            self.task_to_source.get(task_id, "unknown"),
+                            status,
+                            "Task cancelled",
+                        )
 
                     # Update source statistics
                     if hasattr(source, "stats"):
@@ -538,6 +897,12 @@ class SweepEngine:
                 task.error_message = f"Status check failed: {str(e)}"
                 self.failed_tasks[task_id] = task
                 logger.error(f"Task {task_id} marked as failed due to status check error")
+                await self._log_task_assignment(
+                    task_id,
+                    self.task_to_source.get(task_id, "unknown"),
+                    TaskStatus.FAILED,
+                    f"Status check failed: {str(e)}",
+                )
 
     async def _start_background_tasks(self):
         """Start background monitoring and collection tasks."""
@@ -574,10 +939,17 @@ class SweepEngine:
 
                         if health_status == "unhealthy":
                             self.source_health_failures[source_name] += 1
-                            error_msg = getattr(health_report, "error", "Unknown error")
+                            error_msg = getattr(health_report, "message", "Unknown error")
                             logger.warning(
                                 f"Health check failed for {source_name}: {error_msg} "
                                 f"(consecutive failures: {self.source_health_failures[source_name]})"
+                            )
+
+                            # Log health status
+                            await self._log_health_status(
+                                source_name,
+                                health_status,
+                                f"Failed: {error_msg} (consecutive: {self.source_health_failures[source_name]})",
                             )
 
                             # Disable source if too many consecutive failures
@@ -592,19 +964,42 @@ class SweepEngine:
                                 )
                                 self.disabled_sources.add(source_name)
 
+                                # Log source disabling
+                                await self._log_health_status(
+                                    source_name,
+                                    "disabled",
+                                    f"Source disabled after {self.source_health_failures[source_name]} consecutive failures",
+                                )
+
                         elif health_status == "degraded":
                             # Reset consecutive failures for degraded but functional sources
+                            prev_failures = self.source_health_failures[source_name]
                             self.source_health_failures[source_name] = max(
                                 0, self.source_health_failures[source_name] - 1
                             )
 
                             # Log degraded status with details
-                            warning_msg = getattr(health_report, "warning", "Degraded performance")
+                            warning_msg = getattr(health_report, "message", "Degraded performance")
                             logger.warning(f"Source {source_name} is degraded: {warning_msg}")
+
+                            # Only log if this is a new degraded status
+                            if prev_failures == 0:
+                                await self._log_health_status(
+                                    source_name, health_status, warning_msg
+                                )
 
                         else:  # healthy
                             # Reset consecutive failures for healthy sources
+                            prev_failures = self.source_health_failures[source_name]
                             self.source_health_failures[source_name] = 0
+
+                            # Log recovery if source was previously unhealthy
+                            if prev_failures > 0:
+                                await self._log_health_status(
+                                    source_name,
+                                    health_status,
+                                    f"Source recovered after {prev_failures} failures",
+                                )
 
                         # Log critical issues
                         if (
@@ -638,7 +1033,7 @@ class SweepEngine:
     def _update_source_failure_tracking(self):
         """Update source failure counts based on current task statuses."""
         # Reset failure counts for each update
-        for source_name in self.sources.keys():
+        for source_name in self.sources:
             self.source_failure_counts[source_name] = 0
             if source_name not in self.source_job_counts:
                 self.source_job_counts[source_name] = 0
@@ -777,6 +1172,9 @@ class SweepEngine:
             f" [{progress_pct:.1f}%]"
         )
 
+        # Log source utilization to file (async call in background)
+        asyncio.create_task(self._log_source_utilization())
+
         # Log source utilization
         if self.sources:
             source_info = []
@@ -786,7 +1184,7 @@ class SweepEngine:
                 elif hasattr(source, "stats") and hasattr(source.stats, "active_tasks"):
                     active_tasks = source.stats.active_tasks
                     max_tasks = getattr(
-                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                        source.stats, "max_parallel_tasks", source.max_parallel_tasks
                     )
                     source_info.append(f"{source_name}:{active_tasks}/{max_tasks}")
                 else:
@@ -838,9 +1236,185 @@ class SweepEngine:
             logger.error(f"Error collecting results from {source.name}: {e}")
 
     async def _collect_all_results(self):
-        """Final collection of all results."""
+        """Final collection of all results with comprehensive error analysis."""
         logger.info("Performing final result collection...")
-        await self._collect_results_from_sources()
+
+        # Use the unified result collection manager for all sources
+        if self.result_collection_manager:
+            try:
+                # Build source configurations for comprehensive result collection
+                source_configs = self._build_source_configs()
+
+                if source_configs:
+                    # Use comprehensive result collection
+                    collection_results = await self.result_collection_manager.collect_all_results(
+                        source_configs
+                    )
+
+                    # Mark that comprehensive collection was actually used
+                    self.comprehensive_collection_used = True
+
+                    # Log collection summary
+                    successful_collections = sum(
+                        1 for success in collection_results.values() if success
+                    )
+                    logger.info(
+                        f"Result collection completed: {successful_collections}/{len(source_configs)} sources successful"
+                    )
+
+                    # Generate error analysis if we have failures
+                    failed_sources = [
+                        name for name, success in collection_results.items() if not success
+                    ]
+                    if failed_sources:
+                        logger.warning(
+                            f"Failed to collect results from: {', '.join(failed_sources)}"
+                        )
+
+                    # Aggregate and centralize all logs
+                    await self._aggregate_sweep_logs()
+                else:
+                    logger.debug("No sources configured for result collection")
+
+            except Exception as e:
+                logger.error(f"Error in comprehensive result collection: {e}")
+                # Fallback to basic collection
+                await self._collect_results_from_sources()
+        else:
+            # Fallback to basic collection
+            await self._collect_results_from_sources()
+
+    def _build_source_configs(self) -> Dict[str, Dict[str, Any]]:
+        """Build source configurations for comprehensive result collection."""
+        source_configs = {}
+
+        for source_name, source in self.sources.items():
+            if hasattr(source, "ssh_config") and source.source_type == "ssh":
+                # SSH remote source
+                source_configs[source_name] = {
+                    "type": "remote",
+                    "host": source.ssh_config.host,
+                    "ssh_key": source.ssh_config.key_file,
+                    "ssh_port": source.ssh_config.port,
+                    "remote_sweep_dir": getattr(source, "remote_sweep_dir", ""),
+                    "cleanup_after_sync": True,
+                }
+            elif source.source_type == "local":
+                # Local source
+                source_configs[source_name] = {
+                    "type": "local",
+                    "task_dirs": [],  # Local tasks are already in place
+                }
+            elif source.source_type == "hpc":
+                # HPC source - results are typically on shared filesystem
+                source_configs[source_name] = {
+                    "type": "hpc",
+                    "job_ids": [
+                        self.task_to_source.get(task_id)
+                        for task_id in self.completed_tasks.keys()
+                        if self.task_to_source.get(task_id) == source_name
+                    ],
+                }
+
+        return source_configs
+
+    async def _aggregate_sweep_logs(self):
+        """Aggregate and centralize all sweep logs for easier analysis."""
+        logger.info("Aggregating sweep logs...")
+
+        logs_dir = self.sweep_context.sweep_dir / "logs"
+        aggregated_log = logs_dir / "sweep_aggregated.log"
+
+        try:
+            with open(aggregated_log, "w") as agg_file:
+                # Write header
+                agg_file.write(f"# Aggregated Sweep Log for {self.sweep_context.sweep_id}\n")
+                agg_file.write(f"# Generated: {datetime.now().isoformat()}\n")
+                agg_file.write("=" * 80 + "\n\n")
+
+                # Aggregate main sweep events
+                if hasattr(self, "task_assignment_log") and self.task_assignment_log.exists():
+                    agg_file.write("TASK ASSIGNMENTS:\n")
+                    agg_file.write("-" * 40 + "\n")
+                    with open(self.task_assignment_log) as f:
+                        agg_file.write(f.read())
+                    agg_file.write("\n" + "=" * 80 + "\n\n")
+
+                # Aggregate source utilization
+                if hasattr(self, "source_util_log") and self.source_util_log.exists():
+                    agg_file.write("SOURCE UTILIZATION:\n")
+                    agg_file.write("-" * 40 + "\n")
+                    with open(self.source_util_log) as f:
+                        agg_file.write(f.read())
+                    agg_file.write("\n" + "=" * 80 + "\n\n")
+
+                # Aggregate health status
+                if hasattr(self, "health_log") and self.health_log.exists():
+                    agg_file.write("HEALTH STATUS:\n")
+                    agg_file.write("-" * 40 + "\n")
+                    with open(self.health_log) as f:
+                        agg_file.write(f.read())
+                    agg_file.write("\n" + "=" * 80 + "\n\n")
+
+                # Aggregate source-specific logs
+                sources_logs_dir = logs_dir / "sources"
+                if sources_logs_dir.exists():
+                    for source_log in sources_logs_dir.glob("*.log"):
+                        agg_file.write(f"SOURCE LOG - {source_log.stem.upper()}:\n")
+                        agg_file.write("-" * 40 + "\n")
+                        try:
+                            with open(source_log) as f:
+                                agg_file.write(f.read())
+                        except Exception as e:
+                            agg_file.write(f"Error reading log: {e}\n")
+                        agg_file.write("\n" + "=" * 80 + "\n\n")
+
+                # Aggregate error information
+                errors_dir = self.sweep_context.sweep_dir / "errors"
+                if errors_dir.exists():
+                    error_files = list(errors_dir.glob("*_error.txt"))
+                    if error_files:
+                        agg_file.write("ERROR SUMMARIES:\n")
+                        agg_file.write("-" * 40 + "\n")
+                        for error_file in sorted(error_files):
+                            agg_file.write(f"\n>>> {error_file.name} <<<\n")
+                            try:
+                                with open(error_file) as f:
+                                    agg_file.write(f.read())
+                            except Exception as e:
+                                agg_file.write(f"Error reading error file: {e}\n")
+                        agg_file.write("\n" + "=" * 80 + "\n\n")
+
+                # Write summary statistics
+                agg_file.write("SWEEP SUMMARY:\n")
+                agg_file.write("-" * 40 + "\n")
+                total_tasks = (
+                    len(self.completed_tasks)
+                    + len(self.failed_tasks)
+                    + len(self.active_tasks)
+                    + len(self.pending_tasks)
+                )
+                agg_file.write(f"Total tasks: {total_tasks}\n")
+                agg_file.write(f"Completed: {len(self.completed_tasks)}\n")
+                agg_file.write(f"Failed: {len(self.failed_tasks)}\n")
+                agg_file.write(f"Active: {len(self.active_tasks)}\n")
+                agg_file.write(f"Pending: {len(self.pending_tasks)}\n")
+                agg_file.write(
+                    f"Success rate: {(len(self.completed_tasks) / max(1, total_tasks)) * 100:.1f}%\n"
+                )
+
+                if self.disabled_sources:
+                    agg_file.write(f"Disabled sources: {', '.join(self.disabled_sources)}\n")
+
+                agg_file.write(f"\nSweep status: {self.status.value}\n")
+                if self.start_time and self.end_time:
+                    duration = (self.end_time - self.start_time).total_seconds()
+                    agg_file.write(f"Duration: {duration:.1f} seconds\n")
+
+            logger.info(f"Aggregated sweep logs written to: {aggregated_log}")
+
+        except Exception as e:
+            logger.error(f"Error aggregating sweep logs: {e}")
 
     async def _cleanup(self):
         """Cleanup resources and background tasks."""
@@ -913,6 +1487,10 @@ class SweepEngine:
             start_time=self.start_time,
             end_time=self.end_time,
             source_stats=source_stats,
+            # Enhanced sync and collection status
+            project_sync_verified=getattr(self, "project_sync_verified", False),
+            project_sync_warnings=getattr(self, "project_sync_warnings", []),
+            comprehensive_collection_used=getattr(self, "comprehensive_collection_used", False),
         )
 
     async def cancel_sweep(self) -> bool:
@@ -975,10 +1553,10 @@ class SweepEngine:
                     if hasattr(source, "stats")
                     else 0,
                     "max_tasks": getattr(
-                        source.stats, "max_parallel_tasks", source.max_concurrent_tasks
+                        source.stats, "max_parallel_tasks", source.max_parallel_tasks
                     )
                     if hasattr(source, "stats")
-                    else source.max_concurrent_tasks,
+                    else source.max_parallel_tasks,
                     "health_status": getattr(source.stats, "health_status", "unknown").value
                     if hasattr(source, "stats")
                     else "unknown",

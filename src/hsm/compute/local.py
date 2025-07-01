@@ -143,7 +143,7 @@ class LocalComputeSource(ComputeSource):
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
-                error_message="Compute source not properly set up",
+                message="Compute source not properly set up",
             )
 
         try:
@@ -185,7 +185,7 @@ class LocalComputeSource(ComputeSource):
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
-                error_message=str(e),
+                message=str(e),
             )
 
     async def get_task_status(self, task_id: str) -> TaskResult:
@@ -197,14 +197,15 @@ class LocalComputeSource(ComputeSource):
         Returns:
             TaskResult with current status and metadata
         """
-        if task_id not in self.task_registry:
+        if task_id not in self.active_tasks:
             return TaskResult(
                 task_id=task_id,
                 status=TaskStatus.UNKNOWN,
-                error_message="Task not found in registry",
+                message="Task not found in registry",
             )
 
-        current_status = self.task_registry[task_id]
+        current_task = self.active_tasks[task_id]
+        current_status = getattr(current_task, "status", TaskStatus.PENDING)
 
         # Check if task completed and we can read additional details
         task_dir = self.context.sweep_dir / "tasks" / task_id if hasattr(self, "context") else None
@@ -251,10 +252,8 @@ class LocalComputeSource(ComputeSource):
         return TaskResult(
             task_id=task_id,
             status=current_status,
-            submit_time=datetime.now(),  # We should track this better
-            complete_time=complete_time,
-            exit_code=exit_code,
-            error_message=error_message,
+            message=error_message,
+            timestamp=complete_time or datetime.now(),
         )
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -641,13 +640,12 @@ class LocalComputeSource(ComputeSource):
         if self.script_path:
             cmd.append(self.script_path)
 
-        # Add task parameters as command line arguments
+        # Add task parameters as Hydra-style arguments (key=value)
         for key, value in task.params.items():
             if isinstance(value, bool):
-                if value:
-                    cmd.append(f"--{key}")
+                cmd.append(f"{key}={str(value).lower()}")
             else:
-                cmd.extend([f"--{key}", str(value)])
+                cmd.append(f"{key}={str(value)}")
 
         return cmd
 

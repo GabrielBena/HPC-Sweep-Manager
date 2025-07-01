@@ -19,6 +19,8 @@ except ImportError:
     ASYNCSSH_AVAILABLE = False
     asyncssh = None
 
+from ..core.result_collector import RemoteResultCollector
+from ..core.sync_manager import ProjectStateChecker
 from .base import (
     CollectionResult,
     ComputeSource,
@@ -130,6 +132,10 @@ class SSHComputeSource(ComputeSource):
         self._sync_task: Optional[asyncio.Task] = None
         self._setup_complete = False
 
+        # Advanced sync and result collection
+        self.project_state_checker: Optional[ProjectStateChecker] = None
+        self.remote_result_collector: Optional[RemoteResultCollector] = None
+
     async def setup(self, context: SweepContext) -> bool:
         """Setup the SSH compute source.
 
@@ -146,6 +152,19 @@ class SSHComputeSource(ComputeSource):
             if not await self._connect():
                 return False
 
+            # Discover remote project configuration
+            if not await self._discover_remote_project():
+                return False
+
+            # Initialize project state checker for sync verification
+            from pathlib import Path
+
+            local_project_dir = Path.cwd()
+            self.project_state_checker = ProjectStateChecker(
+                local_project_dir=str(local_project_dir),
+                ssh_config=self.ssh_config,
+            )
+
             # Setup remote environment
             if not await self._setup_remote_environment(context):
                 return False
@@ -160,6 +179,15 @@ class SSHComputeSource(ComputeSource):
 
             # Setup result syncing
             self.local_sweep_dir = context.sweep_dir
+
+            # Initialize remote result collector for comprehensive collection
+            self.remote_result_collector = RemoteResultCollector(
+                local_sweep_dir=self.local_sweep_dir,
+                remote_host=self.ssh_config.host,
+                ssh_key=self.ssh_config.key_file,
+                ssh_port=self.ssh_config.port,
+            )
+
             await self._setup_result_sync()
 
             # Update statistics
@@ -193,32 +221,37 @@ class SSHComputeSource(ComputeSource):
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
-                error_message="Compute source not properly set up",
+                message="Compute source not properly set up",
             )
 
         try:
+            logger.debug(f"Starting task submission {task.task_id} to SSH source {self.name}")
+
             # Create remote task directory
             remote_task_dir = f"{self.remote_sweep_dir}/tasks/{task.task_id}"
+            logger.debug(f"Creating remote task directory: {remote_task_dir}")
             await self._execute_command(f"mkdir -p {remote_task_dir}")
 
             # Write task parameters
+            logger.debug(f"Writing task parameters for {task.task_id}")
             params_content = self._create_params_file(task.params)
             await self._write_remote_file(f"{remote_task_dir}/params.yaml", params_content)
 
             # Start task execution
+            logger.debug(f"Starting task execution future for {task.task_id}")
             future = asyncio.create_task(self._execute_task(task))
             self.task_futures[task.task_id] = future
 
             # Register task
-            self.register_task(task.task_id, TaskStatus.PENDING)
-            self.stats.total_submitted += 1
+            logger.debug(f"Registering task {task.task_id}")
+            self.register_task(task)
 
-            logger.debug(f"Task {task.task_id} submitted to SSH source {self.name}")
+            logger.info(f"Task {task.task_id} successfully submitted to SSH source {self.name}")
 
             return TaskResult(
                 task_id=task.task_id,
-                status=TaskStatus.PENDING,
-                submit_time=datetime.now(),
+                status=TaskStatus.QUEUED,
+                timestamp=datetime.now(),
             )
 
         except Exception as e:
@@ -226,7 +259,7 @@ class SSHComputeSource(ComputeSource):
             return TaskResult(
                 task_id=task.task_id,
                 status=TaskStatus.FAILED,
-                error_message=str(e),
+                message=str(e),
             )
 
     async def get_task_status(self, task_id: str) -> TaskResult:
@@ -239,13 +272,15 @@ class SSHComputeSource(ComputeSource):
             TaskResult with current status and metadata
         """
         try:
-            # Check if task is in our registry first
-            if task_id in self.task_registry:
-                status = self.task_registry[task_id]
+            # Check if task is in our active tasks first
+            if task_id in self.active_tasks:
+                task = self.active_tasks[task_id]
+                # Get current status from task or default to RUNNING if active
+                status = getattr(task, "status", TaskStatus.RUNNING)
                 return TaskResult(
                     task_id=task_id,
                     status=status,
-                    submit_time=datetime.now(),  # We should track this better
+                    timestamp=datetime.now(),
                 )
 
             # If not available, ensure connection and check remote status
@@ -253,7 +288,7 @@ class SSHComputeSource(ComputeSource):
                 return TaskResult(
                     task_id=task_id,
                     status=TaskStatus.UNKNOWN,
-                    error_message="SSH connection not available",
+                    message="SSH connection not available",
                 )
 
             # Check remote status file
@@ -267,7 +302,7 @@ class SSHComputeSource(ComputeSource):
                 task_status = TaskStatus(status_data.get("status", "PENDING"))
 
                 # Update our local registry
-                self.register_task(task_id, task_status)
+                self.update_task_status(task_id, task_status)
 
                 # Check for failure details
                 error_message = status_data.get("error_message")
@@ -276,13 +311,11 @@ class SSHComputeSource(ComputeSource):
                 return TaskResult(
                     task_id=task_id,
                     status=task_status,
-                    submit_time=datetime.now(),  # Should be tracked better
-                    complete_time=datetime.now()
+                    message=error_message,
+                    timestamp=datetime.now()
                     if task_status
                     in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]
-                    else None,
-                    exit_code=exit_code,
-                    error_message=error_message,
+                    else datetime.now(),
                 )
             else:
                 # No status file found, task might be starting or failed to start
@@ -290,7 +323,7 @@ class SSHComputeSource(ComputeSource):
                 return TaskResult(
                     task_id=task_id,
                     status=TaskStatus.PENDING,
-                    submit_time=datetime.now(),
+                    timestamp=datetime.now(),
                 )
 
         except Exception as e:
@@ -298,7 +331,7 @@ class SSHComputeSource(ComputeSource):
             return TaskResult(
                 task_id=task_id,
                 status=TaskStatus.UNKNOWN,
-                error_message=f"Error checking status: {str(e)}",
+                message=f"Error checking status: {str(e)}",
             )
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -335,9 +368,8 @@ class SSHComputeSource(ComputeSource):
 
                 del self.active_processes[task_id]
 
-            # Update task status
-            self.register_task(task_id, TaskStatus.CANCELLED)
-            self.stats.total_cancelled += 1
+            # Update task status (this will automatically update stats)
+            self.update_task_status(task_id, TaskStatus.CANCELLED)
 
             # Write remote status
             await self._write_remote_task_status(task_id, TaskStatus.CANCELLED)
@@ -349,7 +381,7 @@ class SSHComputeSource(ComputeSource):
             return False
 
     async def collect_results(self, task_ids: List[str]) -> CollectionResult:
-        """Collect results from completed tasks.
+        """Collect results from completed tasks with enhanced error collection.
 
         Args:
             task_ids: List of task IDs to collect results for
@@ -357,14 +389,44 @@ class SSHComputeSource(ComputeSource):
         Returns:
             CollectionResult with collection status
         """
+        # Try comprehensive result collection first if available
+        if self.remote_result_collector and self.remote_sweep_dir:
+            try:
+                logger.debug(f"Using comprehensive result collection for {len(task_ids)} tasks")
+
+                # Use the comprehensive result collector
+                success = await self.remote_result_collector.collect_results(
+                    remote_sweep_dir=self.remote_sweep_dir,
+                    job_ids=task_ids,
+                    cleanup_after_sync=False,  # Don't cleanup during sweep execution
+                )
+
+                if success:
+                    return CollectionResult(
+                        collected_tasks=task_ids,
+                        failed_tasks=[],
+                        errors=[],
+                    )
+                else:
+                    logger.warning(
+                        "Comprehensive result collection failed, falling back to basic sync"
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    f"Error in comprehensive result collection: {e}, falling back to basic sync"
+                )
+
+        # Fallback to basic sync method
+        logger.debug(f"Using basic result collection for {len(task_ids)} tasks")
         collected_tasks = []
         failed_tasks = []
 
         for task_id in task_ids:
             try:
                 # Check if task is completed
-                status = await self.get_task_status(task_id)
-                if status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
+                status_result = await self.get_task_status(task_id)
+                if status_result.status not in [TaskStatus.COMPLETED, TaskStatus.FAILED]:
                     continue  # Skip tasks that are not done
 
                 # Sync task results
@@ -380,10 +442,9 @@ class SSHComputeSource(ComputeSource):
                 failed_tasks.append((task_id, str(e)))
 
         return CollectionResult(
-            source_name=self.name,
             collected_tasks=collected_tasks,
-            failed_tasks=failed_tasks,
-            collection_time=datetime.now(),
+            failed_tasks=[task_id for task_id, _ in failed_tasks],
+            errors=[error for _, error in failed_tasks],
         )
 
     async def health_check(self) -> HealthReport:
@@ -399,7 +460,7 @@ class SSHComputeSource(ComputeSource):
                     source_name=self.name,
                     status=HealthStatus.UNHEALTHY,
                     timestamp=datetime.now(),
-                    error_message="SSH connection failed",
+                    message="SSH connection failed",
                 )
 
             # Get remote system metrics
@@ -426,19 +487,26 @@ class SSHComputeSource(ComputeSource):
                 status = HealthStatus.UNHEALTHY
                 warnings.append("Critical disk usage on remote host")
 
-            # Update stats
-            self.stats.status = status
+            # Update stats (note: active_tasks is a read-only property)
+            self.stats.health_status = status
             self.stats.last_health_check = datetime.now()
-            self.stats.active_tasks = len(self.active_processes)
+
+            # Calculate current active tasks
+            current_active_tasks = len(self.active_processes)
 
             return HealthReport(
                 source_name=self.name,
                 status=status,
                 timestamp=datetime.now(),
-                metrics=metrics,
+                available_slots=self.max_concurrent_tasks - current_active_tasks,
+                max_slots=self.max_concurrent_tasks,
+                active_tasks=current_active_tasks,
+                cpu_usage=metrics.get("cpu_percent"),
+                memory_usage=metrics.get("memory_percent"),
+                disk_free_gb=metrics.get("disk_free_gb"),
+                load_average=metrics.get("load_average"),
+                message=f"SSH compute source running {current_active_tasks}/{self.max_concurrent_tasks} tasks",
                 warnings=warnings,
-                active_tasks=len(self.active_processes),
-                max_tasks=self.max_concurrent_tasks,
             )
 
         except Exception as e:
@@ -447,7 +515,7 @@ class SSHComputeSource(ComputeSource):
                 source_name=self.name,
                 status=HealthStatus.UNHEALTHY,
                 timestamp=datetime.now(),
-                error_message=str(e),
+                message=f"Health check failed: {str(e)}",
             )
 
     async def cleanup(self) -> bool:
@@ -603,20 +671,26 @@ class SSHComputeSource(ComputeSource):
             return False
 
     async def _detect_script_path(self, context: SweepContext) -> Optional[str]:
-        """Auto-detect the training script path on remote host."""
-        common_names = ["train.py", "main.py", "run.py", "training.py"]
-        project_dir = self.ssh_config.project_dir or "~"
+        """Detect training script path if not already discovered."""
+        # Script path should have been discovered in project discovery phase
+        if self.script_path:
+            return self.script_path
 
+        # Fallback: search for common script names in project directory
+        project_dir = self.ssh_config.project_dir or "~"
+        common_names = ["train.py", "main.py", "run.py", "training.py"]
+
+        logger.info("Training script not found in config, searching for common script names...")
         for name in common_names:
             script_path = f"{project_dir}/{name}"
             try:
                 await self._execute_command(f"test -f {script_path}")
-                logger.debug(f"Auto-detected remote script: {script_path}")
+                logger.info(f"Auto-detected remote script: {script_path}")
                 return script_path
             except:
                 continue
 
-        logger.warning("Could not auto-detect remote training script")
+        logger.warning("Could not detect remote training script")
         return None
 
     async def _verify_remote_setup(self) -> bool:
@@ -651,11 +725,10 @@ class SSHComputeSource(ComputeSource):
                 await asyncio.sleep(self.sync_interval)
 
                 # Sync completed task results
-                completed_tasks = [
-                    task_id
-                    for task_id, status in self.task_registry.items()
-                    if status in [TaskStatus.COMPLETED, TaskStatus.FAILED]
-                ]
+                # Note: We can't easily track completed tasks in SSH source
+                # since they're moved out of active_tasks. For now, skip this automatic sync
+                # and rely on the SweepEngine's result collection instead.
+                completed_tasks = []
 
                 if completed_tasks:
                     await self.collect_results(completed_tasks)
@@ -700,23 +773,31 @@ class SSHComputeSource(ComputeSource):
 
             try:
                 # Update status to running
-                self.register_task(task.task_id, TaskStatus.RUNNING)
+                self.update_task_status(task.task_id, TaskStatus.RUNNING)
                 await self._write_remote_task_status(
                     task.task_id, TaskStatus.RUNNING, start_time=datetime.now()
                 )
 
                 # Build command
-                cmd = await self._build_remote_command(task, remote_task_dir)
+                try:
+                    cmd = await self._build_remote_command(task, remote_task_dir)
+                    logger.debug(f"Built remote command for task {task.task_id}: {cmd}")
+                except Exception as e:
+                    logger.error(f"Failed to build remote command for task {task.task_id}: {e}")
+                    raise
 
                 # Start remote process
                 logger.debug(f"Starting remote task {task.task_id}: {cmd}")
 
-                process = await self.connection.create_process(
-                    cmd,
-                    cwd=self.ssh_config.project_dir or "~",
-                    stdout=asyncssh.PIPE,
-                    stderr=asyncssh.PIPE,
-                )
+                try:
+                    process = await self.connection.create_process(
+                        cmd,
+                        stdout=asyncssh.PIPE,
+                        stderr=asyncssh.PIPE,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to create remote process for task {task.task_id}: {e}")
+                    raise
 
                 # Store process for cancellation
                 self.active_processes[task.task_id] = process
@@ -733,13 +814,11 @@ class SSHComputeSource(ComputeSource):
                     # Determine final status
                     if process.returncode == 0:
                         final_status = TaskStatus.COMPLETED
-                        self.stats.total_completed += 1
                     else:
                         final_status = TaskStatus.FAILED
-                        self.stats.total_failed += 1
 
-                    # Update status
-                    self.register_task(task.task_id, final_status)
+                    # Update status (this will automatically update stats)
+                    self.update_task_status(task.task_id, final_status)
                     await self._write_remote_task_status(
                         task.task_id,
                         final_status,
@@ -752,26 +831,24 @@ class SSHComputeSource(ComputeSource):
                     process.kill()
                     await process.wait()
 
-                    self.register_task(task.task_id, TaskStatus.FAILED)
+                    self.update_task_status(task.task_id, TaskStatus.FAILED)
                     await self._write_remote_task_status(
                         task.task_id,
                         TaskStatus.FAILED,
                         complete_time=datetime.now(),
                         error_message="Task timed out",
                     )
-                    self.stats.total_failed += 1
 
             except Exception as e:
                 # Task execution failed
                 logger.error(f"Remote task {task.task_id} execution failed: {e}")
-                self.register_task(task.task_id, TaskStatus.FAILED)
+                self.update_task_status(task.task_id, TaskStatus.FAILED)
                 await self._write_remote_task_status(
                     task.task_id,
                     TaskStatus.FAILED,
                     complete_time=datetime.now(),
                     error_message=str(e),
                 )
-                self.stats.total_failed += 1
 
             finally:
                 # Cleanup
@@ -783,6 +860,10 @@ class SSHComputeSource(ComputeSource):
     async def _build_remote_command(self, task: Task, remote_task_dir: str) -> str:
         """Build the command to execute the task remotely."""
         cmd_parts = []
+
+        # Change to project directory first (if specified)
+        if self.ssh_config.project_dir and self.ssh_config.project_dir != "~":
+            cmd_parts.append(f"cd {self.ssh_config.project_dir}")
 
         # Change to task directory
         cmd_parts.append(f"cd {remote_task_dir}")
@@ -798,13 +879,12 @@ class SSHComputeSource(ComputeSource):
         if self.script_path:
             python_cmd.append(self.script_path)
 
-        # Add task parameters as command line arguments
+        # Add task parameters as Hydra-style arguments (key=value)
         for key, value in task.params.items():
             if isinstance(value, bool):
-                if value:
-                    python_cmd.append(f"--{key}")
+                python_cmd.append(f"{key}={str(value).lower()}")
             else:
-                python_cmd.extend([f"--{key}", str(value)])
+                python_cmd.append(f"{key}={str(value)}")
 
         # Redirect output
         python_cmd.extend(
@@ -903,6 +983,14 @@ class SSHComputeSource(ComputeSource):
                 metrics["disk_free_gb"] = 0
                 metrics["disk_total_gb"] = 0
 
+            # Load average
+            try:
+                load_cmd = 'python3 -c "import os; print(os.getloadavg()[0])"'
+                load_output = await self._execute_command(load_cmd, check=False)
+                metrics["load_average"] = float(load_output.strip())
+            except:
+                metrics["load_average"] = None
+
             # Process metrics
             metrics["active_tasks"] = len(self.active_processes)
             metrics["max_tasks"] = self.max_concurrent_tasks
@@ -911,3 +999,309 @@ class SSHComputeSource(ComputeSource):
             logger.debug(f"Failed to get remote metrics: {e}")
 
         return metrics
+
+    async def verify_project_sync(self) -> Dict[str, Any]:
+        """Verify that local and remote projects are in sync.
+
+        Returns:
+            Dict with sync status information
+        """
+        if not self.project_state_checker:
+            return {
+                "in_sync": False,
+                "message": "Project state checker not initialized",
+                "error": True,
+            }
+
+        try:
+            sync_status = await self.project_state_checker.check_project_state()
+            return sync_status
+        except Exception as e:
+            logger.error(f"Error checking project sync: {e}")
+            return {
+                "in_sync": False,
+                "message": f"Error checking sync status: {str(e)}",
+                "error": True,
+            }
+
+    async def _discover_remote_project(self) -> bool:
+        """Discover remote project configuration by searching for hsm_config.yaml."""
+        try:
+            logger.info("Discovering remote project configuration...")
+
+            # Step 1: Find hsm_config.yaml on remote machine
+            config_path = await self._find_remote_hsm_config()
+            if not config_path:
+                logger.warning("No hsm_config.yaml found on remote machine")
+                return False
+
+            # Step 2: Read and parse remote HSM config
+            remote_config = await self._read_remote_hsm_config(config_path)
+            if not remote_config:
+                logger.error("Failed to read remote hsm_config.yaml")
+                return False
+
+            # Step 3: Extract and update paths from remote config
+            self._extract_remote_paths(remote_config)
+
+            # Step 4: Validate discovered paths
+            if not await self._validate_discovered_paths():
+                logger.error("Remote project validation failed")
+                return False
+
+            logger.info("✓ Remote project configuration discovered successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error during remote project discovery: {e}")
+            return False
+
+    async def _find_remote_hsm_config(self) -> Optional[str]:
+        """Find the correct hsm_config.yaml on the remote machine with project matching."""
+        # Get local project information for matching
+        local_script_name = None
+        local_config_file = Path.cwd() / "hsm_config.yaml"
+        if local_config_file.exists():
+            try:
+                import yaml
+
+                with open(local_config_file) as f:
+                    local_config = yaml.safe_load(f)
+                local_script_path = local_config.get("paths", {}).get("training_script", "")
+                if local_script_path:
+                    local_script_name = Path(local_script_path).name
+                    logger.debug(f"Local training script name: {local_script_name}")
+            except Exception as e:
+                logger.debug(f"Could not read local config: {e}")
+
+        # Search paths in order of preference
+        search_paths = [
+            "sweeps/hsm_config.yaml",
+            "hsm_config.yaml",
+            "./sweeps/hsm_config.yaml",
+            "./hsm_config.yaml",
+        ]
+
+        # If project_dir is specified, also search there first
+        if self.ssh_config.project_dir and self.ssh_config.project_dir != "~":
+            project_paths = [
+                f"{self.ssh_config.project_dir}/hsm_config.yaml",
+                f"{self.ssh_config.project_dir}/sweeps/hsm_config.yaml",
+            ]
+            search_paths = project_paths + search_paths
+
+        # Try each search path with validation
+        for path in search_paths:
+            try:
+                result = await self._execute_command(f'test -f {path} && echo "found"', check=False)
+                if result.strip() == "found":
+                    # Validate this is the correct project
+                    if await self._validate_project_match(path, local_script_name):
+                        logger.info(f"Found matching project config at: {path}")
+                        return path
+                    else:
+                        logger.debug(f"Config at {path} doesn't match current project")
+            except Exception as e:
+                logger.debug(f"Error checking path {path}: {e}")
+                continue
+
+        # Find all hsm_config.yaml files and validate each one
+        try:
+            logger.debug("Searching all hsm_config.yaml files for project match...")
+            result = await self._execute_command(
+                'find . -name "hsm_config.yaml" -type f 2>/dev/null', check=False
+            )
+
+            if result.strip():
+                config_files = result.strip().split("\n")
+                logger.debug(f"Found {len(config_files)} hsm_config.yaml files to check")
+
+                for config_file in config_files:
+                    config_file = config_file.strip()
+                    if config_file and await self._validate_project_match(
+                        config_file, local_script_name
+                    ):
+                        logger.info(f"Found matching project config at: {config_file}")
+                        return config_file
+
+                logger.warning(
+                    f"Found {len(config_files)} hsm_config.yaml files but none match the current project"
+                )
+
+        except Exception as e:
+            logger.debug(f"Error during comprehensive search: {e}")
+
+        return None
+
+    async def _validate_project_match(
+        self, config_path: str, local_script_name: Optional[str] = None
+    ) -> bool:
+        """Validate that a remote config file matches the current project."""
+        try:
+            # Read the remote config
+            config_content = await self._read_remote_file(config_path)
+            if not config_content:
+                return False
+
+            import yaml
+
+            remote_config = yaml.safe_load(config_content)
+            paths = remote_config.get("paths", {})
+
+            # Get remote training script path
+            remote_script_path = paths.get("training_script") or paths.get("train_script")
+            if not remote_script_path:
+                logger.debug(f"No training script found in {config_path}")
+                return False
+
+            # If we have a local script name, check if it matches
+            if local_script_name:
+                remote_script_name = Path(remote_script_path).name
+                if remote_script_name == local_script_name:
+                    logger.debug(f"Script name match: {local_script_name} == {remote_script_name}")
+
+                    # Additional validation: check if the script file actually exists
+                    try:
+                        await self._execute_command(f"test -f {remote_script_path}")
+                        logger.debug(f"Validated script exists: {remote_script_path}")
+                        return True
+                    except:
+                        logger.debug(f"Script file doesn't exist: {remote_script_path}")
+                        return False
+                else:
+                    logger.debug(
+                        f"Script name mismatch: {local_script_name} != {remote_script_name}"
+                    )
+                    return False
+            else:
+                # No local script name to match against, just check if script exists
+                try:
+                    await self._execute_command(f"test -f {remote_script_path}")
+                    logger.debug(f"Script exists: {remote_script_path}")
+                    return True
+                except:
+                    logger.debug(f"Script doesn't exist: {remote_script_path}")
+                    return False
+
+        except Exception as e:
+            logger.debug(f"Error validating project match for {config_path}: {e}")
+            return False
+
+    async def _read_remote_hsm_config(self, config_path: str) -> Optional[Dict[str, Any]]:
+        """Read and parse remote hsm_config.yaml."""
+        try:
+            config_content = await self._read_remote_file(config_path)
+            if not config_content:
+                return None
+
+            import yaml
+
+            remote_config = yaml.safe_load(config_content)
+            logger.debug(f"Successfully parsed remote hsm_config.yaml from {config_path}")
+            return remote_config
+
+        except Exception as e:
+            logger.error(f"Failed to read remote hsm_config.yaml at {config_path}: {e}")
+            return None
+
+    def _extract_remote_paths(self, remote_config: Dict[str, Any]) -> None:
+        """Extract and update paths from remote HSM configuration."""
+        paths = remote_config.get("paths", {})
+
+        # Update Python interpreter if not set
+        if not self.ssh_config.python_path:
+            remote_python = paths.get("python_interpreter")
+            if remote_python:
+                self.ssh_config.python_path = remote_python
+                logger.debug(f"Using remote Python interpreter: {remote_python}")
+
+        # Update conda environment if not set
+        if not self.ssh_config.conda_env:
+            remote_conda = paths.get("conda_env")
+            if remote_conda:
+                self.ssh_config.conda_env = remote_conda
+                logger.debug(f"Using remote conda environment: {remote_conda}")
+
+        # Update project directory - this is crucial for correct path resolution
+        remote_project_root = paths.get("project_root")
+        if remote_project_root:
+            # Always use the remote project root since it's the authoritative source
+            self.ssh_config.project_dir = remote_project_root
+            logger.info(f"Using remote project directory: {remote_project_root}")
+
+        # Update training script path if not set
+        if not self.script_path:
+            remote_script = paths.get("training_script")
+            if remote_script:
+                self.script_path = remote_script
+                logger.debug(f"Using remote training script: {remote_script}")
+
+    async def _validate_discovered_paths(self) -> bool:
+        """Validate that discovered remote paths actually exist and work."""
+        validation_tasks = []
+
+        # Check Python interpreter
+        if self.ssh_config.python_path:
+            validation_tasks.append(
+                self._validate_remote_command(
+                    f"{self.ssh_config.python_path} --version", "Python interpreter"
+                )
+            )
+
+        # Check project directory
+        if self.ssh_config.project_dir:
+            validation_tasks.append(
+                self._validate_remote_path(self.ssh_config.project_dir, "Project root")
+            )
+
+        # Check training script if specified
+        if self.script_path:
+            script_path = self.script_path
+            # If relative path, make it relative to project root
+            if not script_path.startswith("/") and self.ssh_config.project_dir:
+                script_path = f"{self.ssh_config.project_dir}/{script_path}"
+
+            validation_tasks.append(self._validate_remote_path(script_path, "Training script"))
+
+        # Check conda environment if specified
+        if self.ssh_config.conda_env:
+            validation_tasks.append(
+                self._validate_remote_command(
+                    f"conda env list | grep {self.ssh_config.conda_env}", "Conda environment"
+                )
+            )
+
+        # Run all validations
+        if validation_tasks:
+            results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+            success_count = sum(1 for result in results if result is True)
+            total_checks = len(validation_tasks)
+
+            logger.debug(f"Path validation: {success_count}/{total_checks} checks passed")
+            return success_count == total_checks
+
+        return True
+
+    async def _validate_remote_path(self, path: str, description: str) -> bool:
+        """Validate that a path exists on the remote machine."""
+        try:
+            result = await self._execute_command(f"test -e {path}", check=False)
+            if result == "":  # Command succeeded (no output expected)
+                logger.debug(f"✓ {description}: {path}")
+                return True
+            else:
+                logger.warning(f"✗ {description}: {path} (not found)")
+                return False
+        except Exception as e:
+            logger.warning(f"✗ {description}: {path} (error: {e})")
+            return False
+
+    async def _validate_remote_command(self, command: str, description: str) -> bool:
+        """Validate that a command can be executed successfully on remote."""
+        try:
+            result = await self._execute_command(command, check=False)
+            logger.debug(f"✓ {description}: {command}")
+            return True
+        except Exception as e:
+            logger.warning(f"✗ {description}: {command} (error: {e})")
+            return False

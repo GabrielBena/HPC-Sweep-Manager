@@ -84,7 +84,7 @@ def init_cmd(ctx, project_root: Optional[Path], interactive: bool, force: bool):
 
         # Create sweep infrastructure
         console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
-        success = _create_sweep_infrastructure(project_root, config_data, console, logger)
+        success = _create_sweep_infrastructure(project_root, config_data, console, logger, force)
 
         if success:
             console.print(f"\n[green]✅ HSM configuration initialized at {config_file}[/green]")
@@ -224,6 +224,97 @@ def show_cmd(ctx, config: Optional[Path], format: str):
         raise click.Abort()
 
 
+@config_cmd.command("scan")
+@click.option("--project-root", type=click.Path(path_type=Path), help="Project root directory")
+@click.option(
+    "--format", type=click.Choice(["table", "yaml", "json"]), default="table", help="Output format"
+)
+@click.pass_context
+def scan_cmd(ctx, project_root: Optional[Path], format: str):
+    """Scan project for configuration parameters and sweep candidates."""
+    console: Console = ctx.obj["console"]
+
+    try:
+        # Determine project root
+        if project_root is None:
+            project_root = Path.cwd()
+        project_root = project_root.resolve()
+
+        console.print(f"[cyan]Scanning project at: {project_root}[/cyan]")
+
+        # Initialize path detector and scan
+        detector = PathDetector(project_root)
+        project_info = detector.get_project_info()
+
+        if format == "table":
+            # Display in rich table format
+            _display_project_info(project_info, console)
+
+            # Show detailed parameter info
+            config_parameters = project_info.get("config_parameters", {})
+            if config_parameters:
+                console.print("\n[bold]📋 Detailed Parameter Information:[/bold]")
+                for config_file, params in config_parameters.items():
+                    if params:
+                        console.print(f"\n[yellow]{config_file}:[/yellow]")
+                        param_table = Table()
+                        param_table.add_column("Parameter", style="cyan")
+                        param_table.add_column("Current Value", style="green")
+                        param_table.add_column("Type", style="magenta")
+
+                        for param_name, param_info in params.items():
+                            param_table.add_row(
+                                param_name, str(param_info["current_value"]), param_info["type"]
+                            )
+                        console.print(param_table)
+
+        elif format == "yaml":
+            import yaml
+
+            scan_result = {
+                "project_info": {
+                    "name": project_info["project_name"],
+                    "root": str(project_info["project_root"]),
+                    "config_dir": str(project_info["config_dir"])
+                    if project_info["config_dir"]
+                    else None,
+                    "training_script": str(project_info["training_script"])
+                    if project_info["training_script"]
+                    else None,
+                    "hydra_configs": [str(c) for c in project_info.get("hydra_configs", [])],
+                },
+                "detected_parameters": project_info.get("config_parameters", {}),
+                "sweep_suggestions": project_info.get("sweep_suggestions", {}),
+            }
+
+            console.print(yaml.dump(scan_result, default_flow_style=False, indent=2))
+
+        elif format == "json":
+            import json
+
+            scan_result = {
+                "project_info": {
+                    "name": project_info["project_name"],
+                    "root": str(project_info["project_root"]),
+                    "config_dir": str(project_info["config_dir"])
+                    if project_info["config_dir"]
+                    else None,
+                    "training_script": str(project_info["training_script"])
+                    if project_info["training_script"]
+                    else None,
+                    "hydra_configs": [str(c) for c in project_info.get("hydra_configs", [])],
+                },
+                "detected_parameters": project_info.get("config_parameters", {}),
+                "sweep_suggestions": project_info.get("sweep_suggestions", {}),
+            }
+
+            console.print(json.dumps(scan_result, indent=2))
+
+    except Exception as e:
+        console.print(f"[red]Error scanning project: {e}[/red]")
+        raise click.Abort()
+
+
 # Helper functions
 
 
@@ -265,6 +356,14 @@ def _display_project_info(info: dict, console: Console):
         info["conda_env"] or "None",
     )
 
+    # Hydra configs
+    hydra_configs = info.get("hydra_configs", [])
+    table.add_row(
+        "Hydra Configs",
+        f"✅ Found {len(hydra_configs)}" if hydra_configs else "❌ None",
+        f"{len(hydra_configs)} config files" if hydra_configs else "None",
+    )
+
     table.add_row("HPC System", "✅ Detected", info["hpc_system"].upper())
     table.add_row("Output Directory", "📁 Available", str(info["output_dir"]))
 
@@ -279,6 +378,34 @@ def _display_project_info(info: dict, console: Console):
     )
 
     console.print(table)
+
+    # Display detected parameters if any
+    sweep_suggestions = info.get("sweep_suggestions", {})
+    if sweep_suggestions:
+        console.print("\n[bold]🔍 Detected Sweep Parameters:[/bold]")
+        param_table = Table()
+        param_table.add_column("Parameter", style="cyan")
+        param_table.add_column("Current Value", style="yellow")
+        param_table.add_column("Suggested Values", style="green")
+
+        for param_name, suggested_values in list(sweep_suggestions.items())[:10]:  # Show top 10
+            # Find current value from config parameters
+            current_value = "unknown"
+            for config_file, params in info.get("config_parameters", {}).items():
+                if param_name in params:
+                    current_value = str(params[param_name]["current_value"])
+                    break
+
+            suggested_str = str(suggested_values)
+            if len(suggested_str) > 50:
+                suggested_str = suggested_str[:47] + "..."
+
+            param_table.add_row(param_name, current_value, suggested_str)
+
+        console.print(param_table)
+
+        if len(sweep_suggestions) > 10:
+            console.print(f"[dim]... and {len(sweep_suggestions) - 10} more parameters[/dim]")
 
 
 def _interactive_config_setup(project_info: dict, console: Console) -> dict:
@@ -393,6 +520,22 @@ def _interactive_config_setup(project_info: dict, console: Console) -> dict:
         "file_logging": True,
     }
 
+    # Show detected sweep parameters
+    sweep_suggestions = project_info.get("sweep_suggestions", {})
+    if sweep_suggestions and Confirm.ask(
+        f"\nFound {len(sweep_suggestions)} potential sweep parameters. Preview them?", default=True
+    ):
+        console.print("\n[bold]🔍 Auto-detected sweep parameters:[/bold]")
+        for i, (param_name, values) in enumerate(list(sweep_suggestions.items())[:5]):
+            console.print(f"  {param_name}: {values}")
+
+        if len(sweep_suggestions) > 5:
+            console.print(f"  ... and {len(sweep_suggestions) - 5} more")
+
+        console.print(
+            "\n[dim]These will be used to create an intelligent sweep configuration.[/dim]"
+        )
+
     return config_data
 
 
@@ -458,7 +601,7 @@ def _auto_configuration(project_info: dict) -> dict:
 
 
 def _create_sweep_infrastructure(
-    project_root: Path, config_data: dict, console: Console, logger
+    project_root: Path, config_data: dict, console: Console, logger, force: bool = False
 ) -> bool:
     """Create sweep directories and configuration files."""
     try:
@@ -476,32 +619,103 @@ def _create_sweep_infrastructure(
 
         # Create example sweep configuration
         example_sweep_path = sweeps_dir / "sweep_config.yaml"
-        if not example_sweep_path.exists():
-            example_sweep = {
-                "defaults": [{"override": "hydra/launcher: basic"}],
-                "sweep": {
-                    "grid": {
-                        "seed": [1, 2, 3, 4, 5],
-                        "learning_rate": [0.001, 0.01, 0.1],
-                        "batch_size": [32, 64],
-                    }
-                },
-                "metadata": {
-                    "description": "Example hyperparameter sweep",
-                    "tags": ["example", "baseline"],
-                },
-            }
+        if not example_sweep_path.exists() or force:
+            # Use detected parameters if available, otherwise use defaults
+            detector = PathDetector(project_root)
+            sweep_suggestions = detector.suggest_sweep_parameters()
+
+            if sweep_suggestions:
+                # Use detected parameters (limit to a reasonable number)
+                grid_params = {}
+                param_count = 0
+                for param_name, values in sweep_suggestions.items():
+                    if param_count < 3:  # Limit to 3 parameters to keep it manageable
+                        grid_params[param_name] = values
+                        param_count += 1
+
+                # Always include seed if not already present
+                if "seed" not in grid_params:
+                    grid_params["seed"] = [1, 2, 3, 4, 5]
+
+                example_sweep = {
+                    "defaults": [{"override": "hydra/launcher: basic"}],
+                    "sweep": {"grid": grid_params},
+                    "metadata": {
+                        "description": f"Hyperparameter sweep for {config_data['project']['name']} (auto-generated from detected parameters)",
+                        "tags": ["auto-generated", "baseline"],
+                        "auto_detected_params": list(sweep_suggestions.keys()),
+                    },
+                }
+            else:
+                # Fallback to default example
+                example_sweep = {
+                    "defaults": [{"override": "hydra/launcher: basic"}],
+                    "sweep": {
+                        "grid": {
+                            "seed": [1, 2, 3, 4, 5],
+                            "learning_rate": [0.001, 0.01, 0.1],
+                            "batch_size": [32, 64],
+                        }
+                    },
+                    "metadata": {
+                        "description": "Example hyperparameter sweep",
+                        "tags": ["example", "baseline"],
+                    },
+                }
 
             import yaml
 
-            with open(example_sweep_path, "w") as f:
-                yaml.dump(example_sweep, f, default_flow_style=False, indent=2)
+            # Create YAML content with flow-style lists for better readability
+            def format_sweep_yaml(sweep_dict):
+                lines = []
 
-            console.print("  ✅ Created example sweep configuration")
+                # Defaults section
+                if sweep_dict.get("defaults"):
+                    lines.append("defaults:")
+                    for default in sweep_dict["defaults"]:
+                        if isinstance(default, dict):
+                            for key, value in default.items():
+                                # Quote values that contain colons to avoid YAML parsing issues
+                                if isinstance(value, str) and ":" in value:
+                                    lines.append(f"- {key}: '{value}'")
+                                else:
+                                    lines.append(f"- {key}: {value}")
+                        else:
+                            lines.append(f"- {default}")
+
+                # Metadata section
+                if sweep_dict.get("metadata"):
+                    lines.append("metadata:")
+                    for key, value in sweep_dict["metadata"].items():
+                        if isinstance(value, list):
+                            lines.append(f"  {key}: {value}")
+                        else:
+                            lines.append(f"  {key}: {value}")
+
+                # Sweep section with flow-style lists
+                if sweep_dict.get("sweep"):
+                    lines.append("sweep:")
+                    if sweep_dict["sweep"].get("grid"):
+                        lines.append("  grid:")
+                        for param, values in sweep_dict["sweep"]["grid"].items():
+                            if isinstance(values, list):
+                                lines.append(f"    {param}: {values}")
+                            else:
+                                lines.append(f"    {param}: {values}")
+
+                return "\n".join(lines)
+
+            with open(example_sweep_path, "w") as f:
+                f.write(format_sweep_yaml(example_sweep))
+
+            if sweep_suggestions:
+                console.print("  ✅ Created sweep configuration with auto-detected parameters")
+            else:
+                console.print("  ✅ Created example sweep configuration")
 
         # Create README
         readme_path = sweeps_dir / "README.md"
-        if not readme_path.exists():
+        if not readme_path.exists() or force:
             readme_content = f"""# {config_data["project"]["name"]} - HPC Sweeps
 
 This directory contains HPC sweep configurations and outputs for the {config_data["project"]["name"]} project.
@@ -562,15 +776,21 @@ def _display_next_steps(console: Console):
 [bold]Next Steps:[/bold]
 
 1. **Review configuration**: Edit `hsm_config.yaml` if needed
-2. **Create sweep config**: Edit `sweeps/sweep_config.yaml` for your parameters
+2. **Check sweep config**: Review auto-generated `sweeps/sweep_config.yaml`
 3. **Test the setup**: Run `hsm sweep run --config sweeps/sweep_config.yaml --dry-run`
 4. **Submit jobs**: Run `hsm sweep run --config sweeps/sweep_config.yaml --sources local`
 
 [bold]Useful Commands:[/bold]
+- `hsm config scan` - Scan project for sweep parameters
 - `hsm config validate` - Validate configuration files
 - `hsm config show` - Display current configuration  
 - `hsm sweep run --help` - Show sweep execution options
 - `hsm monitor watch` - Monitor sweep progress
+
+[bold]Parameter Detection:[/bold]
+- Auto-detected parameters were used to create your sweep config
+- Use `hsm config scan --format yaml` to see all detected parameters
+- Edit `sweeps/sweep_config.yaml` to customize your parameter sweep
 """
 
     console.print(Panel(next_steps, title="Getting Started", border_style="green"))
