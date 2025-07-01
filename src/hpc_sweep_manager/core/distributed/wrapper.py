@@ -9,7 +9,7 @@ from ..common.path_detector import PathDetector
 from ..local.local_compute_source import LocalComputeSource
 from ..remote.discovery import RemoteDiscovery
 from ..remote.ssh_compute_source import SSHComputeSource
-from .manager import (
+from .ditributed_manager import (
     DistributedJobManager,
     DistributedSweepConfig,
     DistributionStrategy,
@@ -73,7 +73,7 @@ class DistributedSweepWrapper:
                 f"[green]✓ Distributed environment ready with {len(self.distributed_manager.sources)} sources[/green]"
             )
             self.console.print(
-                f"[green]✓ All compute sources synchronized - consistent config state across all GPUs[/green]"
+                "[green]✓ All compute sources synchronized - consistent config state across all GPUs[/green]"
             )
 
             # Submit distributed sweep

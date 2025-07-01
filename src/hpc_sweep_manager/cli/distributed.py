@@ -466,7 +466,7 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
                 ram = health.get("memory_percent", "N/A")
                 system_info = f"Load: {load:.1f}, RAM: {ram:.1f}%"
             elif "remote_time" in health:
-                system_info = f"Connected"
+                system_info = "Connected"
 
             # Failure rate information
             failure_info = "N/A"

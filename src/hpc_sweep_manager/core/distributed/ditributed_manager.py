@@ -6,7 +6,9 @@ from datetime import datetime
 from enum import Enum
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import signal
+import sys
+from typing import Any, Dict, List, Optional, Set
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..remote.ssh_compute_source import SSHComputeSource
@@ -94,6 +96,11 @@ class DistributedJobManager:
         self._collection_task = None
         self._health_check_task = None
 
+        # Signal handling state
+        self._signal_received = False
+        self._cleanup_in_progress = False
+        self._source_mapping_backup = None
+
         # Source failure tracking
         self.source_failure_counts = {}  # source_name -> failure_count
         self.source_job_counts = {}  # source_name -> total_job_count
@@ -108,6 +115,149 @@ class DistributedJobManager:
         self._task_id = None
         self._console = Console() if RICH_AVAILABLE else None
         self._original_log_level = None
+
+        # Setup signal handlers for graceful shutdown
+        self._setup_signal_handlers()
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers to catch interrupts and preserve source mapping."""
+        # Register signal handlers for Ctrl+C and termination
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # Also register cleanup on normal program exit
+        import atexit
+
+        atexit.register(self._cleanup_on_exit)
+
+        logger.debug("Signal handlers registered for distributed job manager")
+
+    def _signal_handler(self, signum, frame):
+        """Handle signals for graceful shutdown and source mapping preservation."""
+        if self._signal_received:
+            # If we already received a signal and cleanup is in progress,
+            # force immediate exit on second signal
+            logger.warning(f"Received signal {signum} again, forcing immediate exit...")
+            sys.exit(1)
+
+        self._signal_received = True
+        logger.info(f"🛑 Signal {signum} received - preserving source mapping and cleaning up...")
+        logger.info(f"📊 Cancelling distributed jobs and saving progress...")
+
+        try:
+            # First preserve the source mapping before any cleanup
+            self._preserve_source_mapping_sync()
+
+            # Then start async cleanup
+            import threading
+
+            cleanup_thread = threading.Thread(target=self._threaded_cleanup)
+            cleanup_thread.daemon = True
+            cleanup_thread.start()
+
+            # Give cleanup thread time to work
+            cleanup_thread.join(timeout=30)
+
+            if cleanup_thread.is_alive():
+                logger.warning("Cleanup thread still running after timeout, forcing exit...")
+                sys.exit(1)
+            else:
+                logger.info("✅ Distributed job cleanup completed successfully")
+                sys.exit(0)
+
+        except Exception as e:
+            logger.error(f"Error during signal cleanup: {e}")
+            sys.exit(1)
+
+    def _threaded_cleanup(self):
+        """Run async cleanup in a thread (called from signal handler)."""
+        try:
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            # Run the async cleanup with overall timeout
+            try:
+                loop.run_until_complete(
+                    asyncio.wait_for(self._async_cleanup_on_signal(), timeout=25.0)
+                )
+                logger.info("Signal cleanup completed successfully")
+            except asyncio.TimeoutError:
+                logger.warning("Signal cleanup timed out after 25 seconds")
+            except Exception as e:
+                logger.error(f"Error during async signal cleanup: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in threaded cleanup: {e}")
+        finally:
+            try:
+                # Close the loop properly
+                if loop and not loop.is_closed():
+                    loop.close()
+            except Exception:
+                pass  # Ignore errors when closing loop
+
+    async def _async_cleanup_on_signal(self):
+        """Async cleanup method called when signal is received."""
+        if self._cleanup_in_progress:
+            logger.info("Cleanup already in progress, skipping duplicate cleanup")
+            return
+
+        self._cleanup_in_progress = True
+        self._cancelled = True
+
+        try:
+            logger.info("Starting cancellation of distributed jobs...")
+
+            # Cancel all running jobs
+            try:
+                results = await self.cancel_all_jobs()
+                logger.info(f"Job cancellation results: {results}")
+            except Exception as e:
+                logger.error(f"Error during job cancellation: {e}")
+
+            # Cleanup compute sources
+            logger.info("Cleaning up compute sources...")
+            try:
+                await asyncio.wait_for(self.cleanup(), timeout=10.0)
+                logger.info("Compute source cleanup completed")
+            except asyncio.TimeoutError:
+                logger.warning("Compute source cleanup timed out")
+            except Exception as e:
+                logger.warning(f"Compute source cleanup failed: {e}")
+
+        except Exception as e:
+            logger.error(f"Error during async cleanup: {e}")
+        finally:
+            self._cleanup_in_progress = False
+
+    def _cleanup_on_exit(self):
+        """Clean up resources on program exit (called by atexit)."""
+        if not self._signal_received and self._running:
+            logger.info("Program exiting, preserving source mapping...")
+            # For atexit, we can only do synchronous cleanup
+            self._preserve_source_mapping_sync()
+
+    def _preserve_source_mapping_sync(self):
+        """Synchronously preserve source mapping before cleanup."""
+        try:
+            mapping_file = self.sweep_dir / "source_mapping.yaml"
+            if mapping_file.exists():
+                # Create a backup
+                backup_file = mapping_file.with_suffix(".yaml.signal_backup")
+                import shutil
+
+                shutil.copy2(mapping_file, backup_file)
+                logger.info(f"Source mapping backed up to: {backup_file}")
+
+                # Also immediately save current state to preserve what we have
+                asyncio.run(self._save_source_mapping())
+                logger.info("Current source mapping state preserved")
+            else:
+                logger.warning("No source mapping file found to preserve")
+
+        except Exception as e:
+            logger.error(f"Error preserving source mapping: {e}")
 
     def add_compute_source(self, source: ComputeSource):
         """Add a compute source to the distributed manager."""
@@ -173,6 +323,19 @@ class DistributedJobManager:
             f"Starting distributed sweep: {len(param_combinations)} jobs across {len(self.sources)} sources"
         )
 
+        # Check if this is a completion run with specific task numbers
+        is_completion_run = False
+        if param_combinations and isinstance(param_combinations[0], dict):
+            # Check if parameter combinations include task numbering info (completion run)
+            if all(
+                isinstance(combo, dict) and "task_number" in combo and "params" in combo
+                for combo in param_combinations
+            ):
+                is_completion_run = True
+                logger.info(
+                    f"Detected completion run with {len(param_combinations)} specific tasks"
+                )
+
         # Setup Rich progress bar if available
         if RICH_AVAILABLE and self.show_progress and self._console:
             # Configure the console to handle logging properly
@@ -199,10 +362,23 @@ class DistributedJobManager:
             self._progress.start()
 
         # Queue all parameter combinations
-        for i, params in enumerate(param_combinations):
-            job_name = f"{sweep_id}_task_{i + 1:03d}"
-            task_name = f"task_{i + 1:03d}"
-            task_priority = i + 1  # Priority = task number (1, 2, 3, ...)
+        for i, combo in enumerate(param_combinations):
+            if is_completion_run:
+                # For completion runs, use the provided task number and params
+                task_number = combo["task_number"]
+                params = combo["params"]
+                job_name = f"{sweep_id}_task_{task_number:03d}"
+                task_name = f"task_{task_number:03d}"
+                task_priority = task_number  # Use task number as priority for completion runs
+                logger.debug(f"Completion task: {task_name} with priority {task_priority}")
+            else:
+                # For regular sweeps, use sequential numbering
+                params = combo
+                task_number = i + 1
+                job_name = f"{sweep_id}_task_{task_number:03d}"
+                task_name = f"task_{task_number:03d}"
+                task_priority = task_number
+
             job_info = JobInfo(
                 job_id="",  # Will be set when submitted
                 job_name=job_name,
@@ -899,18 +1075,44 @@ class DistributedJobManager:
         try:
             mapping_file = self.sweep_dir / "source_mapping.yaml"
 
-            # Create mapping data
+            # For completion runs, preserve existing task assignments and metadata
+            existing_assignments = {}
+            existing_metadata = {}
+
+            if hasattr(self, "preserve_existing_mapping") and self.preserve_existing_mapping:
+                existing_assignments = getattr(self, "existing_task_assignments", {})
+                existing_metadata = getattr(self, "existing_metadata", {})
+                logger.info(
+                    f"Preserving {len(existing_assignments)} existing task assignments in distributed source mapping"
+                )
+
+            # Create mapping data, starting with existing metadata for completion runs
             mapping_data = {
-                "sweep_metadata": {
-                    "total_tasks": len(self.task_to_source),
-                    "compute_sources": [source.name for source in self.sources],
-                    "strategy": self.config.strategy.value,
-                    "timestamp": datetime.now().isoformat(),
-                },
-                "task_assignments": {},
+                "sweep_metadata": existing_metadata.copy() if existing_metadata else {},
+                "task_assignments": existing_assignments.copy() if existing_assignments else {},
             }
 
-            # Add task assignments with additional info
+            # Update metadata with current sweep info
+            mapping_data["sweep_metadata"].update(
+                {
+                    "total_tasks": max(
+                        len(self.task_to_source) + len(existing_assignments),
+                        mapping_data["sweep_metadata"].get("total_tasks", 0),
+                    ),
+                    "compute_sources": sorted(
+                        list(
+                            set(
+                                [source.name for source in self.sources]
+                                + mapping_data["sweep_metadata"].get("compute_sources", [])
+                            )
+                        )
+                    ),
+                    "strategy": self.config.strategy.value,
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+
+            # Add new task assignments (from current distributed run)
             for task_name, source_name in self.task_to_source.items():
                 # Find the job info for this task
                 job_info = None
@@ -919,7 +1121,8 @@ class DistributedJobManager:
                         job_info = info
                         break
 
-                mapping_data["task_assignments"][task_name] = {
+                # Only add/update if this is a new task or if we're updating an existing one
+                new_task_data = {
                     "compute_source": source_name,
                     "status": job_info.status if job_info else "unknown",
                     "start_time": job_info.start_time.isoformat()
@@ -930,13 +1133,48 @@ class DistributedJobManager:
                     else None,
                 }
 
+                # For completion runs, be careful about overwriting existing data
+                if task_name in existing_assignments:
+                    # Keep original data but allow status updates
+                    existing_task = existing_assignments[task_name]
+                    merged_task = existing_task.copy()
+
+                    # Update status if changed
+                    if new_task_data["status"] != "unknown" and new_task_data[
+                        "status"
+                    ] != existing_task.get("status"):
+                        merged_task["status"] = new_task_data["status"]
+
+                    # Update timing if not already set
+                    if new_task_data["complete_time"] and not existing_task.get("complete_time"):
+                        merged_task["complete_time"] = new_task_data["complete_time"]
+                    if new_task_data["start_time"] and not existing_task.get("start_time"):
+                        merged_task["start_time"] = new_task_data["start_time"]
+
+                    # Update compute source if this is a retry and it changed
+                    if new_task_data["compute_source"] != existing_task.get("compute_source"):
+                        merged_task["compute_source"] = new_task_data["compute_source"]
+                        logger.debug(
+                            f"Updated compute source for {task_name}: {existing_task.get('compute_source')} -> {new_task_data['compute_source']}"
+                        )
+
+                    mapping_data["task_assignments"][task_name] = merged_task
+                else:
+                    # New task from this completion run
+                    mapping_data["task_assignments"][task_name] = new_task_data
+
             # Save to YAML file
             import yaml
 
             with open(mapping_file, "w") as f:
                 yaml.dump(mapping_data, f, default_flow_style=False, indent=2)
 
-            logger.info(f"✓ Source mapping saved to {mapping_file}")
+            if hasattr(self, "preserve_existing_mapping") and self.preserve_existing_mapping:
+                logger.info(
+                    f"✓ Source mapping saved with {len(existing_assignments)} preserved tasks and {len(self.task_to_source)} completion tasks to {mapping_file}"
+                )
+            else:
+                logger.info(f"✓ Source mapping saved to {mapping_file}")
 
         except Exception as e:
             logger.error(f"Error saving source mapping: {e}")

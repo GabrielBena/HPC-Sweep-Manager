@@ -8,7 +8,7 @@ from rich.table import Table
 
 from ..core.common.config import SweepConfig
 from ..core.common.param_generator import ParameterGenerator
-from ..core.local.manager import LocalJobManager
+from ..core.local.local_manager import LocalJobManager
 from .common import (
     common_options,
     display_sweep_summary,

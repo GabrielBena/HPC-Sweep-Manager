@@ -1,5 +1,6 @@
 """Sweep completion analysis and execution."""
 
+import asyncio
 from datetime import datetime
 import logging
 from pathlib import Path
@@ -29,6 +30,7 @@ class SweepCompletionAnalyzer:
         self.original_combinations = []
         self.completed_combinations = []
         self.failed_combinations = []
+        self.cancelled_combinations = []
         self.missing_combinations = []
 
     def load_sweep_data(self) -> bool:
@@ -43,7 +45,7 @@ class SweepCompletionAnalyzer:
 
             # Load source mapping if it exists
             if self.source_mapping_path.exists():
-                with open(self.source_mapping_path, "r") as f:
+                with open(self.source_mapping_path) as f:
                     self.source_mapping = yaml.safe_load(f)
             else:
                 logger.warning(f"Source mapping not found: {self.source_mapping_path}")
@@ -67,25 +69,61 @@ class SweepCompletionAnalyzer:
         # Analyze task assignments
         task_assignments = self.source_mapping.get("task_assignments", {})
 
-        # Get completed and failed tasks
+        # Get completed, failed, cancelled, and running tasks
         completed_tasks = []
         failed_tasks = []
+        cancelled_tasks = []
         running_tasks = []
+        status_fixes_made = False
 
         for task_id, task_info in task_assignments.items():
             status = task_info.get("status", "UNKNOWN")
+            complete_time = task_info.get("complete_time")
+
+            # Fix status inconsistencies: if a task has complete_time but shows as RUNNING,
+            # we need to check the actual task directory to determine the real status
+            if status == "RUNNING" and complete_time:
+                logger.warning(
+                    f"Task {task_id} shows RUNNING but has complete_time, checking actual status"
+                )
+                # Check the actual task directory to determine real status
+                actual_status = self._get_actual_task_status(task_id)
+                if actual_status and actual_status != "RUNNING":
+                    logger.info(f"Updated {task_id} status from RUNNING to {actual_status}")
+                    status = actual_status
+                    task_info["status"] = actual_status
+                    status_fixes_made = True
+                else:
+                    logger.warning(
+                        f"Could not determine actual status for {task_id}, keeping as RUNNING"
+                    )
+
             if status == "COMPLETED":
                 completed_tasks.append(task_id)
             elif status == "FAILED":
                 failed_tasks.append(task_id)
+            elif status == "CANCELLED":
+                cancelled_tasks.append(task_id)
             elif status in ["RUNNING", "PENDING", "QUEUED"]:
                 running_tasks.append(task_id)
+
+        # Save the corrected mapping if we made any status fixes
+        if status_fixes_made:
+            try:
+                with open(self.source_mapping_path, "w") as f:
+                    yaml.dump(self.source_mapping, f, default_flow_style=False, indent=2)
+                logger.info(
+                    f"Saved corrected source mapping with {len([t for t in task_assignments.values() if t.get('status') == 'COMPLETED'])} status fixes"
+                )
+            except Exception as e:
+                logger.error(f"Error saving corrected source mapping: {e}")
 
         # Map task IDs to parameter combinations
         self.completed_combinations = self._get_combinations_for_tasks(completed_tasks)
         self.failed_combinations = self._get_combinations_for_tasks(failed_tasks)
+        self.cancelled_combinations = self._get_combinations_for_tasks(cancelled_tasks)
 
-        # Find missing combinations
+        # Find missing combinations (exclude only completed ones)
         completed_params_set = {
             self._params_to_key(params) for params in self.completed_combinations
         }
@@ -112,6 +150,7 @@ class SweepCompletionAnalyzer:
         total_expected = len(self.original_combinations)
         total_completed = len(self.completed_combinations)
         total_failed = len(self.failed_combinations)
+        total_cancelled = len(self.cancelled_combinations)
         total_missing = len(self.missing_combinations)
         total_running = len(running_tasks)
 
@@ -120,6 +159,7 @@ class SweepCompletionAnalyzer:
             "total_expected": total_expected,
             "total_completed": total_completed,
             "total_failed": total_failed,
+            "total_cancelled": total_cancelled,
             "total_missing": total_missing,
             "total_running": total_running,
             "completion_rate": (total_completed / total_expected * 100)
@@ -127,10 +167,12 @@ class SweepCompletionAnalyzer:
             else 0,
             "completed_tasks": completed_tasks,
             "failed_tasks": failed_tasks,
+            "cancelled_tasks": cancelled_tasks,
             "running_tasks": running_tasks,
             "missing_combinations": self.missing_combinations,
             "failed_combinations": self.failed_combinations,
-            "needs_completion": total_missing > 0 or total_failed > 0,
+            "cancelled_combinations": self.cancelled_combinations,
+            "needs_completion": total_missing > 0 or total_failed > 0 or total_cancelled > 0,
             "source_mapping_exists": self.source_mapping_path.exists(),
         }
 
@@ -167,7 +209,7 @@ class SweepCompletionAnalyzer:
                 task_info_file = task_dir / "task_info.txt"
                 if task_info_file.exists():
                     try:
-                        with open(task_info_file, "r") as f:
+                        with open(task_info_file) as f:
                             content = f.read()
                             if "Status: COMPLETED" in content:
                                 # Get the combination for this task
@@ -198,6 +240,40 @@ class SweepCompletionAnalyzer:
             items.append((key, value))
         return str(tuple(items))
 
+    def _get_actual_task_status(self, task_id: str) -> str:
+        """Get the actual status of a task from its directory."""
+        try:
+            tasks_dir = self.sweep_dir / "tasks"
+            task_dir = tasks_dir / task_id
+            if not task_dir.exists():
+                return None
+
+            # Check for completion indicators in task_info.txt
+            task_info_file = task_dir / "task_info.txt"
+            if task_info_file.exists():
+                with open(task_info_file) as f:
+                    content = f.read()
+
+                    # Check for status lines (last occurrence wins)
+                    status_lines = [
+                        line for line in content.split("\n") if line.startswith("Status: ")
+                    ]
+                    if status_lines:
+                        last_status_line = status_lines[-1]
+                        if "Status: COMPLETED" in last_status_line:
+                            return "COMPLETED"
+                        elif "Status: FAILED" in last_status_line:
+                            return "FAILED"
+                        elif "Status: CANCELLED" in last_status_line:
+                            return "CANCELLED"
+                        elif "Status: RUNNING" in last_status_line:
+                            return "RUNNING"
+
+            return None
+        except Exception as e:
+            logger.warning(f"Error reading task status for {task_id}: {e}")
+            return None
+
 
 class SweepCompletor:
     """Executes completion of missing sweep combinations."""
@@ -221,6 +297,7 @@ class SweepCompletor:
 
         missing_count = analysis["total_missing"]
         failed_count = analysis["total_failed"]
+        cancelled_count = analysis["total_cancelled"]
 
         if missing_count > 0:
             plan["actions"].append(
@@ -240,6 +317,15 @@ class SweepCompletor:
                 }
             )
 
+        if cancelled_count > 0:
+            plan["actions"].append(
+                {
+                    "type": "retry_cancelled",
+                    "count": cancelled_count,
+                    "description": f"Retry {cancelled_count} cancelled parameter combinations",
+                }
+            )
+
         if not plan["actions"]:
             plan["actions"].append(
                 {"type": "no_action", "count": 0, "description": "Sweep is already complete"}
@@ -248,7 +334,12 @@ class SweepCompletor:
         return plan
 
     def execute_completion(
-        self, mode: str = "auto", dry_run: bool = False, retry_failed: bool = True, **kwargs
+        self,
+        mode: str = "auto",
+        dry_run: bool = False,
+        retry_failed: bool = True,
+        max_runs: int = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """Execute the completion plan."""
         plan = self.generate_completion_plan()
@@ -259,44 +350,205 @@ class SweepCompletor:
         analysis = plan["analysis"]
         missing_combinations = analysis["missing_combinations"]
         failed_combinations = analysis["failed_combinations"] if retry_failed else []
+        cancelled_combinations = analysis["cancelled_combinations"] if retry_failed else []
 
-        # Combine missing and failed combinations to re-run
-        combinations_to_run = missing_combinations + failed_combinations
+        # Combine missing, failed, and cancelled combinations to re-run
+        combinations_to_run = missing_combinations + failed_combinations + cancelled_combinations
 
-        if not combinations_to_run:
+        total_available_to_run = len(combinations_to_run)
+
+        # Find the highest existing task number in source_mapping to continue from there
+        existing_task_assignments = self.analyzer.source_mapping.get("task_assignments", {})
+        max_existing_task_num = 0
+
+        # Get all existing task numbers
+        for task_name in existing_task_assignments.keys():
+            task_match = re.search(r"task_(\d+)", task_name)
+            if task_match:
+                task_num = int(task_match.group(1))
+                max_existing_task_num = max(max_existing_task_num, task_num)
+
+        # For failed and cancelled tasks, we need to re-use their existing task numbers
+        failed_task_map = {}
+        if retry_failed and (failed_combinations or cancelled_combinations):
+            for task_name, task_info in existing_task_assignments.items():
+                task_status = task_info.get("status")
+                if task_status in ["FAILED", "CANCELLED"]:
+                    task_match = re.search(r"task_(\d+)", task_name)
+                    if task_match:
+                        task_num = int(task_match.group(1))
+                        # Find the combination for this failed/cancelled task
+                        retry_combinations = failed_combinations + cancelled_combinations
+                        for combo in retry_combinations:
+                            # Check if this combination hasn't been assigned yet
+                            combo_key = self.analyzer._params_to_key(combo)
+                            if combo_key not in failed_task_map.values():
+                                failed_task_map[task_num] = combo_key
+                                break
+
+        # Create tasks to run with proper task numbering
+        tasks_to_run = []
+        next_task_num = max_existing_task_num + 1
+
+        # First, assign failed and cancelled combinations to their existing task numbers
+        if retry_failed and (failed_combinations or cancelled_combinations):
+            retry_combinations = failed_combinations + cancelled_combinations
+            for combo in retry_combinations:
+                combo_key = self.analyzer._params_to_key(combo)
+                # Find if this combo was mapped to a failed/cancelled task
+                found_task_num = None
+                for task_num, mapped_combo_key in failed_task_map.items():
+                    if mapped_combo_key == combo_key:
+                        found_task_num = task_num
+                        break
+
+                if found_task_num:
+                    # Re-use existing task number for failed/cancelled combination
+                    tasks_to_run.append(
+                        {
+                            "task_index": found_task_num - 1,
+                            "task_number": found_task_num,
+                            "params": combo,
+                        }
+                    )
+                else:
+                    # Assign new task number for failed/cancelled combination not found in mapping
+                    tasks_to_run.append(
+                        {
+                            "task_index": next_task_num - 1,
+                            "task_number": next_task_num,
+                            "params": combo,
+                        }
+                    )
+                    next_task_num += 1
+
+        # Then, assign missing combinations to new task numbers
+        for combo in missing_combinations:
+            tasks_to_run.append(
+                {"task_index": next_task_num - 1, "task_number": next_task_num, "params": combo}
+            )
+            next_task_num += 1
+
+        if max_runs is not None and max_runs > 0:
+            if console := kwargs.get("console"):
+                console.print(
+                    f"[yellow]Limiting completion to {max_runs} runs out of {total_available_to_run} needed.[/yellow]"
+                )
+            tasks_to_run = tasks_to_run[:max_runs]
+
+        if not tasks_to_run:
             return {
                 "status": "complete",
-                "message": "Sweep is already complete",
+                "message": "Sweep is already complete or no runnable tasks found",
                 "jobs_submitted": 0,
             }
 
         if dry_run:
+            message = f"Would run {len(tasks_to_run)} combinations"
+            if max_runs is not None and max_runs > 0:
+                message += f" (limited by --max-runs from {total_available_to_run} needed)"
+
+            # Show which task numbers would be used
+            task_numbers = [t["task_number"] for t in tasks_to_run]
+            if console := kwargs.get("console"):
+                console.print(f"Task numbers that would be used: {task_numbers}")
+
             return {
                 "status": "dry_run",
-                "message": f"Would run {len(combinations_to_run)} combinations",
-                "combinations_to_run": combinations_to_run,
+                "message": message,
+                "combinations_to_run": [t["params"] for t in tasks_to_run],
+                "task_numbers": task_numbers,
                 "missing_count": len(missing_combinations),
                 "failed_count": len(failed_combinations),
-                "total_to_run": len(combinations_to_run),
+                "cancelled_count": len(cancelled_combinations),
+                "total_to_run": len(tasks_to_run),
             }
 
         # Execute the actual completion
         console = kwargs.pop("console", None)
         logger = kwargs.pop("logger", None)
-        return self._execute_combinations(combinations_to_run, mode, console, logger, **kwargs)
+        return self._execute_combinations(tasks_to_run, mode, console, logger, **kwargs)
 
     def _execute_combinations(
-        self, combinations: List[Dict[str, Any]], mode: str, console=None, logger=None, **kwargs
+        self, tasks_to_run: List[Dict[str, Any]], mode: str, console=None, logger=None, **kwargs
     ) -> Dict[str, Any]:
         """Execute the missing combinations."""
+        # Create backup of existing source mapping before any changes
+        source_mapping_backup = None
+        original_mapping_content = None
+
+        if self.analyzer.source_mapping_path.exists():
+            try:
+                import shutil
+
+                # Create backup with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = self.analyzer.source_mapping_path.with_suffix(
+                    f".yaml.backup_{timestamp}"
+                )
+                shutil.copy2(self.analyzer.source_mapping_path, backup_path)
+                source_mapping_backup = backup_path
+
+                # Also keep the original content in memory for immediate restore
+                with open(self.analyzer.source_mapping_path, "r") as f:
+                    original_mapping_content = f.read()
+
+                logger.info(f"Created source mapping backup: {backup_path}")
+            except Exception as e:
+                logger.warning(f"Could not create source mapping backup: {e}")
+
+        # Setup signal handling for completion process
+        original_sigint_handler = None
+        original_sigterm_handler = None
+
+        def completion_signal_handler(signum, frame):
+            """Signal handler for completion process that restores mapping before exit."""
+            logger.warning(
+                f"🛑 Completion interrupted by signal {signum}, restoring source mapping..."
+            )
+
+            # Restore the original mapping immediately
+            if original_mapping_content and self.analyzer.source_mapping_path.exists():
+                try:
+                    with open(self.analyzer.source_mapping_path, "w") as f:
+                        f.write(original_mapping_content)
+                    logger.info("✅ Source mapping restored successfully")
+                except Exception as e:
+                    logger.error(f"Failed to restore source mapping: {e}")
+                    # Try backup restore as fallback
+                    if source_mapping_backup and source_mapping_backup.exists():
+                        try:
+                            import shutil
+
+                            shutil.copy2(source_mapping_backup, self.analyzer.source_mapping_path)
+                            logger.info("✅ Source mapping restored from backup")
+                        except Exception as e2:
+                            logger.error(f"Failed to restore from backup: {e2}")
+
+            # Re-raise the signal to continue normal handling
+            import signal
+
+            if signum == signal.SIGINT:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                signal.raise_signal(signal.SIGINT)
+            elif signum == signal.SIGTERM:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                signal.raise_signal(signal.SIGTERM)
+
         try:
+            # Setup completion-specific signal handlers
+            import signal
+
+            original_sigint_handler = signal.signal(signal.SIGINT, completion_signal_handler)
+            original_sigterm_handler = signal.signal(signal.SIGTERM, completion_signal_handler)
+
             # Import here to avoid circular imports
             from ...cli.sweep import create_remote_job_manager_wrapper
             from ..common.config import HSMConfig
             from ..common.path_detector import PathDetector
             from ..distributed.wrapper import create_distributed_sweep_wrapper
             from ..hpc.hpc_base import HPCJobManager
-            from ..local.manager import LocalJobManager
+            from ..local.local_manager import LocalJobManager
 
             # Get sweep ID from directory name
             sweep_id = self.sweep_dir.name
@@ -305,6 +557,19 @@ class SweepCompletor:
             completion_tracker = SweepTaskTracker(self.sweep_dir, sweep_id)
             # Load existing mapping to preserve already completed work
             completion_tracker._load_existing_mapping()
+
+            # CRITICAL: Enable preservation mode for completion runs
+            completion_tracker.enable_preservation_mode()
+
+            # Store the original task assignments to preserve them
+            original_task_assignments = completion_tracker.mapping_data.get(
+                "task_assignments", {}
+            ).copy()
+            original_metadata = completion_tracker.mapping_data.get("sweep_metadata", {}).copy()
+
+            logger.info(
+                f"Preserving {len(original_task_assignments)} existing task assignments in completion"
+            )
 
             # Load HSM config
             hsm_config = HSMConfig.load()
@@ -350,6 +615,7 @@ class SweepCompletor:
                     max_parallel_jobs=max_parallel_jobs,
                     show_progress=not no_progress,
                     show_output=show_output,
+                    setup_signal_handlers=False,
                 )
 
             elif mode == "remote":
@@ -372,6 +638,7 @@ class SweepCompletor:
                     parallel_jobs=parallel_jobs,
                     verify_sync=not no_verify_sync,
                     auto_sync=auto_sync,
+                    setup_signal_handlers=False,
                 )
 
                 if not job_manager:
@@ -438,6 +705,7 @@ class SweepCompletor:
                             max_parallel_jobs=max_parallel_jobs,
                             show_progress=not no_progress,
                             show_output=show_output,
+                            setup_signal_handlers=False,
                         )
                     else:
                         # User explicitly requested array/individual mode but no HPC found
@@ -450,6 +718,29 @@ class SweepCompletor:
 
             if not job_manager:
                 return {"error": f"Failed to create job manager for mode '{mode}'"}
+
+            # CRITICAL: Inject the existing tracker into the job manager to prevent overwriting
+            # For completion runs, we must preserve the existing task assignments
+            if hasattr(job_manager, "task_tracker"):
+                # Replace the job manager's tracker with our completion tracker that has the existing data
+                job_manager.task_tracker = completion_tracker
+                logger.info("Injected existing task tracker into job manager for completion")
+
+                # Also enable preservation mode on the job manager's tracker
+                if hasattr(job_manager.task_tracker, "enable_preservation_mode"):
+                    job_manager.task_tracker.enable_preservation_mode()
+                    logger.debug("Enabled preservation mode on job manager's task tracker")
+
+            # For distributed mode, we need to set a flag to preserve existing mapping
+            if hasattr(job_manager, "preserve_existing_mapping"):
+                job_manager.preserve_existing_mapping = True
+                job_manager.existing_task_assignments = original_task_assignments
+                job_manager.existing_metadata = original_metadata
+                logger.info("Set distributed manager to preserve existing task assignments")
+
+            # Set completion run flag for proper task naming
+            if hasattr(job_manager, "is_completion_run"):
+                job_manager.is_completion_run = True
 
             # Create subdirectories for organization
             if mode == "local":
@@ -473,55 +764,238 @@ class SweepCompletor:
                     console.print(f"Execution system: {job_manager.system_type}")
 
             # Submit the combinations
-            job_ids = job_manager.submit_sweep(
-                param_combinations=combinations,
-                mode=mode,
-                sweep_dir=self.sweep_dir,
-                sweep_id=sweep_id,
-                wandb_group=kwargs.get("group", sweep_id),
-                pbs_dir=scripts_dir,
-                logs_dir=logs_dir,
-            )
+            submit_kwargs = {
+                "param_combinations": tasks_to_run,  # Pass tasks with indices
+                "mode": mode,
+                "sweep_dir": self.sweep_dir,
+                "sweep_id": sweep_id,
+                "wandb_group": kwargs.get("group", sweep_id),
+                "pbs_dir": scripts_dir,
+                "logs_dir": logs_dir,
+            }
 
-            # Update task tracker to record completion job submissions
-            # This ensures the sweep-wide mapping stays updated even during completion
-            completion_source = f"{mode}_completion"
-            if not hasattr(job_manager, "task_tracker") or job_manager.task_tracker is None:
-                # If the job manager doesn't have its own tracker, update ours manually
-                task_names = []
-                for i, params in enumerate(combinations):
-                    # Try to map back to original task names if possible
-                    # For completion, we need to figure out which original tasks these correspond to
-                    # This is a bit complex, so for now we'll rely on sync_with_task_directories
-                    pass
+            job_submission_successful = False
+            job_ids = []
 
-                # Sync with actual task directories to capture what was actually run
-                completion_tracker.sync_with_task_directories(force_update=True)
-                completion_tracker.save_mapping()
+            try:
+                if isinstance(job_manager, LocalJobManager):
+                    job_ids = asyncio.run(job_manager.submit_sweep(**submit_kwargs))
+                else:
+                    job_ids = job_manager.submit_sweep(**submit_kwargs)
 
-            # For remote mode, provide additional error reporting
-            if mode == "remote":
-                console.print(
-                    "\n[cyan]Remote job execution completed. Checking for error summaries...[/cyan]"
+                job_submission_successful = bool(job_ids)
+                logger.debug(
+                    f"Job submission successful: {job_submission_successful}, job_ids: {job_ids}"
                 )
-                self._show_error_summary_if_available(console)
 
-            # Final sync to ensure all task statuses are captured
-            completion_tracker.sync_with_task_directories(force_update=True)
-            completion_tracker.save_mapping()
+            except Exception as submit_error:
+                logger.error(f"Job submission failed: {submit_error}")
+                job_submission_successful = False
+                # If job submission failed, restore original mapping
+                if original_mapping_content:
+                    try:
+                        with open(self.analyzer.source_mapping_path, "w") as f:
+                            f.write(original_mapping_content)
+                        logger.info("Restored original source mapping after job submission failure")
+                    except Exception as restore_error:
+                        logger.error(f"Could not restore original source mapping: {restore_error}")
+                        # Try backup restore as fallback
+                        if source_mapping_backup and source_mapping_backup.exists():
+                            try:
+                                import shutil
+
+                                shutil.copy2(
+                                    source_mapping_backup, self.analyzer.source_mapping_path
+                                )
+                                logger.info(
+                                    "Restored source mapping from backup after job submission failure"
+                                )
+                            except Exception as backup_restore_error:
+                                logger.error(
+                                    f"Could not restore source mapping backup: {backup_restore_error}"
+                                )
+                raise submit_error
+
+            # Only update task tracker if job submission was successful
+            if job_submission_successful and job_ids:
+                # For completion runs, we need to ensure the original task assignments are preserved
+                # and merged with any new ones from the job submission
+                try:
+                    # Load what the job manager might have written
+                    completion_tracker._load_existing_mapping()
+                    current_assignments = completion_tracker.mapping_data.get(
+                        "task_assignments", {}
+                    )
+
+                    # Merge original assignments back in (original assignments take precedence for existing tasks)
+                    merged_assignments = {**current_assignments, **original_task_assignments}
+                    completion_tracker.mapping_data["task_assignments"] = merged_assignments
+
+                    # Preserve original metadata with any updates
+                    current_metadata = completion_tracker.mapping_data.get("sweep_metadata", {})
+                    merged_metadata = {**current_metadata, **original_metadata}
+                    # Update timestamp and strategy but keep other original fields
+                    merged_metadata["timestamp"] = current_metadata.get(
+                        "timestamp", datetime.now().isoformat()
+                    )
+                    completion_tracker.mapping_data["sweep_metadata"] = merged_metadata
+
+                    # Save the merged mapping
+                    completion_tracker.save_mapping()
+                    logger.info(
+                        f"Preserved {len(original_task_assignments)} original tasks and merged with completion run"
+                    )
+
+                except Exception as merge_error:
+                    logger.warning(
+                        f"Could not merge task assignments after job submission: {merge_error}"
+                    )
+                    # Try to restore original mapping if merge failed
+                    try:
+                        completion_tracker.mapping_data["task_assignments"] = (
+                            original_task_assignments
+                        )
+                        completion_tracker.mapping_data["sweep_metadata"] = original_metadata
+                        completion_tracker.save_mapping()
+                        logger.info("Restored original task assignments after merge failure")
+                    except Exception as restore_error:
+                        logger.error(
+                            f"Failed to restore original task assignments: {restore_error}"
+                        )
+
+                # For remote mode, provide additional error reporting
+                if mode == "remote":
+                    console.print(
+                        "\n[cyan]Remote job execution completed. Checking for error summaries...[/cyan]"
+                    )
+                    self._show_error_summary_if_available(console)
+
+                # Final sync to ensure all task statuses are captured - only on success
+                try:
+                    # Re-load to get latest from disk, then merge with original
+                    completion_tracker._load_existing_mapping()
+                    current_assignments = completion_tracker.mapping_data.get(
+                        "task_assignments", {}
+                    )
+
+                    # For final sync, preserve any status updates but keep original task assignments
+                    for task_name, original_task in original_task_assignments.items():
+                        if task_name in current_assignments:
+                            # Keep original data but allow status updates
+                            current_task = current_assignments[task_name]
+                            merged_task = {**original_task}
+                            # Allow status and timing updates from current
+                            if current_task.get("status") != original_task.get("status"):
+                                merged_task["status"] = current_task.get("status")
+                            if current_task.get("complete_time") and not original_task.get(
+                                "complete_time"
+                            ):
+                                merged_task["complete_time"] = current_task.get("complete_time")
+                            if current_task.get("start_time") and not original_task.get(
+                                "start_time"
+                            ):
+                                merged_task["start_time"] = current_task.get("start_time")
+                            current_assignments[task_name] = merged_task
+                        else:
+                            # Restore missing original task
+                            current_assignments[task_name] = original_task
+
+                    completion_tracker.mapping_data["task_assignments"] = current_assignments
+                    completion_tracker.save_mapping()
+                    logger.debug("Final task tracker sync completed with preserved assignments")
+
+                    # Clean up backup on successful completion
+                    if source_mapping_backup and source_mapping_backup.exists():
+                        try:
+                            source_mapping_backup.unlink()
+                            logger.debug(
+                                "Removed source mapping backup after successful completion"
+                            )
+                        except Exception:
+                            pass  # Don't fail on backup cleanup
+
+                except Exception as final_sync_error:
+                    logger.warning(f"Could not perform final task tracker sync: {final_sync_error}")
+                    # If final sync fails, restore original mapping
+                    if original_mapping_content:
+                        try:
+                            with open(self.analyzer.source_mapping_path, "w") as f:
+                                f.write(original_mapping_content)
+                            logger.info("Restored original source mapping after final sync failure")
+                        except Exception as restore_error:
+                            logger.error(
+                                f"Could not restore original source mapping: {restore_error}"
+                            )
+                            # Try backup restore as final fallback
+                            if source_mapping_backup and source_mapping_backup.exists():
+                                try:
+                                    import shutil
+
+                                    shutil.copy2(
+                                        source_mapping_backup, self.analyzer.source_mapping_path
+                                    )
+                                    logger.info(
+                                        "Restored source mapping from backup after final sync failure"
+                                    )
+                                except Exception as backup_restore_error:
+                                    logger.error(
+                                        f"Could not restore source mapping backup: {backup_restore_error}"
+                                    )
 
             return {
-                "status": "submitted",
-                "message": f"Successfully submitted {len(job_ids)} completion jobs",
+                "status": "submitted" if job_submission_successful else "failed",
+                "message": f"Successfully submitted {len(job_ids)} completion jobs"
+                if job_submission_successful
+                else "Job submission failed",
                 "jobs_submitted": len(job_ids),
                 "job_ids": job_ids,
-                "combinations_count": len(combinations),
+                "combinations_count": len(tasks_to_run),
             }
 
         except Exception as e:
             if logger:
                 logger.error(f"Error executing completion: {e}")
+
+            # Restore original mapping if something went wrong
+            if original_mapping_content:
+                try:
+                    with open(self.analyzer.source_mapping_path, "w") as f:
+                        f.write(original_mapping_content)
+                    logger.info("Restored original source mapping after execution error")
+                except Exception as restore_error:
+                    logger.error(f"Could not restore original source mapping: {restore_error}")
+                    # Try backup restore as fallback
+                    if source_mapping_backup and source_mapping_backup.exists():
+                        try:
+                            import shutil
+
+                            shutil.copy2(source_mapping_backup, self.analyzer.source_mapping_path)
+                            logger.info("Restored source mapping from backup after execution error")
+                        except Exception as backup_restore_error:
+                            logger.error(
+                                f"Could not restore source mapping backup: {backup_restore_error}"
+                            )
+
             return {"error": f"Execution failed: {e}"}
+
+        finally:
+            # Restore original signal handlers
+            if original_sigint_handler is not None:
+                import signal
+
+                signal.signal(signal.SIGINT, original_sigint_handler)
+            if original_sigterm_handler is not None:
+                import signal
+
+                signal.signal(signal.SIGTERM, original_sigterm_handler)
+
+            # Clean up backup file if it still exists (defensive cleanup)
+            if source_mapping_backup and source_mapping_backup.exists():
+                try:
+                    source_mapping_backup.unlink()
+                    logger.debug("Cleaned up source mapping backup in finally block")
+                except Exception:
+                    pass  # Don't fail on cleanup
 
     def _show_error_summary_if_available(self, console):
         """Show error summary if error files are available."""
@@ -542,7 +1016,7 @@ class SweepCompletor:
             for i, error_file in enumerate(error_files[:3]):
                 console.print(f"\n[bold red]Error #{i + 1} - {error_file.stem}:[/bold red]")
                 try:
-                    with open(error_file, "r") as f:
+                    with open(error_file) as f:
                         content = f.read()
                         # Show first 300 chars of error content
                         if content:
@@ -562,7 +1036,7 @@ class SweepCompletor:
             # Try to identify common error patterns
             common_errors = self._analyze_common_error_patterns(error_files)
             if common_errors:
-                console.print(f"\n[yellow]🔍 Common error patterns detected:[/yellow]")
+                console.print("\n[yellow]🔍 Common error patterns detected:[/yellow]")
                 for pattern, count in common_errors.items():
                     console.print(f"  • {pattern}: {count} occurrences")
 
@@ -585,7 +1059,7 @@ class SweepCompletor:
 
         try:
             for error_file in error_files:
-                with open(error_file, "r") as f:
+                with open(error_file) as f:
                     content = f.read().lower()
 
                     for pattern_name, keywords in common_error_indicators:
@@ -622,6 +1096,7 @@ def find_incomplete_sweeps(sweeps_root: Path = None) -> List[Dict[str, Any]]:
                         "total_completed": analysis["total_completed"],
                         "total_missing": analysis["total_missing"],
                         "total_failed": analysis["total_failed"],
+                        "total_cancelled": analysis.get("total_cancelled", 0),
                     }
                 )
 
@@ -639,6 +1114,7 @@ def get_sweep_completion_summary(sweep_dir: Path) -> str:
     total_expected = analysis["total_expected"]
     total_completed = analysis["total_completed"]
     total_failed = analysis["total_failed"]
+    total_cancelled = analysis.get("total_cancelled", 0)
     total_missing = analysis["total_missing"]
     total_running = analysis["total_running"]
     completion_rate = analysis["completion_rate"]
@@ -651,6 +1127,8 @@ def get_sweep_completion_summary(sweep_dir: Path) -> str:
         summary.append(f"Missing: {total_missing} combinations")
     if total_failed > 0:
         summary.append(f"Failed: {total_failed} combinations")
+    if total_cancelled > 0:
+        summary.append(f"Cancelled: {total_cancelled} combinations")
     if total_running > 0:
         summary.append(f"Running: {total_running} combinations")
 

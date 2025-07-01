@@ -1,0 +1,774 @@
+{
+  "total_definitions": 385,
+  "total_calls": 462,
+  "potentially_unused": [
+    {
+      "name": "submit_command",
+      "locations": [
+        "src/hpc_sweep_manager/core/hpc/hpc_base.py",
+        "src/hpc_sweep_manager/core/hpc/slurm_manager.py",
+        "src/hpc_sweep_manager/core/hpc/pbs_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "HPCJobManager",
+      "locations": [
+        "src/hpc_sweep_manager/core/hpc/hpc_base.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "scheduler_name",
+      "locations": [
+        "src/hpc_sweep_manager/core/hpc/hpc_base.py",
+        "src/hpc_sweep_manager/core/hpc/slurm_manager.py",
+        "src/hpc_sweep_manager/core/hpc/pbs_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "status_command",
+      "locations": [
+        "src/hpc_sweep_manager/core/hpc/hpc_base.py",
+        "src/hpc_sweep_manager/core/hpc/slurm_manager.py",
+        "src/hpc_sweep_manager/core/hpc/pbs_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "show_progress_summary",
+      "locations": [
+        "src/hpc_sweep_manager/core/local/local_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "stream_output",
+      "locations": [
+        "src/hpc_sweep_manager/core/local/local_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "force_cleanup_all",
+      "locations": [
+        "src/hpc_sweep_manager/core/local/local_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_distributed_stats",
+      "locations": [
+        "src/hpc_sweep_manager/core/distributed/ditributed_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_running_jobs_info",
+      "locations": [
+        "src/hpc_sweep_manager/core/remote/remote_manager.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "discover_all_remotes",
+      "locations": [
+        "src/hpc_sweep_manager/core/remote/discovery.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "ProgressTracker",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_status_summary",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "parse_walltime",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "format_memory",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "format_walltime",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "safe_filename",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "validate_resources_string",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "count_jobs_in_queue",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/utils.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "create_command_line_args",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/param_generator.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "preview_combinations",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/param_generator.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "ImportTracker",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "find_unused_functions",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "wrapper",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "decorator",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_summary",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "save_session_data",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "tracking_import",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "track_usage",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/usage_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "from_hydra_config",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "suggest_sweep_ranges",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "load_config",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "HydraConfigParser",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_wandb_config",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "SweepConfig",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "discover_configs",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_total_combinations",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_hpc_system",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "save",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py",
+        "src/hpc_sweep_manager/core/common/config_parser.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "HSMConfig",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/config.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_sweep_completion_summary",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/completion.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_task_status",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_missing_tasks",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_completed_tasks",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "is_task_registered",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_running_tasks",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "get_failed_tasks",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/sweep_tracker.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "available_slots",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/compute_source.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "utilization",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/compute_source.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "current_job_count",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/compute_source.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "is_available",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/compute_source.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "ComputeSource",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/compute_source.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "suggest_setup",
+      "locations": [
+        "src/hpc_sweep_manager/core/common/path_detector.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "run_local",
+      "locations": [
+        "src/hpc_sweep_manager/cli/local.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "clean_local",
+      "locations": [
+        "src/hpc_sweep_manager/cli/local.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "local_status",
+      "locations": [
+        "src/hpc_sweep_manager/cli/local.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "submit_hpc",
+      "locations": [
+        "src/hpc_sweep_manager/cli/hpc.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "queue_status",
+      "locations": [
+        "src/hpc_sweep_manager/cli/hpc.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "hpc_status",
+      "locations": [
+        "src/hpc_sweep_manager/cli/hpc.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "test",
+      "locations": [
+        "src/hpc_sweep_manager/cli/remote.py",
+        "src/hpc_sweep_manager/cli/distributed.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "remove",
+      "locations": [
+        "src/hpc_sweep_manager/cli/remote.py",
+        "src/hpc_sweep_manager/cli/distributed.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "health",
+      "locations": [
+        "src/hpc_sweep_manager/cli/remote.py",
+        "src/hpc_sweep_manager/cli/distributed.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "enable_tracking_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_AsyncFunctionDef",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "dead_code_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_ImportFrom",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "complexity_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_FunctionDef",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_Import",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "dependencies_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_ClassDef",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "coverage_gaps_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "visit_Call",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "usage_report_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/analyze.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "init",
+      "locations": [
+        "src/hpc_sweep_manager/cli/distributed.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "format_duration_human",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "display_project_status",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "validate_project_setup",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "common_options",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "format_memory_human",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "sweep_options",
+      "locations": [
+        "src/hpc_sweep_manager/cli/common.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "status_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py",
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "run_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "errors_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "sweep_legacy_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "complete_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "sweep_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/sweep.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "cancel_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "complete_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "monitor_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "errors_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "init_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "queue_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "run_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "status_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "cleanup_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "recent_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "collect_compat",
+      "locations": [
+        "src/hpc_sweep_manager/cli/main.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "cancel_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "collect_results_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "delete_jobs_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "watch_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "queue_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "recent_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "cleanup_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/monitor.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "configure_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/init.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "init_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/init.py"
+      ],
+      "type": "function"
+    },
+    {
+      "name": "collect_cmd",
+      "locations": [
+        "src/hpc_sweep_manager/cli/collect.py"
+      ],
+      "type": "function"
+    }
+  ],
+  "files_analyzed": 39
+}

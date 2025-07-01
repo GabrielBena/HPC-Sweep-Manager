@@ -18,6 +18,11 @@ class SweepTaskTracker:
         self.sweep_id = sweep_id
         self.mapping_file = self.sweep_dir / "source_mapping.yaml"
 
+        # Flag to indicate if we should preserve existing mappings (completion runs)
+        self.preserve_existing_mapping = False
+        self.original_task_assignments = {}
+        self.original_metadata = {}
+
         # Task tracking data
         self.mapping_data = {
             "sweep_metadata": {
@@ -37,32 +42,63 @@ class SweepTaskTracker:
         """Load existing source mapping if it exists."""
         if self.mapping_file.exists():
             try:
-                with open(self.mapping_file, "r") as f:
+                with open(self.mapping_file) as f:
                     existing_data = yaml.safe_load(f)
                     if existing_data:
+                        # Store original data for preservation
+                        self.original_task_assignments = existing_data.get(
+                            "task_assignments", {}
+                        ).copy()
+                        self.original_metadata = existing_data.get("sweep_metadata", {}).copy()
+
+                        # Load into current mapping data
                         self.mapping_data = existing_data
                         logger.debug(
-                            f"Loaded existing source mapping with {len(self.mapping_data.get('task_assignments', {}))} tasks"
+                            f"Loaded existing source mapping with {len(self.original_task_assignments)} tasks"
                         )
             except Exception as e:
                 logger.warning(f"Could not load existing source mapping: {e}")
 
+    def enable_preservation_mode(self):
+        """Enable preservation mode for completion runs."""
+        self.preserve_existing_mapping = True
+        logger.debug("Enabled mapping preservation mode for completion run")
+
     def initialize_sweep(self, total_tasks: int, compute_source: str, mode: str = "single_source"):
-        """Initialize or update sweep metadata."""
-        metadata = self.mapping_data["sweep_metadata"]
-        metadata["total_tasks"] = max(metadata.get("total_tasks", 0), total_tasks)
-        metadata["timestamp"] = datetime.now().isoformat()
+        """Initialize or update sweep metadata, preserving existing data if in preservation mode."""
+        # In preservation mode, be more careful about what we update
+        if self.preserve_existing_mapping and self.original_metadata:
+            # Keep original metadata but allow updates to total_tasks and timestamp
+            existing_total = self.original_metadata.get("total_tasks", 0)
+            new_total = max(total_tasks, existing_total)
 
-        # Update compute sources list
-        sources = set(metadata.get("compute_sources", []))
-        sources.add(compute_source)
-        metadata["compute_sources"] = sorted(list(sources))
+            # Preserve original compute sources and add new ones
+            existing_sources = self.original_metadata.get("compute_sources", [])
+            if compute_source not in existing_sources:
+                existing_sources.append(compute_source)
 
-        # Update strategy if this is the first initialization
-        if len(self.mapping_data["task_assignments"]) == 0:
-            metadata["strategy"] = mode
-
-        logger.debug(f"Initialized sweep tracking: {total_tasks} tasks, source: {compute_source}")
+            self.mapping_data["sweep_metadata"].update(
+                {
+                    "total_tasks": new_total,
+                    "compute_sources": sorted(existing_sources),
+                    "strategy": self.original_metadata.get("strategy", mode),
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+            logger.info(
+                f"Initialized sweep with preservation: {new_total} total tasks, sources: {existing_sources}"
+            )
+        else:
+            # Normal initialization (new sweep)
+            self.mapping_data["sweep_metadata"] = {
+                "total_tasks": total_tasks,
+                "compute_sources": [compute_source],
+                "strategy": mode,
+                "timestamp": datetime.now().isoformat(),
+            }
+            logger.debug(
+                f"Initialized sweep tracking: {total_tasks} tasks, source: {compute_source}"
+            )
 
     def register_task_submission(
         self, task_name: str, compute_source: str, job_id: str = None, params: Dict[str, Any] = None
@@ -164,17 +200,99 @@ class SweepTaskTracker:
         return summary
 
     def save_mapping(self):
-        """Save the current mapping to file."""
+        """Save the current mapping to file, preserving existing data if in preservation mode."""
         try:
             # Ensure directory exists
             self.mapping_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Update timestamp
-            self.mapping_data["sweep_metadata"]["timestamp"] = datetime.now().isoformat()
+            # In preservation mode, merge with original data
+            if self.preserve_existing_mapping and self.original_task_assignments:
+                # Start with current mapping data
+                final_mapping_data = self.mapping_data.copy()
+
+                # Ensure we have the task_assignments section
+                if "task_assignments" not in final_mapping_data:
+                    final_mapping_data["task_assignments"] = {}
+
+                # Merge original task assignments, giving precedence to original data for existing tasks
+                merged_assignments = {}
+
+                # First, add all original assignments
+                for task_name, original_task in self.original_task_assignments.items():
+                    merged_assignments[task_name] = original_task.copy()
+
+                # Then, update with new assignments or status updates
+                current_assignments = final_mapping_data["task_assignments"]
+                for task_name, current_task in current_assignments.items():
+                    if task_name in merged_assignments:
+                        # Update existing task: preserve original data but allow status/timing updates
+                        original_task = merged_assignments[task_name]
+
+                        # Only update if there are meaningful changes
+                        if current_task.get("status") != original_task.get("status"):
+                            merged_assignments[task_name]["status"] = current_task.get("status")
+
+                        # Update timing if not already set or if status changed to completed/failed
+                        if current_task.get("complete_time") and (
+                            not original_task.get("complete_time")
+                            or current_task.get("status") in ["COMPLETED", "FAILED", "CANCELLED"]
+                        ):
+                            merged_assignments[task_name]["complete_time"] = current_task.get(
+                                "complete_time"
+                            )
+
+                        if current_task.get("start_time") and not original_task.get("start_time"):
+                            merged_assignments[task_name]["start_time"] = current_task.get(
+                                "start_time"
+                            )
+
+                        # Allow job_id updates for retries
+                        if current_task.get("job_id") and current_task.get(
+                            "job_id"
+                        ) != original_task.get("job_id"):
+                            merged_assignments[task_name]["job_id"] = current_task.get("job_id")
+                    else:
+                        # New task from completion run
+                        merged_assignments[task_name] = current_task.copy()
+
+                final_mapping_data["task_assignments"] = merged_assignments
+
+                # Merge metadata carefully
+                if self.original_metadata:
+                    final_metadata = self.original_metadata.copy()
+                    current_metadata = final_mapping_data.get("sweep_metadata", {})
+
+                    # Update total_tasks to maximum of original and current
+                    final_metadata["total_tasks"] = max(
+                        final_metadata.get("total_tasks", 0),
+                        current_metadata.get("total_tasks", 0),
+                        len(merged_assignments),
+                    )
+
+                    # Merge compute sources
+                    original_sources = set(final_metadata.get("compute_sources", []))
+                    current_sources = set(current_metadata.get("compute_sources", []))
+                    final_metadata["compute_sources"] = sorted(original_sources | current_sources)
+
+                    # Update timestamp but preserve strategy
+                    final_metadata["timestamp"] = current_metadata.get(
+                        "timestamp", datetime.now().isoformat()
+                    )
+
+                    final_mapping_data["sweep_metadata"] = final_metadata
+
+                logger.debug(
+                    f"Saving mapping with preservation: {len(self.original_task_assignments)} original + {len(current_assignments)} current = {len(merged_assignments)} total tasks"
+                )
+            else:
+                # Normal save (new sweep or no preservation needed)
+                final_mapping_data = self.mapping_data.copy()
+                # Update timestamp
+                final_mapping_data["sweep_metadata"]["timestamp"] = datetime.now().isoformat()
 
             # Save to YAML file
             with open(self.mapping_file, "w") as f:
-                yaml.dump(self.mapping_data, f, default_flow_style=False, indent=2)
+                yaml.dump(final_mapping_data, f, default_flow_style=False, indent=2)
 
             logger.debug(f"Saved source mapping to {self.mapping_file}")
 
@@ -203,7 +321,7 @@ class SweepTaskTracker:
 
                 if task_info_file.exists():
                     try:
-                        with open(task_info_file, "r") as f:
+                        with open(task_info_file) as f:
                             content = f.read()
 
                         # Extract status

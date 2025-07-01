@@ -1,0 +1,51 @@
+#!/bin/bash
+# Local job script for {{ job_name }}
+# Generated at {{ "now" | strftime }}
+
+# Change to project directory
+cd {{ project_dir }}
+
+# Set up JAX/CUDA environment variables to help with compilation issues
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_TRACEBACK_FILTERING=off
+# Let JAX automatically choose available backends instead of hardcoding
+export JAX_PLATFORMS=""
+
+# Always use task directory for temporary files (avoid /tmp completely)
+export TMPDIR={{ task_dir }}/tmp
+export TEMP={{ task_dir }}/tmp
+export TMP={{ task_dir }}/tmp
+mkdir -p {{ task_dir }}/tmp
+
+# Check disk space for debugging
+echo "Disk space check at $(date):" >> {{ task_dir }}/task_info.txt
+df -h . >> {{ task_dir }}/task_info.txt
+echo "Using task directory for all temporary files: {{ task_dir }}/tmp" >> {{ task_dir }}/task_info.txt
+
+# Set up CUDA cache and compilation directories within task directory
+export CUDA_CACHE_PATH={{ task_dir }}/cuda_cache
+export XLA_FLAGS="--xla_gpu_cuda_data_dir={{ task_dir }}/cuda_cache"
+mkdir -p {{ task_dir }}/cuda_cache
+
+# Create task info file
+echo "Job ID: {{ job_id }}" > {{ task_dir }}/task_info.txt
+echo "Task Name: {{ task_name }}" >> {{ task_dir }}/task_info.txt
+echo "Task Directory: {{ task_dir }}" >> {{ task_dir }}/task_info.txt
+echo "Start Time: $(date)" >> {{ task_dir }}/task_info.txt
+echo "Parameters: {{ params_str }}" >> {{ task_dir }}/task_info.txt
+echo "Status: RUNNING" >> {{ task_dir }}/task_info.txt
+
+# Store the command for reference
+echo "{{ python_path }} {{ script_path }} {{ params_str }} output.dir={{ task_dir }} wandb.group={{ effective_wandb_group }}" > {{ task_dir }}/command.txt
+
+# Run the training script and capture output (with output directory set to task directory)
+{{ python_path }} {{ script_path }} {{ params_str }} output.dir={{ task_dir }} wandb.group={{ effective_wandb_group }} 2>&1
+
+# Update status on completion
+if [ $? -eq 0 ]; then
+    echo "Status: COMPLETED" >> {{ task_dir }}/task_info.txt
+    echo "End Time: $(date)" >> {{ task_dir }}/task_info.txt
+else
+    echo "Status: FAILED" >> {{ task_dir }}/task_info.txt
+    echo "End Time: $(date)" >> {{ task_dir }}/task_info.txt
+fi 

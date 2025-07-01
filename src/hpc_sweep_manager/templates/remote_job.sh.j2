@@ -1,0 +1,161 @@
+#!/bin/bash
+# Remote job script for {{ job_name }}
+# Generated at {{ generation_time }}
+# Remote machine: {{ remote_name }}
+
+# Function for safe logging
+safe_log() {
+    local message="$1"
+    local timestamp=$(date)
+    
+    # Try to log to task_info.txt if available, otherwise to stderr
+    if [ -d "{{ task_dir }}" ] && [ -w "{{ task_dir }}" ]; then
+        echo "$timestamp: $message" >> {{ task_dir }}/task_info.txt 2>/dev/null || echo "$timestamp: $message" >&2
+    else
+        echo "$timestamp: $message" >&2
+    fi
+}
+
+# Function to setup task directory and initial files
+setup_task_directory() {
+    # Create task directory if it doesn't exist
+    if ! mkdir -p {{ task_dir }}; then
+        echo "FATAL: Cannot create task directory {{ task_dir }}" >&2
+        exit 1
+    fi
+    
+    # Verify we can write to the task directory
+    if ! touch {{ task_dir }}/test_write 2>/dev/null; then
+        echo "FATAL: Cannot write to task directory {{ task_dir }}" >&2
+        exit 1
+    fi
+    rm -f {{ task_dir }}/test_write
+    
+    # Create initial task info file
+    {
+        echo "Job Name: {{ job_name }}"
+        echo "Remote Machine: {{ remote_name }}"
+        echo "Task Directory: {{ task_dir }}"
+        echo "Start Time: $(date)"
+        echo "Parameters: {{ params_str }}"
+        echo "Status: RUNNING"
+    } > {{ task_dir }}/task_info.txt
+    
+    if [ $? -ne 0 ]; then
+        echo "FATAL: Cannot create task_info.txt" >&2
+        exit 1
+    fi
+    
+    # Store the command for reference
+    echo "{{ python_interpreter }} {{ train_script }} {{ params_str }} output.dir={{ task_dir }} wandb.group={{ effective_wandb_group }}" > {{ task_dir }}/command.txt
+    
+    if [ $? -ne 0 ]; then
+        safe_log "WARNING: Cannot create command.txt"
+        # Don't exit - this is not critical
+    fi
+    
+    safe_log "Task directory setup completed successfully"
+}
+
+# Set up initial environment (before set -e to handle setup errors gracefully)
+setup_task_directory
+
+# Write script PID and process group ID for cancellation
+echo "$$" > {{ task_dir }}/script.pid
+echo "$(ps -o pgid= -p $$)" > {{ task_dir }}/process_group.pid
+
+# Now enable strict error handling for the main execution
+set -e
+
+# Create a new process group for this job
+set -m
+
+# Set up environment
+cd {{ project_root }}
+
+# Function to update status safely
+update_status() {
+    local status="$1"
+    echo "Status: $status" >> {{ task_dir }}/task_info.txt
+    echo "End Time: $(date)" >> {{ task_dir }}/task_info.txt
+}
+
+# Function to handle cancellation signals
+handle_cancellation() {
+    echo "Received cancellation signal at $(date)" >> {{ task_dir }}/task_info.txt
+    update_status "CANCELLED"
+    
+    # First, try to kill the Python process specifically
+    if [ -f "{{ task_dir }}/python.pid" ]; then
+        local python_pid=$(cat {{ task_dir }}/python.pid 2>/dev/null)
+        if [ -n "$python_pid" ]; then
+            echo "Terminating Python process $python_pid" >> {{ task_dir }}/task_info.txt
+            
+            # Try graceful termination first
+            if kill -TERM "$python_pid" 2>/dev/null; then
+                echo "Sent SIGTERM to Python process $python_pid" >> {{ task_dir }}/task_info.txt
+                # Wait briefly for graceful shutdown
+                for i in {1..5}; do
+                    if ! kill -0 "$python_pid" 2>/dev/null; then
+                        echo "Python process $python_pid terminated gracefully" >> {{ task_dir }}/task_info.txt
+                        break
+                    fi
+                    sleep 1
+                done
+                
+                # Force kill if still alive
+                if kill -0 "$python_pid" 2>/dev/null; then
+                    echo "Force killing Python process $python_pid" >> {{ task_dir }}/task_info.txt
+                    kill -KILL "$python_pid" 2>/dev/null || true
+                fi
+            else
+                echo "Failed to send SIGTERM to Python process $python_pid" >> {{ task_dir }}/task_info.txt
+            fi
+        fi
+    fi
+    
+    # Also kill the entire process group as backup
+    local pgid=$(cat {{ task_dir }}/process_group.pid 2>/dev/null || echo "$$")
+    echo "Cleaning up process group $pgid" >> {{ task_dir }}/task_info.txt
+    
+    # Kill the entire process group
+    kill -TERM -$pgid 2>/dev/null || true
+    sleep 1
+    kill -KILL -$pgid 2>/dev/null || true
+    
+    echo "Cancellation cleanup completed at $(date)" >> {{ task_dir }}/task_info.txt
+    exit 143  # Standard exit code for SIGTERM
+}
+
+# Set up signal handlers for graceful cancellation
+trap 'handle_cancellation' TERM INT
+
+# Start the Python training process in the background and capture its PID
+echo "Starting training script at $(date)" >> {{ task_dir }}/task_info.txt
+{{ python_interpreter }} {{ train_script }} {{ params_str }} output.dir={{ task_dir }} wandb.group={{ effective_wandb_group }} &
+
+# Store the Python process PID
+PYTHON_PID=$!
+echo "$PYTHON_PID" > {{ task_dir }}/python.pid
+echo "Python process PID: $PYTHON_PID" >> {{ task_dir }}/task_info.txt
+
+# Wait for the Python process to complete
+if wait $PYTHON_PID; then
+    # Training completed successfully
+    update_status "COMPLETED"
+    echo "Training script completed successfully at $(date)" >> {{ task_dir }}/task_info.txt
+    exit 0
+else
+    # Training failed or was interrupted
+    exit_code=$?
+    if [ $exit_code -eq 143 ] || [ $exit_code -eq 130 ]; then
+        # Process was terminated or interrupted
+        update_status "CANCELLED"
+        echo "Training script was cancelled at $(date)" >> {{ task_dir }}/task_info.txt
+    else
+        # Process failed
+        update_status "FAILED"
+        echo "Training script failed at $(date) with exit code $exit_code" >> {{ task_dir }}/task_info.txt
+    fi
+    exit $exit_code
+fi 

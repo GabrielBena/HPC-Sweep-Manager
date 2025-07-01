@@ -4,6 +4,7 @@ import click
 from rich.console import Console
 
 from ..core.common.utils import setup_logging
+from .analyze import analyze  # Code analysis and usage tracking
 from .collect import results  # Results: collect
 from .distributed import distributed  # Distributed execution
 from .hpc import hpc  # HPC execution
@@ -55,6 +56,9 @@ cli.add_command(local)  # hsm local run, status, clean
 cli.add_command(hpc)  # hsm hpc submit, queue, status, cancel
 cli.add_command(remote)  # hsm remote add, list, test, health, remove
 cli.add_command(distributed)  # hsm distributed init, add, list, test, health, remove
+cli.add_command(
+    analyze
+)  # hsm analyze enable-tracking, report, dead-code, complexity, dependencies, coverage-gaps
 
 
 # Core workflow shortcuts for common commands (as shown in README)

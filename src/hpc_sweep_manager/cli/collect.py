@@ -10,7 +10,7 @@ from rich.console import Console
 
 from ..core.common.config import HSMConfig
 from ..core.remote.discovery import RemoteDiscovery
-from ..core.remote.manager import RemoteJobManager
+from ..core.remote.remote_manager import RemoteJobManager
 from .common import common_options
 
 

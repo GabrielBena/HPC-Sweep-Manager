@@ -1,0 +1,9 @@
+execution:
+  default_python_path: "python"
+  default_script_path: "test_train.py"
+  project_root: "."
+  max_array_size: 4
+
+resources:
+  default_walltime: "00:30:00"
+  default_resources: "select=1:ncpus=2:mem=4gb" 

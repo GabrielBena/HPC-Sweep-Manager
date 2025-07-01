@@ -1,13 +1,12 @@
 """Unit tests for the remote job manager."""
 
 import asyncio
-import pytest
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch, call
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from hpc_sweep_manager.core.remote.manager import RemoteJobManager, ProjectStateChecker
-from hpc_sweep_manager.core.remote.discovery import RemoteConfig
+import pytest
+
+from hpc_sweep_manager.core.remote.remote_manager import ProjectStateChecker, RemoteJobManager
 
 
 class MockRemoteConfig:

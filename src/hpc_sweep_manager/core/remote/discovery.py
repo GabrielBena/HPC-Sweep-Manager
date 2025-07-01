@@ -193,28 +193,53 @@ class RemoteDiscovery:
             async with await create_ssh_connection(
                 remote_config.host, remote_config.ssh_key, remote_config.ssh_port
             ) as conn:
-                # 1. Find hsm_config.yaml on remote
-                hsm_config_path = await self._find_hsm_config(conn)
+                # 1. Try to find matching project structure first
+                local_project_name = Path.cwd().name
+                logger.info(f"Looking for project '{local_project_name}' on remote {remote_name}")
+
+                matched_project_root = await self._find_matching_project(conn, local_project_name)
+
+                # 2. Find hsm_config.yaml on remote (with project matching if available)
+                hsm_config_path = await self._find_hsm_config(conn, matched_project_root)
                 if not hsm_config_path:
                     logger.error(f"No hsm_config.yaml found on remote {remote_name}")
+                    if matched_project_root:
+                        logger.error(f"Searched in matched project: {matched_project_root}")
+                    logger.error("Make sure the project exists on the remote machine")
                     return None
 
-                # 2. Read and parse remote HSM config
+                # 3. Read and parse remote HSM config
                 remote_hsm_config = await self._read_remote_hsm_config(conn, hsm_config_path)
                 if not remote_hsm_config:
                     logger.error(f"Failed to read hsm_config.yaml on remote {remote_name}")
                     return None
 
-                # 3. Extract paths and configuration
+                # 4. Extract paths and configuration
                 remote_config = self._extract_remote_paths(remote_config, remote_hsm_config)
 
-                # 4. Validate remote environment
+                # 5. Set project root based on matched project or auto-detection
+                if matched_project_root:
+                    remote_config.project_root = matched_project_root
+                    logger.info(
+                        f"Using matched project root for {remote_name}: {matched_project_root}"
+                    )
+                elif not remote_config.project_root:
+                    detected_root = await self._auto_detect_project_root(conn, hsm_config_path)
+                    if detected_root:
+                        remote_config.project_root = detected_root
+                        logger.info(
+                            f"Auto-detected project root for {remote_name}: {detected_root}"
+                        )
+                    else:
+                        logger.warning(f"Could not auto-detect project root for {remote_name}")
+
+                # 6. Validate remote environment
                 is_valid = await self._validate_remote_environment(conn, remote_config)
                 if not is_valid:
                     logger.error(f"Remote environment validation failed for {remote_name}")
                     return None
 
-                # 5. Test basic commands
+                # 7. Test basic commands
                 test_success = await self._test_basic_commands(conn, remote_config)
                 if not test_success:
                     logger.error(f"Basic command tests failed for {remote_name}")
@@ -227,8 +252,164 @@ class RemoteDiscovery:
             logger.error(f"Failed to discover configuration for remote {remote_name}: {e}")
             return None
 
-    async def _find_hsm_config(self, conn) -> Optional[str]:
-        """Find hsm_config.yaml on the remote machine."""
+    async def _find_matching_project(self, conn, local_project_name: str) -> Optional[str]:
+        """Find a project directory on remote that matches the local project structure."""
+        try:
+            logger.debug(f"Searching for project matching '{local_project_name}' on remote")
+
+            # Phase 1: Search in common predictable locations
+            search_locations = [
+                ".",  # Current directory
+                "Code",
+                "code",
+                "projects",
+                "Projects",
+                "work",
+                "workspace",
+                "src",
+                "dev",
+                "development",
+                f"Code/{local_project_name}",
+                f"code/{local_project_name}",
+                f"projects/{local_project_name}",
+                f"Projects/{local_project_name}",
+                local_project_name,  # Direct project name in current dir
+            ]
+
+            # Also search in common nested structures
+            nested_patterns = [
+                f"Code/packages/{local_project_name}",
+                f"code/packages/{local_project_name}",
+                f"Code/repos/{local_project_name}",
+                f"code/repos/{local_project_name}",
+                f"Code/NCA/{local_project_name}",  # Common research directory structure
+                f"code/nca/{local_project_name}",
+                f"Code/ML/{local_project_name}",
+                f"code/ml/{local_project_name}",
+                f"packages/{local_project_name}",
+                f"repos/{local_project_name}",
+            ]
+
+            search_locations.extend(nested_patterns)
+
+            for location in search_locations:
+                # Check if this directory exists and has project indicators
+                try:
+                    # Check if directory exists
+                    result = await conn.run(f"test -d {location}", check=False)
+                    if result.returncode != 0:
+                        continue
+
+                    # Check for HSM project indicators
+                    indicators_cmd = f"""
+                    cd {location} 2>/dev/null && (
+                        test -f hsm_config.yaml || test -f sweeps/hsm_config.yaml
+                    ) && echo "found"
+                    """
+
+                    result = await conn.run(indicators_cmd, check=False)
+                    if result.returncode == 0 and "found" in result.stdout:
+                        # Convert to absolute path
+                        abs_path_result = await conn.run(f"cd {location} && pwd", check=False)
+                        if abs_path_result.returncode == 0:
+                            abs_path = abs_path_result.stdout.strip()
+                            logger.info(f"Found matching project at: {abs_path}")
+                            return abs_path
+
+                except Exception as e:
+                    logger.debug(f"Error checking location {location}: {e}")
+                    continue
+
+            # Phase 2: Use find command to search for directories with the project name that contain HSM configs
+            logger.debug(
+                "Predictable locations failed, searching for project directories with HSM configs"
+            )
+
+            # Search for directories with the project name that contain hsm_config.yaml files
+            find_project_cmd = f"""
+            find ~ -maxdepth 4 -type d -name "{local_project_name}" 2>/dev/null | while read dir; do
+                if [ -f "$dir/hsm_config.yaml" ] || [ -f "$dir/sweeps/hsm_config.yaml" ]; then
+                    echo "$dir"
+                fi
+            done | head -1
+            """
+
+            result = await conn.run(find_project_cmd, check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                found_project = result.stdout.strip()
+                # Convert to absolute path
+                abs_path_result = await conn.run(f"cd {found_project} && pwd", check=False)
+                if abs_path_result.returncode == 0:
+                    abs_path = abs_path_result.stdout.strip()
+                    logger.info(f"Found project via directory search at: {abs_path}")
+                    return abs_path
+
+            # Phase 3: Broader search for any HSM projects (fallback)
+            logger.debug("Project-specific search failed, searching for any HSM projects")
+            find_cmd = 'find ~ -maxdepth 4 -name "hsm_config.yaml" -type f 2>/dev/null | head -10'
+
+            result = await conn.run(find_cmd, check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                found_configs = result.stdout.strip().split("\n")
+                logger.warning(f"Found {len(found_configs)} HSM projects on remote:")
+
+                # Check if any of these match our project name
+                project_matches = []
+                for config_path in found_configs:
+                    config_dir = str(Path(config_path).parent)
+                    logger.warning(f"  - {config_dir}")
+
+                    # Check if the directory name or parent directory name matches our project
+                    dir_parts = Path(config_dir).parts
+                    if local_project_name in dir_parts:
+                        project_matches.append(config_dir)
+
+                if len(project_matches) == 1:
+                    logger.info(f"Found unique HSM project match: {project_matches[0]}")
+                    return project_matches[0]
+                elif len(project_matches) > 1:
+                    logger.warning(f"Multiple HSM projects match '{local_project_name}':")
+                    for match in project_matches:
+                        logger.warning(f"  - {match}")
+                    logger.warning("Specify remote project_root explicitly in hsm_config.yaml")
+                    return None
+                else:
+                    logger.warning(f"No HSM projects match '{local_project_name}'")
+                    logger.warning(
+                        "Consider specifying remote project_root explicitly in hsm_config.yaml"
+                    )
+                    return None
+
+            logger.warning(f"No matching project found for '{local_project_name}' on remote")
+            return None
+
+        except Exception as e:
+            logger.warning(f"Error finding matching project: {e}")
+            return None
+
+    async def _find_hsm_config(self, conn, project_root: Optional[str] = None) -> Optional[str]:
+        """Find hsm_config.yaml on the remote machine, optionally within a specific project."""
+        if project_root:
+            # Search within the specified project root
+            search_paths = [
+                f"{project_root}/sweeps/hsm_config.yaml",
+                f"{project_root}/hsm_config.yaml",
+            ]
+
+            for path in search_paths:
+                try:
+                    result = await conn.run(f'test -f {path} && echo "found"', check=False)
+                    if result.stdout.strip() == "found":
+                        logger.debug(f"Found hsm_config.yaml at: {path}")
+                        return path
+                except Exception as e:
+                    logger.debug(f"Error checking path {path}: {e}")
+                    continue
+
+            logger.warning(f"No hsm_config.yaml found in project root: {project_root}")
+            return None
+
+        # Fallback: search in current directory and common locations
         search_paths = [
             "sweeps/hsm_config.yaml",
             "hsm_config.yaml",
@@ -246,11 +427,10 @@ class RemoteDiscovery:
                 logger.debug(f"Error checking path {path}: {e}")
                 continue
 
-        # Try to find in common project structures
+        # Try to find in current directory tree as last resort
         try:
-            # Look for any hsm_config.yaml in current directory tree
             result = await conn.run(
-                'find . -name "hsm_config.yaml" -type f 2>/dev/null | head -1',
+                'find . -maxdepth 3 -name "hsm_config.yaml" -type f 2>/dev/null | head -1',
                 check=False,
             )
             if result.stdout.strip():
@@ -298,7 +478,80 @@ class RemoteDiscovery:
         if remote_config.max_parallel_jobs is None:
             remote_config.max_parallel_jobs = hpc.get("max_array_size", 4)
 
+        # If project_root is None or empty, try to auto-detect it from other paths
+        if not remote_config.project_root:
+            logger.warning(
+                f"Project root not set in remote HSM config for {remote_config.name}, attempting auto-detection"
+            )
+
+            # Try to infer from train_script path
+            if remote_config.train_script and not remote_config.train_script.startswith("/"):
+                # Relative train script suggests current directory is project root
+                # Since hsm_config.yaml was found, use its directory as project root
+                # This will be resolved during validation when we have the hsm_config path
+                pass
+
+            # Try to infer from config_dir path
+            if remote_config.config_dir and not remote_config.config_dir.startswith("/"):
+                # Relative config directory suggests current directory is project root
+                pass
+
+            # If we still don't have a project root, we'll set it during validation
+            # based on where we found the hsm_config.yaml file
+
         return remote_config
+
+    async def _auto_detect_project_root(self, conn, hsm_config_path: str) -> Optional[str]:
+        """Auto-detect project root based on common project indicators."""
+        try:
+            # Start from the directory containing hsm_config.yaml
+            config_dir = str(Path(hsm_config_path).parent)
+
+            # Check for common project root indicators
+            project_indicators = [
+                ".git",
+                "setup.py",
+                "pyproject.toml",
+                "requirements.txt",
+                "Dockerfile",
+                ".gitignore",
+                "README.md",
+                "README.rst",
+            ]
+
+            # Check current directory (where hsm_config.yaml was found)
+            for indicator in project_indicators:
+                check_path = f"{config_dir}/{indicator}"
+                result = await conn.run(f"test -e {check_path}", check=False)
+                if result.returncode == 0:
+                    logger.debug(f"Found project indicator {indicator} in {config_dir}")
+                    return config_dir
+
+            # If not found in config directory, check parent directories up to 3 levels
+            current_dir = config_dir
+            for level in range(3):
+                parent_dir = str(Path(current_dir).parent)
+                if parent_dir == current_dir:  # Reached filesystem root
+                    break
+
+                for indicator in project_indicators:
+                    check_path = f"{parent_dir}/{indicator}"
+                    result = await conn.run(f"test -e {check_path}", check=False)
+                    if result.returncode == 0:
+                        logger.debug(f"Found project indicator {indicator} in {parent_dir}")
+                        return parent_dir
+
+                current_dir = parent_dir
+
+            # Fallback: use the directory containing hsm_config.yaml
+            logger.warning(
+                f"No project indicators found, using hsm_config.yaml directory as project root: {config_dir}"
+            )
+            return config_dir
+
+        except Exception as e:
+            logger.warning(f"Error auto-detecting project root: {e}")
+            return None
 
     async def _validate_remote_environment(self, conn, remote_config: RemoteConfig) -> bool:
         """Validate that remote environment is properly set up."""

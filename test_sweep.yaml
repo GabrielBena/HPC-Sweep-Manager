@@ -1,0 +1,7 @@
+sweep:
+  grid:
+    learning_rate: [0.001, 0.01]
+    batch_size: [16, 32]
+
+metadata:
+  description: "Test sweep for completion validation" 

@@ -8,7 +8,7 @@ from .core.common.config import SweepConfig
 from .core.common.param_generator import ParameterGenerator
 from .core.common.path_detector import PathDetector
 from .core.hpc.hpc_base import HPCJobManager
-from .core.local.manager import LocalJobManager
+from .core.local.local_manager import LocalJobManager
 
 __all__ = [
     "SweepConfig",

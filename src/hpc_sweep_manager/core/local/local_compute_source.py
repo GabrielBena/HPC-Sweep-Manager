@@ -4,9 +4,10 @@ from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import asyncio
 
 from ..common.compute_source import ComputeSource, JobInfo
-from .manager import LocalJobManager
+from .local_manager import LocalJobManager
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,8 @@ class LocalComputeSource(ComputeSource):
             scripts_dir = self.local_sweep_dir / "local_scripts"
 
             # Submit job to local manager (note: this method is not async)
-            job_id = self.local_manager.submit_single_job(
+            job_id = await asyncio.to_thread(
+                self.local_manager.submit_single_job,
                 params=params,
                 job_name=job_name,
                 sweep_dir=self.local_sweep_dir,
@@ -115,7 +117,7 @@ class LocalComputeSource(ComputeSource):
 
         try:
             # Get status from local manager (not async)
-            status = self.local_manager.get_job_status(job_id)
+            status = await asyncio.to_thread(self.local_manager.get_job_status, job_id)
 
             # Update our tracking
             if job_id in self.active_jobs:
@@ -134,7 +136,7 @@ class LocalComputeSource(ComputeSource):
 
         try:
             # Cancel job through local manager (not async)
-            success = self.local_manager.cancel_job(job_id)
+            success = await asyncio.to_thread(self.local_manager.cancel_job, job_id)
 
             if success and job_id in self.active_jobs:
                 self.update_job_status(job_id, "CANCELLED")

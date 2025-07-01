@@ -7,7 +7,7 @@ from .common.utils import create_sweep_id, setup_logging
 from .hpc.hpc_base import HPCJobManager
 from .hpc.pbs_manager import PBSJobManager
 from .hpc.slurm_manager import SlurmJobManager
-from .local.manager import LocalJobManager
+from .local.local_manager import LocalJobManager
 
 __all__ = [
     "SweepConfig",

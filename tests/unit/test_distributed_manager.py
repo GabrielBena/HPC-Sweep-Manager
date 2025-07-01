@@ -6,7 +6,7 @@ from typing import Any, Dict
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import ComputeSource, JobInfo
-from hpc_sweep_manager.core.distributed.manager import (
+from hpc_sweep_manager.core.distributed.ditributed_manager import (
     DistributedJobManager,
     DistributedSweepConfig,
     DistributionStrategy,

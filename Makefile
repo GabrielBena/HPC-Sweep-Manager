@@ -1,6 +1,6 @@
 # HSM Development Makefile
 
-.PHONY: help test test-unit test-integration test-cli test-coverage test-fast test-simple-mlp docs docs-build docs-serve clean install install-dev lint format check verify-install
+.PHONY: help test test-unit test-integration test-cli test-coverage test-fast test-simple-mlp docs docs-build docs-serve clean install install-dev lint format check verify-install analyze-code analyze-usage analyze-dead-code analyze-complexity
 
 # Default target
 help:
@@ -22,6 +22,12 @@ help:
 	@echo "  format-check      Check code formatting"
 	@echo "  ruff-all          Run all ruff operations"
 	@echo "  check             Run all checks (lint + format + test)"
+	@echo ""
+	@echo "Code Analysis:"
+	@echo "  analyze-code      Run comprehensive code analysis"
+	@echo "  analyze-usage     Analyze code usage patterns"
+	@echo "  analyze-dead-code Detect potentially dead/unused code"
+	@echo "  analyze-complexity Analyze code complexity"
 	@echo ""
 	@echo "Documentation:"
 	@echo "  docs              Build documentation"
@@ -190,4 +196,35 @@ ruff-help:
 	@echo "  make format         # Format code"
 	@echo "  make format-check   # Check if code is formatted"
 	@echo "  make ruff-all       # Run all ruff operations"
-	@echo "  make ruff-stats     # Show ruff statistics" 
+	@echo "  make ruff-stats     # Show ruff statistics"
+
+# Code Analysis targets
+analyze-code:
+	@echo "Running comprehensive code analysis..."
+	python scripts/analyze_codebase.py
+
+analyze-usage:
+	@echo "Analyzing code usage patterns..."
+	@echo "To collect usage data, run commands with: HSM_TRACK_USAGE=true hsm <command>"
+	hsm analyze report || echo "Install package first: make install-dev"
+
+analyze-dead-code:
+	@echo "Analyzing for dead/unused code..."
+	hsm analyze dead-code || echo "Install package first: make install-dev"
+
+analyze-complexity:
+	@echo "Analyzing code complexity..."
+	hsm analyze complexity || echo "Install package first: make install-dev"
+
+analyze-dependencies:
+	@echo "Analyzing module dependencies..."
+	hsm analyze dependencies || echo "Install package first: make install-dev"
+
+analyze-coverage-gaps:
+	@echo "Analyzing coverage gaps..."
+	hsm analyze coverage-gaps || echo "Run tests with coverage first: make test-coverage"
+
+# Combined analysis workflow
+analyze-all: test-coverage analyze-dead-code analyze-complexity analyze-dependencies analyze-usage
+	@echo "Complete analysis workflow finished!"
+	@echo "Review the output above for recommendations." 

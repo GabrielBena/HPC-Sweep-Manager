@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo
 from .discovery import RemoteConfig
-from .manager import RemoteJobManager
+from .remote_manager import RemoteJobManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,10 @@ class SSHComputeSource(ComputeSource):
                 show_progress=False,  # We'll handle progress at distributed level
             )
 
+            # Mark this remote manager as being used in distributed mode
+            # This enables more lenient sync verification for distributed execution
+            self.remote_manager.is_distributed_mode = True
+
             # For distributed sweeps, we want strict sync verification
             # to ensure all compute sources have the same config state
             logger.info(
@@ -72,7 +76,7 @@ class SSHComputeSource(ComputeSource):
                     f"✗ SSH compute source {self.name} setup failed - project sync required"
                 )
                 logger.error(
-                    f"  Ensure config changes are synchronized before running distributed sweep"
+                    "  Ensure config changes are synchronized before running distributed sweep"
                 )
                 return False
 

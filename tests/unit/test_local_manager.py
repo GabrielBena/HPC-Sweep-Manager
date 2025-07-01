@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hpc_sweep_manager.core.local.manager import LocalJobManager
+from hpc_sweep_manager.core.local.local_manager import LocalJobManager
 
 
 class TestLocalJobManager:

@@ -1078,7 +1078,59 @@ def delete_sweep_jobs(
     # Get detailed job status
     status_info = monitor.get_pbs_job_status(sweep_info["job_ids"])
 
-    # Collect all jobs to potentially delete
+    # Filter and collect jobs to delete based on criteria
+    jobs_to_delete = _filter_and_collect_jobs(
+        status_info=status_info,
+        pattern=pattern,
+        state=state,
+        all_states=all_states,
+    )
+
+    if not jobs_to_delete:
+        console.print("[yellow]No jobs found matching the specified criteria.[/yellow]")
+        return
+
+    # Display jobs to be deleted
+    _display_jobs_to_delete(jobs_to_delete, sweep_id, console)
+
+    if dry_run:
+        console.print("\n[yellow]DRY RUN: No jobs were actually deleted.[/yellow]")
+        return
+
+    # Get user confirmation
+    if not _get_user_confirmation(jobs_to_delete, force, console):
+        console.print("[yellow]Deletion aborted.[/yellow]")
+        return
+
+    # Delete jobs
+    console.print(f"\n[red]Deleting {len(jobs_to_delete)} jobs...[/red]")
+
+    deleted_jobs, failed_jobs = _execute_job_deletions(jobs_to_delete, console)
+
+    # Report deletion results
+    _report_deletion_results(
+        deleted_jobs=deleted_jobs,
+        failed_jobs=failed_jobs,
+        jobs_to_delete=jobs_to_delete,
+        sweep_id=sweep_id,
+        console=console,
+        logger=logger,
+    )
+
+
+def _filter_and_collect_jobs(
+    status_info: dict,
+    pattern: Optional[str],
+    state: Optional[str],
+    all_states: bool,
+) -> list:
+    """Filter jobs based on criteria and collect detailed information.
+
+    Returns:
+        List of job dictionaries with filtering applied
+    """
+    import fnmatch
+
     jobs_to_delete = []
 
     for job_id, job_details in status_info["details"].items():
@@ -1101,8 +1153,6 @@ def delete_sweep_jobs(
 
             # Pattern filtering
             if pattern and should_include:
-                import fnmatch
-
                 if not fnmatch.fnmatch(job_name, pattern) and not fnmatch.fnmatch(
                     job_full_id, pattern
                 ):
@@ -1134,9 +1184,12 @@ def delete_sweep_jobs(
                     }
                 )
 
-    if not jobs_to_delete:
-        console.print("[yellow]No jobs found matching the specified criteria.[/yellow]")
-        return
+    return jobs_to_delete
+
+
+def _display_jobs_to_delete(jobs_to_delete: list, sweep_id: str, console: Console) -> None:
+    """Display a table of jobs that will be deleted."""
+    from rich.table import Table
 
     # Display what will be deleted with array job info
     table = Table(title=f"Jobs to Delete from {sweep_id}")
@@ -1161,21 +1214,25 @@ def delete_sweep_jobs(
     console.print(table)
     console.print(f"\n[bold]Total jobs to delete: {len(jobs_to_delete)}[/bold]")
 
-    if dry_run:
-        console.print("\n[yellow]DRY RUN: No jobs were actually deleted.[/yellow]")
-        return
 
-    # Confirmation
-    if not force:
-        response = console.input(
-            f"\nAre you sure you want to delete {len(jobs_to_delete)} job(s)? (y/N): "
-        )
-        if response.lower() != "y":
-            console.print("[yellow]Deletion aborted.[/yellow]")
-            return
+def _get_user_confirmation(jobs_to_delete: list, force: bool, console: Console) -> bool:
+    """Get user confirmation for deletion unless forced."""
+    if force:
+        return True
 
-    # Delete jobs
-    console.print(f"\n[red]Deleting {len(jobs_to_delete)} jobs...[/red]")
+    response = console.input(
+        f"\nAre you sure you want to delete {len(jobs_to_delete)} job(s)? (y/N): "
+    )
+    return response.lower() == "y"
+
+
+def _execute_job_deletions(jobs_to_delete: list, console: Console) -> tuple[list, list]:
+    """Execute job deletions using appropriate strategies for different job types.
+
+    Returns:
+        Tuple of (deleted_jobs, failed_jobs) lists
+    """
+    import subprocess
 
     deleted_jobs = []
     failed_jobs = []
@@ -1267,11 +1324,37 @@ def delete_sweep_jobs(
         except Exception as e:
             failed_jobs.append((job["job_id"], str(e)))
 
+    return deleted_jobs, failed_jobs
+
+
+def _report_deletion_results(
+    deleted_jobs: list,
+    failed_jobs: list,
+    jobs_to_delete: list,
+    sweep_id: str,
+    console: Console,
+    logger: logging.Logger,
+) -> None:
+    """Report the results of job deletion operations."""
     # Report results
     if deleted_jobs:
         console.print(f"\n[green]Successfully deleted {len(deleted_jobs)} job(s):[/green]")
 
         # Group results for better reporting
+        array_parents_to_delete = set()
+        individual_subjobs_to_delete = []
+        regular_jobs_to_delete = []
+
+        # Rebuild grouping for reporting (simplified logic)
+        for job in jobs_to_delete:
+            if job["is_array_job"]:
+                if job["array_index"]:
+                    individual_subjobs_to_delete.append(job)
+                else:
+                    array_parents_to_delete.add(job["parent_job_id"])
+            else:
+                regular_jobs_to_delete.append(job)
+
         array_deletions = len(array_parents_to_delete)
         subjob_deletions = len(
             [
