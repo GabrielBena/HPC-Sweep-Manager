@@ -819,6 +819,11 @@ class SweepEngine:
                 error_message = None
                 exit_code = None
 
+            # Debug logging
+            logger.debug(
+                f"_update_single_task_status({task_id}): got status={status}, error_msg={error_message}, exit_code={exit_code}"
+            )
+
             # Log status changes
             if task_id in self.active_tasks:
                 current_task = self.active_tasks[task_id]

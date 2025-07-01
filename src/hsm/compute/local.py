@@ -89,6 +89,9 @@ class LocalComputeSource(ComputeSource):
         try:
             logger.info(f"Setting up local compute source: {self.name}")
 
+            # Store context for later use
+            self.context = context
+
             # Auto-detect script path if not provided
             if not self.script_path:
                 self.script_path = self._detect_script_path(context)
@@ -197,18 +200,29 @@ class LocalComputeSource(ComputeSource):
         Returns:
             TaskResult with current status and metadata
         """
-        if task_id not in self.active_tasks:
-            return TaskResult(
-                task_id=task_id,
-                status=TaskStatus.UNKNOWN,
-                message="Task not found in registry",
-            )
+        # First try to get status from active tasks
+        if task_id in self.active_tasks:
+            current_task = self.active_tasks[task_id]
+            current_status = getattr(current_task, "status", TaskStatus.PENDING)
+            # Get task directory from the task object
+            task_dir = getattr(current_task, "output_dir", None)
+        else:
+            # Task not in active registry - check if it has a status file on disk
+            # This handles completed/failed tasks that were removed from active_tasks
+            current_status = TaskStatus.UNKNOWN
+            current_task = None
 
-        current_task = self.active_tasks[task_id]
-        current_status = getattr(current_task, "status", TaskStatus.PENDING)
-
-        # Check if task completed and we can read additional details
-        task_dir = self.context.sweep_dir / "tasks" / task_id if hasattr(self, "context") else None
+            # Try to find task directory using sweep context or from submitted tasks registry
+            task_dir = None
+            if hasattr(self, "context") and self.context:
+                task_dir = self.context.sweep_dir / "tasks" / task_id
+            # If we don't have context, we can't check disk status
+            elif not hasattr(self, "context"):
+                return TaskResult(
+                    task_id=task_id,
+                    status=TaskStatus.UNKNOWN,
+                    message="Task not found in registry and no context available",
+                )
 
         error_message = None
         exit_code = None
@@ -225,6 +239,16 @@ class LocalComputeSource(ComputeSource):
                         status_data = yaml.safe_load(f)
 
                     if status_data:
+                        # Update current_status from file if we don't have it from active tasks
+                        if current_status == TaskStatus.UNKNOWN and "status" in status_data:
+                            try:
+                                current_status = TaskStatus(status_data["status"])
+                            except ValueError:
+                                logger.debug(
+                                    f"Unknown status in file for {task_id}: {status_data['status']}"
+                                )
+                                current_status = TaskStatus.UNKNOWN
+
                         error_message = status_data.get("error_message")
                         exit_code = status_data.get("exit_code")
                         if status_data.get("complete_time"):
@@ -249,12 +273,35 @@ class LocalComputeSource(ComputeSource):
             except Exception as e:
                 logger.debug(f"Error reading task details for {task_id}: {e}")
 
-        return TaskResult(
+        # If we still don't have a status and task is not in active registry,
+        # it might be a task that was never submitted or is truly unknown
+        if current_status == TaskStatus.UNKNOWN and task_id not in self.active_tasks:
+            return TaskResult(
+                task_id=task_id,
+                status=TaskStatus.UNKNOWN,
+                message="Task not found in registry and no status file available",
+            )
+
+        # Create TaskResult with proper field names expected by SweepEngine
+        result = TaskResult(
             task_id=task_id,
             status=current_status,
-            message=error_message,
+            message=error_message,  # This is the general message field
             timestamp=complete_time or datetime.now(),
         )
+
+        # Add error_message and exit_code as attributes for SweepEngine compatibility
+        if error_message:
+            result.error_message = error_message
+        if exit_code is not None:
+            result.exit_code = exit_code
+
+        # Debug logging
+        logger.debug(
+            f"get_task_status({task_id}): status={current_status}, in_active={task_id in self.active_tasks}, task_dir_exists={task_dir.exists() if task_dir else False}"
+        )
+
+        return result
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running task.
@@ -503,17 +550,13 @@ class LocalComputeSource(ComputeSource):
                 # Determine final status
                 if exit_code == 0:
                     final_status = TaskStatus.COMPLETED
-                    self.stats.tasks_completed += 1
                     logger.info(f"Task {task.task_id} completed successfully")
                 else:
                     final_status = TaskStatus.FAILED
-                    self.stats.tasks_failed += 1
                     logger.warning(f"Task {task.task_id} failed with exit code {exit_code}")
 
-                # Update status and move task appropriately
+                # Update status (this also updates stats and removes from active_tasks)
                 self.update_task_status(task.task_id, final_status)
-                if task.task_id in self.active_tasks:
-                    del self.active_tasks[task.task_id]
 
                 # Write outputs and status to the task directory
                 await self._write_output_files_to_dir(task_dir, stdout_bytes, stderr_bytes)
@@ -529,12 +572,8 @@ class LocalComputeSource(ComputeSource):
             except Exception as e:
                 logger.error(f"Error executing task {task.task_id}: {e}")
 
-                # Update status and move task appropriately
+                # Update status (this also updates stats and removes from active_tasks)
                 self.update_task_status(task.task_id, TaskStatus.FAILED)
-                if task.task_id in self.active_tasks:
-                    del self.active_tasks[task.task_id]
-
-                self.stats.tasks_failed += 1
 
                 await self._write_task_status_to_dir(
                     task_dir,

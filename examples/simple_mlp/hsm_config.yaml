@@ -1,7 +1,7 @@
 compute:
   default_timeout: null
   health_check_interval: 300
-  max_concurrent_local: 4
+  max_concurrent_local: 1
   max_concurrent_remote: 10
   result_collection_interval: 60
   retry_attempts: 3

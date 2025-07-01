@@ -11,8 +11,8 @@ from rich.table import Table
 from ..config.hsm import HSMConfig
 from ..config.sweep import SweepConfig
 from ..core.engine import SweepEngine
-from ..utils.logging import get_logger
 from ..utils.common import create_sweep_id
+from ..utils.logging import get_logger
 from .utils import create_compute_source, format_duration, parse_compute_sources
 
 
