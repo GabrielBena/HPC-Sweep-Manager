@@ -225,88 +225,87 @@ class RemoteJobManager(BaseJobManager):
                 sync_performed = False
                 if verify_sync:
                     sync_checker = ProjectStateChecker(str(Path.cwd()), self.remote_config)
-                    sync_result = await sync_checker.verify_project_sync(conn)
 
-                    if not sync_result["in_sync"]:
-                        logger.warning("Project synchronization verification detected differences.")
+                    # For distributed mode, we MUST enforce strict sync
+                    if hasattr(self, "is_distributed_mode") and self.is_distributed_mode:
+                        logger.info("🔒 Distributed mode: enforcing strict project synchronization")
+                        logger.info("   Config file mismatches will prevent execution")
 
-                        # Check if this is a minor sync issue that we can work around
-                        is_minor_issue = sync_checker.is_minor_sync_issue(sync_result)
+                        # Use the new strict sync enforcement
+                        sync_result = await sync_checker.verify_and_enforce_sync(
+                            conn, auto_sync=auto_sync, interactive=interactive and not auto_sync
+                        )
 
-                        if is_minor_issue:
-                            logger.warning(
-                                "Detected minor sync differences that may not affect execution"
+                        if not sync_result["in_sync"]:
+                            logger.error("❌ CRITICAL: Project sync enforcement failed!")
+                            logger.error(
+                                "   Distributed execution requires identical configs across all sources"
                             )
-                            # For distributed mode, we can be more lenient with minor issues
-                            if hasattr(self, "is_distributed_mode") and self.is_distributed_mode:
-                                logger.info(
-                                    "In distributed mode - proceeding with minor sync differences"
-                                )
-                                logger.info(
-                                    "Remote execution will proceed, but some config files may not be in sync"
-                                )
-                                # Continue setup despite minor sync issues in distributed mode
-                            else:
-                                # In standalone remote mode, be more strict
-                                self._show_sync_error_details(sync_result)
-                                return False
-                        else:
-                            # Determine if we can offer sync (only for certain types of mismatches)
-                            can_offer_sync = sync_checker.can_offer_sync(sync_result)
+                            logger.error("   Cannot proceed with mismatched project state")
 
-                            if can_offer_sync and auto_sync:
-                                logger.info("Auto-syncing local changes to remote machine...")
-                                sync_success = await self._sync_mismatched_files(conn, sync_result)
-                                if sync_success:
-                                    logger.info("✓ Successfully synced local changes to remote")
+                            if sync_result["errors"]:
+                                for error in sync_result["errors"]:
+                                    logger.error(f"   • {error}")
+
+                            return False
+
+                        if sync_result["sync_performed"]:
+                            logger.info(
+                                f"✅ Successfully synced {len(sync_result['files_synced'])} files to remote"
+                            )
+                            sync_performed = True
+
+                        logger.info(
+                            "✅ Strict project synchronization verified for distributed execution"
+                        )
+
+                    else:
+                        # For standalone remote mode, use the legacy method but still be strict
+                        logger.info("🔍 Standalone remote mode: verifying project synchronization")
+                        sync_result = await sync_checker.verify_project_sync(conn)
+
+                        if not sync_result["in_sync"]:
+                            logger.warning(
+                                "Project synchronization verification detected differences."
+                            )
+
+                            # Show detailed error information
+                            self._show_sync_error_details(sync_result)
+
+                            # For standalone mode, we can still be lenient if user chooses
+                            if auto_sync:
+                                logger.info("Auto-sync enabled, attempting to sync...")
+                                sync_result = await sync_checker.verify_and_enforce_sync(
+                                    conn, auto_sync=True, interactive=False
+                                )
+
+                                if sync_result["in_sync"]:
+                                    logger.info("✅ Auto-sync completed successfully")
                                     sync_performed = True
                                 else:
-                                    logger.error("Failed to sync changes to remote")
+                                    logger.error("❌ Auto-sync failed")
                                     return False
-                            elif can_offer_sync and interactive:
-                                sync_choice = self._prompt_for_sync(sync_result, conn)
-                                if sync_choice is True:
-                                    logger.info("Syncing changes between local and remote...")
-                                    sync_success = await self._sync_mismatched_files(
-                                        conn, sync_result
-                                    )
-                                    if sync_success:
-                                        logger.info("✓ Successfully synchronized local and remote")
-                                        sync_performed = True
-                                    else:
-                                        logger.error("Failed to sync changes")
-                                        return False
-                                elif sync_choice == "reverse":
-                                    logger.info("Bringing remote changes to local...")
-                                    sync_success = await self._reverse_sync_from_remote(
-                                        conn, sync_result
-                                    )
-                                    if sync_success:
-                                        logger.info(
-                                            "✓ Successfully brought remote changes to local"
-                                        )
-                                        sync_performed = True
-                                    else:
-                                        logger.error("Failed to bring remote changes to local")
-                                        return False
+                            elif interactive:
+                                logger.info("Interactive mode: offering sync options...")
+                                sync_result = await sync_checker.verify_and_enforce_sync(
+                                    conn, auto_sync=False, interactive=True
+                                )
+
+                                if sync_result["in_sync"]:
+                                    logger.info("✅ Interactive sync completed successfully")
+                                    sync_performed = True
                                 else:
-                                    # User declined sync - show error and exit (no skip option)
-                                    self._show_sync_error_details(sync_result)
+                                    logger.error("❌ User declined sync or sync failed")
                                     return False
                             else:
-                                # Cannot offer safe sync - show error and exit
-                                self._show_sync_error_details(sync_result)
-                                logger.error(
-                                    "Automatic sync is not safe for this type of mismatch."
-                                )
-                                logger.error(
-                                    "Please manually synchronize the projects before running the sweep."
-                                )
+                                logger.error("❌ Sync required but not in auto or interactive mode")
                                 return False
-                    else:
-                        logger.info(
-                            f"✓ Project synchronization verified ({sync_result['method']} method)"
-                        )
+                        else:
+                            logger.info(
+                                "✓ Project synchronization verified for standalone remote execution"
+                            )
+                else:
+                    logger.info("✓ Project synchronization verification skipped")
 
                 # 3. Create remote sweep directory within outputs/ subdirectory (consistent with local)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1036,7 +1035,7 @@ class RemoteJobManager(BaseJobManager):
         if job_ids is None:
             job_ids = list(self.running_jobs.keys())
 
-        logger.debug(f"Collecting results from {len(job_ids)} jobs on {self.remote_config.name}")
+        logger.info(f"Collecting results from {len(job_ids)} jobs on {self.remote_config.name}")
 
         try:
             # Create local remote tasks directory
@@ -1048,20 +1047,62 @@ class RemoteJobManager(BaseJobManager):
             success_count = 0
             # Use rsync to collect all task directories
             if self.remote_tasks_dir:
+                # First, check what's actually on the remote before syncing
+                try:
+                    async with await create_ssh_connection(
+                        self.remote_config.host,
+                        self.remote_config.ssh_key,
+                        self.remote_config.ssh_port,
+                    ) as conn:
+                        # List what's in the remote tasks directory
+                        check_cmd = f"ls -la {self.remote_tasks_dir}/ 2>/dev/null || echo 'EMPTY_OR_MISSING'"
+                        check_result = await conn.run(check_cmd, check=False)
+
+                        if "EMPTY_OR_MISSING" in check_result.stdout:
+                            logger.warning(
+                                f"Remote tasks directory is empty or missing: {self.remote_tasks_dir}"
+                            )
+                            logger.warning(
+                                "This may explain why result collection finds no task directories"
+                            )
+                        else:
+                            logger.debug(f"Remote tasks directory contents:\n{check_result.stdout}")
+
+                        # Also check if any job-specific directories exist
+                        for job_id in job_ids:
+                            # Extract task name from job name/id
+                            task_check_cmd = f"find {self.remote_tasks_dir} -name '*{job_id}*' -type d 2>/dev/null || echo 'NOT_FOUND'"
+                            task_result = await conn.run(task_check_cmd, check=False)
+                            if "NOT_FOUND" not in task_result.stdout and task_result.stdout.strip():
+                                logger.debug(
+                                    f"Found remote directories for job {job_id}:\n{task_result.stdout}"
+                                )
+                            else:
+                                logger.warning(f"No remote directory found for job {job_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to check remote directory contents: {e}")
+
                 rsync_cmd = (
                     f"rsync -avz --compress-level=6 "
                     f"{self.remote_config.host}:{self.remote_tasks_dir}/ "
                     f"{local_remote_tasks}/"
                 )
 
-                logger.debug(f"Result collection rsync: {rsync_cmd}")
+                logger.info(f"Result collection rsync: {rsync_cmd}")
 
                 import subprocess
 
                 result = subprocess.run(rsync_cmd, shell=True, capture_output=True, text=True)
 
                 if result.returncode == 0:
-                    logger.debug(f"Results collected successfully from {self.remote_config.name}")
+                    logger.info(f"Rsync completed successfully from {self.remote_config.name}")
+                    if result.stdout.strip():
+                        logger.debug(f"Rsync stdout:\n{result.stdout}")
+                    else:
+                        logger.warning(
+                            "Rsync completed but produced no output - no files may have been transferred"
+                        )
+
                     success_count += 1
 
                     # Also collect error summaries if they exist
@@ -1075,7 +1116,10 @@ class RemoteJobManager(BaseJobManager):
                         await self.cleanup_remote_environment()
 
                 else:
-                    logger.error(f"Result collection failed: {result.stderr}")
+                    logger.error(f"Result collection failed with exit code {result.returncode}")
+                    logger.error(f"Rsync stderr: {result.stderr}")
+                    if result.stdout:
+                        logger.error(f"Rsync stdout: {result.stdout}")
 
             # Check if we have a failed_tasks directory that was immediately synced
             failed_tasks_dir = self.local_sweep_dir / "failed_tasks"

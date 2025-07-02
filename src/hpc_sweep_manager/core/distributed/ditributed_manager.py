@@ -266,8 +266,11 @@ class DistributedJobManager:
         logger.debug(f"Added compute source: {source}")
 
     async def setup_all_sources(self, sweep_id: str) -> bool:
-        """Setup all compute sources for job execution."""
+        """Setup all compute sources for job execution with strict sync requirements."""
         logger.info(f"Setting up {len(self.sources)} compute sources for distributed execution")
+        logger.info(
+            "🔒 Distributed mode requires strict project synchronization across all sources"
+        )
 
         setup_tasks = []
         for source in self.sources:
@@ -278,6 +281,7 @@ class DistributedJobManager:
 
         successful_sources = []
         failed_sources = []
+        sync_failed_sources = []
 
         for i, result in enumerate(results):
             source = self.sources[i]
@@ -288,8 +292,33 @@ class DistributedJobManager:
                 logger.debug(f"✓ Setup successful for {source.name}")
                 successful_sources.append(source.name)
             else:
-                logger.error(f"Setup failed for {source.name}")
-                failed_sources.append(source.name)
+                logger.error(f"Setup failed for {source.name} (likely sync enforcement failure)")
+                # Check if this was a sync failure by examining the source type
+                if hasattr(source, "remote_manager"):
+                    sync_failed_sources.append(source.name)
+                else:
+                    failed_sources.append(source.name)
+
+        # For distributed execution, we need ALL sources to be properly synced
+        # We cannot proceed if any remote source failed sync verification
+        if sync_failed_sources:
+            logger.error("🚨 CRITICAL: Distributed execution cannot proceed!")
+            logger.error(f"   Project sync enforcement failed for: {sync_failed_sources}")
+            logger.error(
+                "   Distributed sweeps require identical configs across ALL compute sources"
+            )
+            logger.error("   This prevents inconsistent results and ensures reproducibility")
+            logger.error("")
+            logger.error("📋 TO FIX THIS:")
+            logger.error("   1. Review the sync differences shown above")
+            logger.error("   2. Confirm that local changes should take priority")
+            logger.error("   3. Re-run the command and accept the sync operation when prompted")
+            logger.error("   4. Only hsm_config.yaml is allowed to differ between sources")
+
+            # Clear all sources since we cannot proceed
+            self.sources = []
+            self.source_by_name = {}
+            return False
 
         if not successful_sources:
             logger.error("No compute sources successfully set up")
@@ -299,14 +328,16 @@ class DistributedJobManager:
             return False
 
         if failed_sources:
-            logger.warning(f"Some sources failed setup: {failed_sources}")
+            logger.warning(f"Some sources failed setup (non-sync issues): {failed_sources}")
+            # For non-sync failures, we can continue with remaining sources
             # Remove failed sources
             self.sources = [s for s in self.sources if s.name in successful_sources]
             self.source_by_name = {
                 name: s for name, s in self.source_by_name.items() if name in successful_sources
             }
 
-        logger.info(f"✓ {len(successful_sources)} compute sources ready for distributed execution")
+        logger.info(f"✅ {len(successful_sources)} compute sources ready for distributed execution")
+        logger.info("🔒 All sources have verified identical project configurations")
         return True
 
     async def submit_distributed_sweep(
@@ -983,8 +1014,14 @@ class DistributedJobManager:
             logger.debug(f"Current tasks directory contents: {list(unified_tasks_dir.iterdir())}")
             logger.debug(f"Task-to-source mapping: {self.task_to_source}")
 
+            # Check if this is a completion run
+            is_completion_run = (
+                hasattr(self, "preserve_existing_mapping") and self.preserve_existing_mapping
+            )
+
             # Process each task and move results to the correct location
             moved_count = 0
+            backup_count = 0
             for task_name, source_name in self.task_to_source.items():
                 source_results_dir = None
 
@@ -1031,9 +1068,44 @@ class DistributedJobManager:
                             logger.info(f"✓ Unified {source_name}:{task_name} -> {task_name}")
                             moved_count += 1
                         else:
-                            logger.warning(
-                                f"Target directory {task_name} already exists, cannot move from {source_results_dir}"
-                            )
+                            # Target directory already exists - handle based on completion run status
+                            if is_completion_run:
+                                # For completion runs, check if the new results should overwrite
+                                should_overwrite = await self._should_overwrite_existing_task(
+                                    source_results_dir, target_dir, task_name, source_name
+                                )
+
+                                if should_overwrite:
+                                    import shutil
+                                    from datetime import datetime
+
+                                    # Create backup of existing directory
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    backup_dir = target_dir.with_name(
+                                        f"{task_name}_backup_{timestamp}"
+                                    )
+
+                                    logger.info(f"Backing up existing {target_dir} -> {backup_dir}")
+                                    shutil.move(str(target_dir), str(backup_dir))
+                                    backup_count += 1
+
+                                    # Now move the new results
+                                    logger.info(
+                                        f"Overwriting {task_name} with new results from {source_name}"
+                                    )
+                                    shutil.move(str(source_results_dir), str(target_dir))
+                                    logger.info(
+                                        f"✓ Updated {source_name}:{task_name} -> {task_name} (backup created)"
+                                    )
+                                    moved_count += 1
+                                else:
+                                    logger.info(
+                                        f"Keeping existing {task_name} results (new results from {source_name} not better)"
+                                    )
+                            else:
+                                logger.warning(
+                                    f"Target directory {task_name} already exists, cannot move from {source_results_dir}"
+                                )
                     else:
                         logger.debug(f"Task {task_name} already in correct location: {target_dir}")
                 else:
@@ -1055,20 +1127,195 @@ class DistributedJobManager:
                         except OSError as e:
                             logger.debug(f"Could not remove directory {remote_dir.name}: {e}")
 
-            # Final verification
-            final_contents = [d for d in unified_tasks_dir.iterdir() if d.is_dir()]
-            task_dirs = [d for d in final_contents if d.name.startswith("task_")]
+            # After normalization, verify task statuses from actual directories
+            await self._verify_task_statuses_from_directories()
 
             logger.info(
                 f"✓ Results normalization completed: {moved_count} directories moved, {cleaned_dirs} empty directories removed"
             )
-            logger.info(
-                f"Final structure: {len(task_dirs)} task directories: {[d.name for d in task_dirs]}"
-            )
+            if backup_count > 0:
+                logger.info(f"✓ Created {backup_count} backups for overwritten tasks")
 
         except Exception as e:
             logger.error(f"Error normalizing results structure: {e}")
             # Don't raise - this shouldn't fail the entire sweep
+
+    async def _should_overwrite_existing_task(
+        self, source_dir: Path, target_dir: Path, task_name: str, source_name: str
+    ) -> bool:
+        """
+        Determine if we should overwrite an existing task directory with new results.
+        For completion runs, we want to overwrite if the new task succeeded.
+        """
+        try:
+            # Check the status of the new results
+            new_task_info = source_dir / "task_info.txt"
+            if not new_task_info.exists():
+                logger.debug(f"No task_info.txt in new results for {task_name}, skipping overwrite")
+                return False
+
+            with open(new_task_info) as f:
+                new_content = f.read()
+
+            # Check if new task completed successfully
+            new_status_lines = [
+                line for line in new_content.split("\n") if line.startswith("Status: ")
+            ]
+            if not new_status_lines:
+                logger.debug(f"No status found in new results for {task_name}, skipping overwrite")
+                return False
+
+            new_status = new_status_lines[-1]  # Get last status
+            new_completed = "COMPLETED" in new_status
+
+            if not new_completed:
+                logger.debug(f"New results for {task_name} not completed, skipping overwrite")
+                return False
+
+            # Check the status of existing results
+            existing_task_info = target_dir / "task_info.txt"
+            if not existing_task_info.exists():
+                logger.info(
+                    f"Existing {task_name} has no task_info.txt, overwriting with completed results"
+                )
+                return True
+
+            with open(existing_task_info) as f:
+                existing_content = f.read()
+
+            existing_status_lines = [
+                line for line in existing_content.split("\n") if line.startswith("Status: ")
+            ]
+            if not existing_status_lines:
+                logger.info(
+                    f"Existing {task_name} has no status, overwriting with completed results"
+                )
+                return True
+
+            existing_status = existing_status_lines[-1]  # Get last status
+            existing_completed = "COMPLETED" in existing_status
+            existing_failed = "FAILED" in existing_status
+            existing_cancelled = "CANCELLED" in existing_status
+
+            # Overwrite if existing task failed/cancelled and new task completed
+            if (existing_failed or existing_cancelled) and new_completed:
+                logger.info(
+                    f"Overwriting {existing_status.strip()} task {task_name} with completed results from {source_name}"
+                )
+                return True
+
+            # Don't overwrite if existing task already completed (unless we have good reason)
+            if existing_completed:
+                logger.debug(f"Existing {task_name} already completed, keeping existing results")
+                return False
+
+            # Default: overwrite if new task completed
+            logger.info(f"Overwriting {task_name} with completed results from {source_name}")
+            return True
+
+        except Exception as e:
+            logger.warning(f"Error checking task status for overwrite decision on {task_name}: {e}")
+            return False
+
+    async def _verify_task_statuses_from_directories(self):
+        """
+        Verify and correct task statuses by reading actual task_info.txt files.
+        This ensures we catch any status discrepancies between job tracking and actual results.
+        """
+        logger.debug("Verifying task statuses from actual task directories...")
+
+        try:
+            tasks_dir = self.sweep_dir / "tasks"
+            if not tasks_dir.exists():
+                return
+
+            status_corrections = 0
+            for task_dir in tasks_dir.iterdir():
+                if not task_dir.is_dir() or not task_dir.name.startswith("task_"):
+                    continue
+
+                task_name = task_dir.name
+                task_info_file = task_dir / "task_info.txt"
+
+                if not task_info_file.exists():
+                    continue
+
+                try:
+                    with open(task_info_file) as f:
+                        content = f.read()
+
+                    # Get the last status line (most recent)
+                    status_lines = [
+                        line for line in content.split("\n") if line.startswith("Status: ")
+                    ]
+                    if not status_lines:
+                        continue
+
+                    actual_status_line = status_lines[-1]
+                    if "COMPLETED" in actual_status_line:
+                        actual_status = "COMPLETED"
+                    elif "FAILED" in actual_status_line:
+                        actual_status = "FAILED"
+                    elif "CANCELLED" in actual_status_line:
+                        actual_status = "CANCELLED"
+                    elif "RUNNING" in actual_status_line:
+                        actual_status = "RUNNING"
+                    else:
+                        continue
+
+                    # Find the corresponding job in our tracking
+                    job_to_update = None
+                    for job_id, job_info in self.all_jobs.items():
+                        if (
+                            task_name in job_info.job_name
+                            or f"task_{job_info.job_name.split('_')[-1]}" == task_name
+                        ):
+                            job_to_update = job_info
+                            break
+
+                    if job_to_update and job_to_update.status != actual_status:
+                        old_status = job_to_update.status
+                        job_to_update.status = actual_status
+
+                        # Also update completion time if task completed or failed
+                        if actual_status in ["COMPLETED", "FAILED", "CANCELLED"]:
+                            end_time_lines = [
+                                line
+                                for line in content.split("\n")
+                                if line.startswith("End Time: ")
+                            ]
+                            if end_time_lines and not job_to_update.complete_time:
+                                try:
+                                    from datetime import datetime
+
+                                    end_time_str = (
+                                        end_time_lines[-1].split("End Time:", 1)[1].strip()
+                                    )
+                                    # Try to parse the end time (format might vary)
+                                    job_to_update.complete_time = datetime.now()  # Fallback to now
+                                except:
+                                    job_to_update.complete_time = datetime.now()
+
+                        logger.info(
+                            f"Corrected status for {task_name}: {old_status} -> {actual_status}"
+                        )
+                        status_corrections += 1
+
+                except Exception as e:
+                    logger.debug(f"Error reading task info for {task_name}: {e}")
+                    continue
+
+            if status_corrections > 0:
+                logger.info(
+                    f"✓ Corrected {status_corrections} task statuses from directory verification"
+                )
+                # Update our progress stats with corrected information
+                self._update_progress_stats()
+            else:
+                logger.debug("All task statuses verified - no corrections needed")
+
+        except Exception as e:
+            logger.warning(f"Error in task status verification: {e}")
 
     async def _save_source_mapping(self):
         """Save a mapping of which tasks ran on which compute sources."""

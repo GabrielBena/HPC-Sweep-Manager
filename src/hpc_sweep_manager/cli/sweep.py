@@ -1189,6 +1189,14 @@ def complete_cmd(
 
     console.print(table)
 
+    # Show status fixes if any were made
+    if analysis.get("status_fixes_made", False):
+        console.print("\n[yellow]🔧 Status corrections were made:[/yellow]")
+        console.print("• Some tasks had incorrect status in the tracking file")
+        console.print("• The status was corrected by checking actual task directories")
+        console.print("• This ensures accurate completion analysis")
+        console.print("• The corrected status is now saved to source_mapping.yaml")
+
     if not analysis["needs_completion"]:
         console.print("\n[green]✓ Sweep is already complete![/green]")
         return
@@ -1436,12 +1444,21 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
 
         console.print(table)
 
-        if analysis["needs_completion"]:
-            console.print(
-                f"\n[yellow]⚠ Sweep needs completion. Run 'hsm sweep complete {sweep_id}' to finish it.[/yellow]"
-            )
-        else:
-            console.print("\n[green]✓ Sweep is complete![/green]")
+        # Show status fixes if any were made
+        if analysis.get("status_fixes_made", False):
+            console.print("\n[yellow]🔧 Status corrections were made:[/yellow]")
+            console.print("• Some tasks had incorrect status in the tracking file")
+            console.print("• The status was corrected by checking actual task directories")
+            console.print("• This ensures accurate completion analysis")
+            console.print("• The corrected status is now saved to source_mapping.yaml")
+
+        if not analysis["needs_completion"]:
+            console.print("\n[green]✓ Sweep is already complete![/green]")
+            return
+
+        console.print(
+            f"\n[yellow]⚠ Sweep needs completion. Run 'hsm sweep complete {sweep_id}' to finish it.[/yellow]"
+        )
 
     else:
         console.print("[red]Error: Please specify a sweep ID or use --all/--incomplete-only[/red]")

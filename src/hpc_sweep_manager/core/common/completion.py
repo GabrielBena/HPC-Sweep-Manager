@@ -74,7 +74,7 @@ class SweepCompletionAnalyzer:
         failed_tasks = []
         cancelled_tasks = []
         running_tasks = []
-        status_fixes_made = False
+        status_fixes_count = 0
 
         for task_id, task_info in task_assignments.items():
             status = task_info.get("status", "UNKNOWN")
@@ -92,11 +92,23 @@ class SweepCompletionAnalyzer:
                     logger.info(f"Updated {task_id} status from RUNNING to {actual_status}")
                     status = actual_status
                     task_info["status"] = actual_status
-                    status_fixes_made = True
+                    status_fixes_count += 1
                 else:
                     logger.warning(
                         f"Could not determine actual status for {task_id}, keeping as RUNNING"
                     )
+
+            # CRITICAL: For completion analysis, always verify status against actual directories
+            # This catches cases where job tracking was wrong (like silent local failures)
+            actual_status = self._get_actual_task_status(task_id)
+            if actual_status and actual_status != status:
+                logger.warning(
+                    f"Status mismatch for {task_id}: mapping shows {status}, directory shows {actual_status}"
+                )
+                logger.info(f"Correcting {task_id} status: {status} -> {actual_status}")
+                status = actual_status
+                task_info["status"] = actual_status
+                status_fixes_count += 1
 
             if status == "COMPLETED":
                 completed_tasks.append(task_id)
@@ -108,12 +120,12 @@ class SweepCompletionAnalyzer:
                 running_tasks.append(task_id)
 
         # Save the corrected mapping if we made any status fixes
-        if status_fixes_made:
+        if status_fixes_count > 0:
             try:
                 with open(self.source_mapping_path, "w") as f:
                     yaml.dump(self.source_mapping, f, default_flow_style=False, indent=2)
                 logger.info(
-                    f"Saved corrected source mapping with {len([t for t in task_assignments.values() if t.get('status') == 'COMPLETED'])} status fixes"
+                    f"Saved corrected source mapping with {status_fixes_count} status fixes"
                 )
             except Exception as e:
                 logger.error(f"Error saving corrected source mapping: {e}")
@@ -174,6 +186,7 @@ class SweepCompletionAnalyzer:
             "cancelled_combinations": self.cancelled_combinations,
             "needs_completion": total_missing > 0 or total_failed > 0 or total_cancelled > 0,
             "source_mapping_exists": self.source_mapping_path.exists(),
+            "status_fixes_made": status_fixes_count > 0,
         }
 
     def _get_combinations_for_tasks(self, task_ids: List[str]) -> List[Dict[str, Any]]:
@@ -267,6 +280,31 @@ class SweepCompletionAnalyzer:
                         elif "Status: CANCELLED" in last_status_line:
                             return "CANCELLED"
                         elif "Status: RUNNING" in last_status_line:
+                            # If we find RUNNING but the process finished, it might be stale
+                            # Check if there are any process-related files that indicate completion
+                            pid_files = list(task_dir.glob("*.pid"))
+                            if pid_files:
+                                # If we have PID files, check if processes are still running
+                                import subprocess
+
+                                for pid_file in pid_files:
+                                    try:
+                                        with open(pid_file) as f:
+                                            pid = f.read().strip()
+                                        if pid and pid.isdigit():
+                                            # Check if process is still running
+                                            result = subprocess.run(
+                                                ["ps", "-p", pid], capture_output=True, text=True
+                                            )
+                                            if result.returncode != 0:
+                                                # Process not running but status shows RUNNING
+                                                # This is likely a failed task that didn't update status
+                                                logger.debug(
+                                                    f"Process {pid} not running for {task_id}, likely failed"
+                                                )
+                                                return "FAILED"
+                                    except:
+                                        pass
                             return "RUNNING"
 
             return None
@@ -594,6 +632,19 @@ class SweepCompletor:
             remote_name = kwargs.get("remote")
             no_verify_sync = kwargs.get("no_verify_sync", False)
             auto_sync = kwargs.get("auto_sync", False)
+
+            # For completion runs, we MUST verify sync to ensure consistency
+            if mode == "distributed":
+                logger.info("🔒 Completion run in distributed mode: enforcing strict project sync")
+                logger.info("   This ensures consistent results across all compute sources")
+                # Override sync settings for completion safety
+                no_verify_sync = False  # Always verify sync for distributed completion
+                # Keep auto_sync as provided by user, but warn if disabled
+                if not auto_sync:
+                    logger.warning(
+                        "⚠️  Auto-sync disabled - you will be prompted to confirm sync operations"
+                    )
+                    logger.warning("   Consider using --auto-sync for unattended completion runs")
 
             # Create job manager based on mode (similar to main sweep logic)
             job_manager = None

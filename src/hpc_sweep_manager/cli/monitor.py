@@ -1564,10 +1564,18 @@ def _get_state_color(state: str) -> str:
 
 
 # CLI command group structure
-@click.group()
-def monitor():
+@click.group(invoke_without_command=True)
+@click.option("--days", "-d", type=int, default=7, help="Show sweeps from last N days")
+@click.pass_context
+def monitor(ctx, days: int):
     """Monitor and manage sweep execution."""
-    pass
+    if ctx.invoked_subcommand is None:
+        # Default behavior: show recent sweeps
+        console = ctx.obj["console"]
+        logger = ctx.obj["logger"]
+        _display_all_sweeps_status(
+            SweepMonitor(console, logger, days=days), console, detailed=False
+        )
 
 
 @monitor.command("watch")

@@ -47,37 +47,38 @@ class SSHComputeSource(ComputeSource):
             )
 
             # Mark this remote manager as being used in distributed mode
-            # This enables more lenient sync verification for distributed execution
+            # This enforces strict sync verification for distributed execution
             self.remote_manager.is_distributed_mode = True
 
             # For distributed sweeps, we want strict sync verification
             # to ensure all compute sources have the same config state
             logger.info(
-                f"Verifying project sync for {self.name} (ensuring consistent config across all GPUs)"
+                f"🔒 Verifying strict project sync for {self.name} (ensuring identical configs across all sources)"
             )
 
             # Setup remote environment with strict sync verification
             setup_success = await self.remote_manager.setup_remote_environment(
                 verify_sync=True,  # Always verify sync for distributed execution
-                auto_sync=False,  # Don't auto-sync, show user what will be synced
-                interactive=True,  # Allow user to review config changes before syncing
+                auto_sync=False,  # Don't auto-sync, require user confirmation for safety
+                interactive=True,  # Allow user to review and confirm sync changes
             )
 
             if setup_success:
                 self.stats.health_status = "healthy"
                 self.stats.last_health_check = datetime.now()
                 logger.info(
-                    f"✓ SSH compute source {self.name} setup successful - project state synchronized"
+                    f"✅ SSH compute source {self.name} setup successful - strict project sync enforced"
                 )
                 return True
             else:
                 self.stats.health_status = "unhealthy"
                 logger.error(
-                    f"✗ SSH compute source {self.name} setup failed - project sync required"
+                    f"❌ SSH compute source {self.name} setup failed - project sync enforcement failed"
                 )
                 logger.error(
-                    "  Ensure config changes are synchronized before running distributed sweep"
+                    "   Distributed execution requires identical configs across all compute sources"
                 )
+                logger.error("   Ensure local changes are synced before running distributed sweep")
                 return False
 
         except Exception as e:

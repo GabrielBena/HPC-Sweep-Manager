@@ -9,11 +9,8 @@ from ..common.path_detector import PathDetector
 from ..local.local_compute_source import LocalComputeSource
 from ..remote.discovery import RemoteDiscovery
 from ..remote.ssh_compute_source import SSHComputeSource
-from .ditributed_manager import (
-    DistributedJobManager,
-    DistributedSweepConfig,
-    DistributionStrategy,
-)
+from .base_distributed_manager import DistributedSweepConfig, DistributionStrategy
+from .distributed_job_manager import DistributedJobManager
 
 logger = logging.getLogger(__name__)
 

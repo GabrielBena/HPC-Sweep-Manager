@@ -5,17 +5,17 @@ This module provides decorators and utilities to track function calls, method us
 and module imports to identify unused or underutilized code.
 """
 
+from collections import defaultdict
+from datetime import datetime
 import functools
 import inspect
 import json
 import logging
 import os
-import time
-from collections import defaultdict
 from pathlib import Path
-from typing import Any, Callable, Dict, Set, Optional
 import threading
-from datetime import datetime
+import time
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
