@@ -137,7 +137,7 @@ cd {self.project_dir}
         tasks_dir.mkdir(parents=True, exist_ok=True)
 
         # Save parameter combinations to JSON file
-        params_file = pbs_dir / f"{sweep_id}_params.json"
+        params_file = sweep_dir / "parameter_combinations.json"
         indexed_combinations = [
             {"index": i + 1, "params": params} for i, params in enumerate(param_combinations)
         ]

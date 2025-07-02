@@ -138,7 +138,7 @@ class PBSJobManager(HPCJobManager):
         tasks_dir.mkdir(exist_ok=True)
 
         # Save parameter combinations to JSON file
-        params_file = pbs_dir / f"{sweep_id}_params.json"
+        params_file = sweep_dir / "parameter_combinations.json"
         import json
 
         indexed_combinations = [
