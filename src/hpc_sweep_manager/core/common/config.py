@@ -15,6 +15,8 @@ except ImportError:
     OMEGACONF_AVAILABLE = False
     DictConfig = None
 
+from .utils import format_walltime
+
 logger = logging.getLogger(__name__)
 
 
@@ -186,7 +188,14 @@ class HSMConfig:
 
     def get_default_walltime(self) -> str:
         """Get default walltime from config."""
-        return self.config_data.get("hpc", {}).get("default_walltime", "23:59:59")
+        walltime_value = self.config_data.get("hpc", {}).get("default_walltime", "23:59:59")
+
+        # If the value is an integer (seconds), convert to HH:MM:SS format
+        if isinstance(walltime_value, int):
+            return format_walltime(walltime_value)
+
+        # If it's already a string, assume it's in the correct format
+        return str(walltime_value)
 
     def get_default_resources(self) -> str:
         """Get default resources from config."""
