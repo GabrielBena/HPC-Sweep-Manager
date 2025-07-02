@@ -141,8 +141,12 @@ class PBSJobManager(HPCJobManager):
         params_file = pbs_dir / f"{sweep_id}_params.json"
         import json
 
+        indexed_combinations = [
+            {"index": i + 1, "params": params} for i, params in enumerate(param_combinations)
+        ]
+
         with open(params_file, "w") as f:
-            json.dump(param_combinations, f, indent=2)
+            json.dump(indexed_combinations, f, indent=2)
 
         # Render array job script
         template = self.jinja_env.get_template("sweep_array.sh.j2")
@@ -150,7 +154,7 @@ class PBSJobManager(HPCJobManager):
             job_name=f"{sweep_id}_array",
             walltime=self.walltime,
             resources=self.resources,
-            array_range=f"1-{len(param_combinations)}",
+            num_jobs=len(param_combinations),
             sweep_dir=str(sweep_dir),
             logs_dir=str(logs_dir),
             tasks_dir=str(tasks_dir),
