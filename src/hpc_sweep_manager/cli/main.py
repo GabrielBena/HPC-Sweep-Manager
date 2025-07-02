@@ -75,15 +75,18 @@ def init_compat(ctx, interactive: bool, project_root: str):
 @click.argument("sweep_id", required=False)
 @click.option("--watch", "-w", is_flag=True, help="Watch mode")
 @click.option("--refresh", "-r", type=int, default=30, help="Refresh interval in seconds")
+@click.option("--days", "-d", type=int, default=7, help="Show sweeps from last N days")
 @click.pass_context
-def monitor_compat(ctx, sweep_id: str, watch: bool, refresh: int):
+def monitor_compat(ctx, sweep_id: str, watch: bool, refresh: int, days: int):
     """Monitor sweep progress."""
     if sweep_id:
         # Monitor specific sweep
-        ctx.invoke(monitor.commands["watch"], sweep_id=sweep_id, watch=watch, refresh=refresh)
+        ctx.invoke(
+            monitor.commands["watch"], sweep_id=sweep_id, watch=watch, refresh=refresh, days=days
+        )
     else:
         # Show recent sweeps
-        ctx.invoke(monitor.commands["recent"], watch=watch, refresh=refresh)
+        ctx.invoke(monitor.commands["recent"], watch=watch, refresh=refresh, days=days)
 
 
 @cli.command("collect-results")
