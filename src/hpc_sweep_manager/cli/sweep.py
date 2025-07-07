@@ -247,8 +247,9 @@ def _generate_parameter_combinations(
     Returns:
         List of parameter combinations, or None if count_only=True
     """
-    from ..core.common.param_generator import ParameterGenerator
     from rich.table import Table
+
+    from ..core.common.param_generator import ParameterGenerator
 
     # Generate parameter combinations
     generator = ParameterGenerator(config)
@@ -557,7 +558,7 @@ def _setup_sweep_directories_and_managers(
     elif mode == "distributed":
         # Create a DistributedSweepWrapper with the proper sweep directory
         try:
-            from ..core.distributed.distributed_manager import create_distributed_sweep_wrapper
+            from ..core.distributed.wrapper import create_distributed_sweep_wrapper
 
             job_manager = create_distributed_sweep_wrapper(
                 hsm_config=hsm_config,

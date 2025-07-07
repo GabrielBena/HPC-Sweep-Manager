@@ -6,11 +6,11 @@ from typing import Any, Dict
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import ComputeSource, JobInfo
-from hpc_sweep_manager.core.distributed.distributed_job_manager import DistributedJobManager
 from hpc_sweep_manager.core.distributed.base_distributed_manager import (
     DistributedSweepConfig,
     DistributionStrategy,
 )
+from hpc_sweep_manager.core.distributed.distributed_manager import DistributedJobManager
 
 
 class MockComputeSource(ComputeSource):

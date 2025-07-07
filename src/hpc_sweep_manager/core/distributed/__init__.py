@@ -7,7 +7,6 @@ from .base_distributed_manager import (
     DistributedSweepConfig,
     DistributionStrategy,
 )
-from .distributed_job_manager import DistributedJobManager
 
 # Component classes
 from .job_distributor import JobDistributor
@@ -17,9 +16,8 @@ from .result_collector import ResultCollector
 # Wrapper for integration
 from .wrapper import DistributedSweepWrapper, create_distributed_sweep_wrapper
 
-# Keep 
+# Keep
 __all__ = [
-    "DistributedJobManager",
     "BaseDistributedManager",
     "DistributedSweepConfig",
     "DistributionStrategy",
