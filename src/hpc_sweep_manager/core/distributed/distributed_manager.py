@@ -1076,8 +1076,8 @@ class DistributedJobManager:
                                 )
 
                                 if should_overwrite:
-                                    import shutil
                                     from datetime import datetime
+                                    import shutil
 
                                     # Create backup of existing directory
                                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1230,6 +1230,8 @@ class DistributedJobManager:
                 return
 
             status_corrections = 0
+            collection_retries = 0
+
             for task_dir in tasks_dir.iterdir():
                 if not task_dir.is_dir() or not task_dir.name.startswith("task_"):
                     continue
@@ -1262,6 +1264,38 @@ class DistributedJobManager:
                         actual_status = "RUNNING"
                     else:
                         continue
+
+                    # Project-agnostic collection verification:
+                    # If this is a remote task showing FAILED but might be a collection issue
+                    if actual_status == "FAILED" and "Remote Machine:" in content:
+                        collection_needed = await self._check_if_collection_needed(
+                            task_name, task_dir, content
+                        )
+                        if collection_needed:
+                            collection_retries += 1
+                            logger.info(
+                                f"🔄 Attempting result collection for {task_name} (appears incomplete)"
+                            )
+
+                            # Try to collect results and re-check status
+                            await self._attempt_task_result_collection(task_name, task_dir)
+
+                            # Re-read the task_info.txt after collection attempt
+                            if task_info_file.exists():
+                                with open(task_info_file) as f:
+                                    updated_content = f.read()
+                                    updated_status_lines = [
+                                        line
+                                        for line in updated_content.split("\n")
+                                        if line.startswith("Status: ")
+                                    ]
+                                    if updated_status_lines:
+                                        updated_status_line = updated_status_lines[-1]
+                                        if "COMPLETED" in updated_status_line:
+                                            actual_status = "COMPLETED"
+                                            logger.info(
+                                                f"✓ {task_name} status updated to COMPLETED after collection"
+                                            )
 
                     # Find the corresponding job in our tracking
                     job_to_update = None
@@ -1314,8 +1348,125 @@ class DistributedJobManager:
             else:
                 logger.debug("All task statuses verified - no corrections needed")
 
+            if collection_retries > 0:
+                logger.info(f"🔄 Attempted result collection for {collection_retries} tasks")
+
         except Exception as e:
             logger.warning(f"Error in task status verification: {e}")
+
+    async def _check_if_collection_needed(
+        self, task_name: str, task_dir: Path, task_info_content: str
+    ) -> bool:
+        """
+        Project-agnostic check to determine if a task needs result collection.
+
+        This checks if:
+        1. The task shows FAILED in task_info.txt
+        2. The task is from a remote machine
+        3. The task directory only has metadata files (suggesting incomplete collection)
+        """
+        try:
+            # Check if this is a remote task
+            if "Remote Machine:" not in task_info_content:
+                return False
+
+            # Check if the task directory appears to have incomplete collection
+            # by looking at what files exist
+            task_files = list(task_dir.glob("*"))
+
+            # Standard metadata files created during job submission
+            metadata_files = {
+                "task_info.txt",
+                "command.txt",
+                "job.pid",
+                "python.pid",
+                "script.pid",
+                "process_group.pid",
+            }
+
+            # Check if we only have metadata files (no actual results)
+            actual_files = {f.name for f in task_files if f.is_file()}
+            non_metadata_files = actual_files - metadata_files
+
+            if len(non_metadata_files) == 0:
+                logger.debug(f"Task {task_name} has only metadata files - collection likely needed")
+                return True
+
+            # Also check if the remote task directory path is mentioned but local files are minimal
+            if "Task Directory:" in task_info_content:
+                # Extract remote task directory
+                for line in task_info_content.split("\n"):
+                    if line.startswith("Task Directory:"):
+                        remote_task_dir = line.split(":", 1)[1].strip()
+                        logger.debug(f"Task {task_name} remote directory: {remote_task_dir}")
+
+                        # If we have very few files locally but the job ran on remote,
+                        # it suggests collection might be incomplete
+                        if len(actual_files) <= 6:  # Just metadata files basically
+                            logger.debug(
+                                f"Task {task_name} has minimal local files ({len(actual_files)}) - collection likely needed"
+                            )
+                            return True
+
+            return False
+
+        except Exception as e:
+            logger.debug(f"Error checking collection need for {task_name}: {e}")
+            return False
+
+    async def _attempt_task_result_collection(self, task_name: str, task_dir: Path):
+        """
+        Attempt to collect results for a specific task that might have collection issues.
+        """
+        try:
+            # Find which source this task was assigned to
+            source_name = self.task_to_source.get(task_name)
+            if not source_name:
+                logger.debug(f"No source found for task {task_name}")
+                return
+
+            source = self.source_by_name.get(source_name)
+            if not source or source_name == "local":
+                logger.debug(f"Source {source_name} not available for collection retry")
+                return
+
+            logger.info(f"🔄 Attempting result collection for {task_name} from {source_name}")
+
+            # Try to collect results for this specific task
+            from ..remote.ssh_compute_source import SSHComputeSource
+
+            if isinstance(source, SSHComputeSource):
+                # Find the job ID for this task
+                job_ids_for_task = [
+                    job_id
+                    for job_id, job_info in self.all_jobs.items()
+                    if task_name in job_info.job_name and job_info.source_name == source_name
+                ]
+
+                if job_ids_for_task:
+                    # Before collection, check file count
+                    before_files = len(list(task_dir.glob("*")))
+
+                    success = await source.collect_results(job_ids_for_task)
+
+                    # After collection, check if we got more files
+                    after_files = len(list(task_dir.glob("*")))
+
+                    if success and after_files > before_files:
+                        logger.info(
+                            f"✓ Successfully collected results for {task_name} ({after_files - before_files} new files)"
+                        )
+                    elif success:
+                        logger.warning(
+                            f"⚠️ Collection reported success for {task_name} but no new files found"
+                        )
+                    else:
+                        logger.warning(f"✗ Failed to collect results for {task_name}")
+                else:
+                    logger.debug(f"No job IDs found for task {task_name}")
+
+        except Exception as e:
+            logger.warning(f"Error attempting result collection for {task_name}: {e}")
 
     async def _save_source_mapping(self):
         """Save a mapping of which tasks ran on which compute sources."""

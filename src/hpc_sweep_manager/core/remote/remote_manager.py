@@ -676,8 +676,7 @@ class RemoteJobManager(BaseJobManager):
 
     async def _check_job_exit_code(self, conn, task_dir: str, job_id: str) -> str:
         """
-        Fallback method to determine job status by checking if output files exist
-        and trying to determine if the job completed successfully.
+        Check if the job completed successfully by examining exit codes and process completion.
         """
         try:
             # Check if the command.txt file exists (it's created at the start)
@@ -686,35 +685,34 @@ class RemoteJobManager(BaseJobManager):
                 logger.warning(f"Command file not found for job {job_id}, assuming FAILED")
                 return "FAILED"
 
-            # Check if there are any output files that might indicate completion
-            # Look for common output patterns like final_results.csv, checkpoints, etc.
-            output_check = await conn.run(
-                f"find {task_dir} -name '*.csv' -o -name 'final_results*' -o -name 'outputs' -type d | head -5",
+            # Check for exit code from the training script
+            exit_code_result = await conn.run(
+                f"cat {task_dir}/exit_code.txt 2>/dev/null || echo 'NO_EXIT_CODE'",
                 check=False,
             )
 
-            # Also check the logs for completion indicators
-            log_check = await conn.run(
-                f"find {task_dir} -name '*.log' | head -1 | xargs tail -20 2>/dev/null | grep -i 'training complete\\|final results\\|sweep complete\\|completed' || true",
-                check=False,
-            )
+            if "NO_EXIT_CODE" in exit_code_result.stdout:
+                # If no exit code file, check if processes are still running
+                pid_check = await conn.run(
+                    f"cat {task_dir}/python.pid 2>/dev/null | xargs -r ps -p 2>/dev/null | wc -l",
+                    check=False,
+                )
+                if pid_check.returncode == 0 and int(pid_check.stdout.strip()) > 1:
+                    return "RUNNING"
+                else:
+                    return "FAILED"
 
-            if output_check.returncode == 0 and output_check.stdout.strip():
-                logger.info(f"Output files found for job {job_id}, likely COMPLETED")
-                return "COMPLETED"
-            elif log_check.returncode == 0 and log_check.stdout.strip():
-                logger.info(
-                    f"Completion indicators found in logs for job {job_id}, likely COMPLETED"
-                )
-                return "COMPLETED"
-            else:
-                logger.warning(
-                    f"No clear completion indicators for job {job_id}, marking as FAILED"
-                )
+            try:
+                exit_code = int(exit_code_result.stdout.strip())
+                if exit_code == 0:
+                    return "COMPLETED"
+                else:
+                    return "FAILED"
+            except ValueError:
                 return "FAILED"
 
         except Exception as e:
-            logger.error(f"Error in fallback status check for job {job_id}: {e}")
+            logger.error(f"Error checking job exit code for {job_id}: {e}")
             return "FAILED"
 
     async def cancel_job(self, job_id: str) -> bool:

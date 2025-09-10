@@ -332,6 +332,7 @@ class SweepMonitor:
         table.add_column("Sweep ID", style="cyan", no_wrap=True)
         table.add_column("Age", style="magenta")
         table.add_column("Mode", style="blue")
+        table.add_column("Job IDs", style="bright_green", no_wrap=True)
         table.add_column("Jobs", style="green")
         table.add_column("Status", style="yellow")
         table.add_column("Progress", style="bright_blue")
@@ -383,6 +384,11 @@ class SweepMonitor:
             else:
                 progress_str = "N/A"
 
+            # Format job IDs for display (limit length for readability)
+            job_ids_str = ", ".join(sweep["job_ids"])
+            if len(job_ids_str) > 30:
+                job_ids_str = job_ids_str[:27] + "..."
+
             # Array job detail for detailed view
             array_detail = ""
             if detailed:
@@ -410,6 +416,7 @@ class SweepMonitor:
                     sweep["sweep_id"],
                     age_str,
                     sweep["mode"] or "Unknown",
+                    job_ids_str,
                     str(total_jobs),
                     status_str,
                     progress_str,
@@ -420,6 +427,7 @@ class SweepMonitor:
                     sweep["sweep_id"],
                     age_str,
                     sweep["mode"] or "Unknown",
+                    job_ids_str,
                     str(total_jobs),
                     status_str,
                     progress_str,
