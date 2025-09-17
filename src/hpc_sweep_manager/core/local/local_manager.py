@@ -767,6 +767,11 @@ class LocalJobManager(BaseJobManager):
                         params = task_info
                         job_name = f"{sweep_id}_job_{i + 1:03d}"
 
+                    # Wait if we've reached max parallel jobs
+                    while len(self.running_jobs) >= self.max_parallel_jobs:
+                        await asyncio.sleep(1)
+                        await self._wait_for_job_completion()
+
                     job_id = self.submit_single_job(
                         params,
                         job_name,
@@ -781,6 +786,12 @@ class LocalJobManager(BaseJobManager):
                 # Normal runs where param_combinations are just parameter dicts
                 for i, params in enumerate(param_combinations):
                     job_name = f"{sweep_id}_job_{i + 1:03d}"
+
+                    # Wait if we've reached max parallel jobs
+                    while len(self.running_jobs) >= self.max_parallel_jobs:
+                        await asyncio.sleep(1)
+                        await self._wait_for_job_completion()
+
                     job_id = self.submit_single_job(
                         params,
                         job_name,
@@ -792,8 +803,7 @@ class LocalJobManager(BaseJobManager):
                     )
                     job_ids.append(job_id)
 
-            # For completion runs, wait for all jobs to complete (like array mode does)
-            if self.is_completion_run:
-                await self.wait_for_all_jobs(use_progress_bar=self.show_progress)
+            # Wait for all jobs to complete (like array mode does)
+            await self.wait_for_all_jobs(use_progress_bar=self.show_progress)
 
             return job_ids

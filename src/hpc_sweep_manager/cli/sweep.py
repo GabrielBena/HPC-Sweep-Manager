@@ -634,10 +634,13 @@ def _submit_and_track_jobs(
     if isinstance(job_manager, LocalJobManager):
         import asyncio
 
+        # Use array mode for LocalJobManager to enable proper parallel execution control
+        local_mode = "array" if job_manager.max_parallel_jobs > 1 else "individual"
+
         job_ids = asyncio.run(
             job_manager.submit_sweep(
                 param_combinations=combinations,
-                mode=mode,
+                mode=local_mode,
                 sweep_dir=sweep_dir,
                 sweep_id=sweep_id,
                 wandb_group=group,
