@@ -22,9 +22,11 @@ class PBSJobManager(HPCJobManager):
         python_path: str = "python",
         script_path: str = "",
         project_dir: str = ".",
+        max_array_size: int = 10000,
     ):
         super().__init__(walltime, resources, python_path, script_path, project_dir)
         self.system_type = "pbs"
+        self.max_array_size = max_array_size
 
         # Setup Jinja2 environment
         template_dir = Path(__file__).parent.parent.parent / "templates"
@@ -58,7 +60,9 @@ class PBSJobManager(HPCJobManager):
             FileNotFoundError,
             subprocess.TimeoutExpired,
         ) as e:
-            raise RuntimeError(f"PBS/Torque system not available or not properly configured: {e}")
+            raise RuntimeError(
+                f"PBS/Torque system not available or not properly configured: {e}"
+            ) from e
 
     def submit_single_job(
         self,
@@ -123,7 +127,16 @@ class PBSJobManager(HPCJobManager):
         pbs_dir: Optional[Path] = None,
         logs_dir: Optional[Path] = None,
     ) -> str:
-        """Submit a PBS array job."""
+        """Submit PBS array job(s).
+
+        If the number of parameter combinations exceeds max_array_size,
+        this will split them into multiple array job chunks, all sharing
+        the same sweep_id.
+
+        Returns:
+            A string containing the job ID(s). If multiple chunks are submitted,
+            returns comma-separated job IDs.
+        """
         if logs_dir is None:
             logs_dir = sweep_dir / "logs"
         if pbs_dir is None:
@@ -137,12 +150,102 @@ class PBSJobManager(HPCJobManager):
         tasks_dir = sweep_dir / "tasks"
         tasks_dir.mkdir(exist_ok=True)
 
-        # Save parameter combinations to JSON file
-        params_file = sweep_dir / "parameter_combinations.json"
+        total_combinations = len(param_combinations)
+
+        # Check if we need to split into chunks
+        if total_combinations <= self.max_array_size:
+            # Submit as a single array job
+            return self._submit_single_array_job(
+                param_combinations=param_combinations,
+                sweep_id=sweep_id,
+                sweep_dir=sweep_dir,
+                wandb_group=wandb_group,
+                pbs_dir=pbs_dir,
+                logs_dir=logs_dir,
+                tasks_dir=tasks_dir,
+                chunk_id=None,
+                global_offset=0,
+            )
+
+        # Split into multiple chunks
+        num_chunks = (total_combinations + self.max_array_size - 1) // self.max_array_size
+        logger.info(
+            f"Splitting {total_combinations} tasks into {num_chunks} array job chunks "
+            f"(max_array_size={self.max_array_size})"
+        )
+
+        job_ids = []
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * self.max_array_size
+            end_idx = min(start_idx + self.max_array_size, total_combinations)
+            chunk_combinations = param_combinations[start_idx:end_idx]
+
+            chunk_id = chunk_idx + 1
+            logger.info(
+                f"Submitting chunk {chunk_id}/{num_chunks} with {len(chunk_combinations)} tasks "
+                f"(global indices {start_idx + 1}-{end_idx})"
+            )
+
+            job_id = self._submit_single_array_job(
+                param_combinations=chunk_combinations,
+                sweep_id=sweep_id,
+                sweep_dir=sweep_dir,
+                wandb_group=wandb_group,
+                pbs_dir=pbs_dir,
+                logs_dir=logs_dir,
+                tasks_dir=tasks_dir,
+                chunk_id=chunk_id,
+                global_offset=start_idx,
+            )
+            job_ids.append(job_id)
+
+        logger.info(f"Submitted {num_chunks} array job chunks for sweep {sweep_id}")
+        return ",".join(job_ids)
+
+    def _submit_single_array_job(
+        self,
+        param_combinations: List[Dict[str, Any]],
+        sweep_id: str,
+        sweep_dir: Path,
+        wandb_group: Optional[str],
+        pbs_dir: Path,
+        logs_dir: Path,
+        tasks_dir: Path,
+        chunk_id: Optional[int] = None,
+        global_offset: int = 0,
+    ) -> str:
+        """Submit a single PBS array job chunk.
+
+        Args:
+            param_combinations: Parameter combinations for this chunk
+            sweep_id: Sweep identifier (shared across all chunks)
+            sweep_dir: Sweep directory
+            wandb_group: W&B group name
+            pbs_dir: Directory for PBS scripts
+            logs_dir: Directory for logs
+            tasks_dir: Directory for task outputs
+            chunk_id: Chunk identifier (None if not chunked)
+            global_offset: Global index offset for this chunk
+
+        Returns:
+            The PBS job ID
+        """
         import json
 
+        # Determine job name and file suffix
+        if chunk_id is not None:
+            job_name = f"{sweep_id}_array_chunk_{chunk_id}"
+            file_suffix = f"_chunk_{chunk_id}"
+        else:
+            job_name = f"{sweep_id}_array"
+            file_suffix = ""
+
+        # Save parameter combinations to JSON file
+        # Use global indices to maintain consistency across chunks
+        params_file = sweep_dir / f"parameter_combinations{file_suffix}.json"
         indexed_combinations = [
-            {"index": i + 1, "params": params} for i, params in enumerate(param_combinations)
+            {"index": global_offset + i + 1, "params": params}
+            for i, params in enumerate(param_combinations)
         ]
 
         with open(params_file, "w") as f:
@@ -151,7 +254,7 @@ class PBSJobManager(HPCJobManager):
         # Render array job script
         template = self.jinja_env.get_template("sweep_array.sh.j2")
         script_content = template.render(
-            job_name=f"{sweep_id}_array",
+            job_name=job_name,
             walltime=self.walltime,
             resources=self.resources,
             num_jobs=len(param_combinations),
@@ -167,7 +270,7 @@ class PBSJobManager(HPCJobManager):
         )
 
         # Write array job script
-        array_script_path = pbs_dir / f"{sweep_id}_array.pbs"
+        array_script_path = pbs_dir / f"{job_name}.pbs"
         with open(array_script_path, "w") as f:
             f.write(script_content)
 
@@ -179,11 +282,40 @@ class PBSJobManager(HPCJobManager):
             )
 
         array_job_id = result.stdout.strip()
-        logger.info(f"Submitted PBS array job {array_job_id} with {len(param_combinations)} tasks")
+        logger.info(
+            f"Submitted PBS job {array_job_id} ({job_name}) with {len(param_combinations)} tasks"
+        )
         return array_job_id
 
     def get_job_status(self, job_id: str) -> str:
-        """Get PBS job status."""
+        """Get PBS job status.
+
+        If job_id contains comma-separated IDs (from chunked array jobs),
+        returns a combined status based on all chunks.
+        """
+        # Handle comma-separated job IDs from chunked array jobs
+        if "," in job_id:
+            job_ids = [jid.strip() for jid in job_id.split(",")]
+            statuses = [self._get_single_job_status(jid) for jid in job_ids]
+
+            # Determine combined status
+            if any(s == "running" for s in statuses):
+                return "running"
+            elif any(s == "queued" for s in statuses):
+                return "queued"
+            elif any(s == "held" for s in statuses):
+                return "held"
+            elif any(s == "exiting" for s in statuses):
+                return "exiting"
+            elif all(s == "completed" for s in statuses):
+                return "completed"
+            else:
+                return "unknown"
+        else:
+            return self._get_single_job_status(job_id)
+
+    def _get_single_job_status(self, job_id: str) -> str:
+        """Get status of a single PBS job."""
         try:
             result = self._run_command(f"qstat -f {job_id}")
             if result.returncode != 0:
