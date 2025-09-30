@@ -31,7 +31,7 @@ if [[ -z "$PBS_ARRAY_INDEX" ]]; then
 fi
 
 # Extract parameters for this array index
-PARAMS_FILE="{{ sweep_dir }}/parameter_combinations.json"
+PARAMS_FILE="{{ params_file }}"
 if [[ ! -f "$PARAMS_FILE" ]]; then
     echo "Error: Parameter combinations file not found: $PARAMS_FILE"
     echo "Current directory: $(pwd)"
@@ -47,7 +47,7 @@ import json
 import sys
 import os
 
-params_file = "{{ sweep_dir }}/parameter_combinations.json"
+params_file = "{{ params_file }}"
 array_index = int(os.environ['PBS_ARRAY_INDEX'])
 
 try:
