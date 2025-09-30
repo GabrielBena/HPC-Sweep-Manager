@@ -65,6 +65,9 @@ try:
         print(f"Error: No parameter combination found for index {array_index}", file=sys.stderr)
         sys.exit(1)
     
+    # Get the global index for unique task directory naming
+    global_index = matching_combo.get('global_index', array_index)
+    
     # Convert parameters to command line format for Hydra
     params = matching_combo['params']
     param_strs = []
@@ -83,7 +86,8 @@ try:
         else:
             param_strs.append(f'"{key}={value}"')
     
-    print(' '.join(param_strs))
+    # Output: param_string|global_index
+    print(f"{' '.join(param_strs)}|{global_index}")
     
 except Exception as e:
     print(f"Error processing parameters: {e}", file=sys.stderr)
@@ -96,14 +100,19 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
-echo "Parameters: $PARAMS_JSON"
+# Split the output to get params and global index
+IFS='|' read -r PARAMS_JSON GLOBAL_INDEX <<< "$PARAMS_JSON"
 
-# Create a unique output directory for this task
-TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${PBS_ARRAY_INDEX}"
+echo "Parameters: $PARAMS_JSON"
+echo "Global task index: $GLOBAL_INDEX"
+
+# Create a unique output directory for this task using global index
+TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${GLOBAL_INDEX}"
 mkdir -p "$TASK_OUTPUT_DIR"
 
 # Save task info
-echo "Array Index: $PBS_ARRAY_INDEX" > "$TASK_OUTPUT_DIR/task_info.txt"
+echo "PBS Array Index: $PBS_ARRAY_INDEX" > "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Global Task Index: $GLOBAL_INDEX" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Parameters: $PARAMS_JSON" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Started: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Node: $(hostname)" >> "$TASK_OUTPUT_DIR/task_info.txt"

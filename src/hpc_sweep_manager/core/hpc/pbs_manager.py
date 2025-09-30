@@ -241,10 +241,14 @@ class PBSJobManager(HPCJobManager):
             file_suffix = ""
 
         # Save parameter combinations to JSON file
-        # Use global indices to maintain consistency across chunks
+        # Use local indices to match PBS_ARRAY_INDEX, but also store global index
         params_file = sweep_dir / f"parameter_combinations{file_suffix}.json"
         indexed_combinations = [
-            {"index": global_offset + i + 1, "params": params}
+            {
+                "index": i + 1,  # Local index for PBS_ARRAY_INDEX matching
+                "global_index": global_offset + i + 1,  # Global index for unique naming
+                "params": params,
+            }
             for i, params in enumerate(param_combinations)
         ]
 
