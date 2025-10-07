@@ -63,23 +63,25 @@ class ParameterGenerator:
         if not self.config.paired:
             return [{}]
 
-        all_paired_combinations = []
+        # Process each group separately to get their combinations
+        group_combinations_list = []
 
         for group in self.config.paired:
             # Flatten each group
             flat_group = {}
-            for group_name, params in group.items():
+            for _, params in group.items():
                 flat_params = self._flatten_dict(params)
                 flat_group.update(flat_params)
 
-            # Verify all parameters have same length
+            # Verify all parameters have same length within this group
             lengths = [len(values) for values in flat_group.values()]
             if not all(length == lengths[0] for length in lengths):
                 raise ValueError(
-                    f"All paired parameters must have same length. Found lengths: {lengths}"
+                    "All paired parameters in a group must have same length. "
+                    f"Found lengths: {lengths}"
                 )
 
-            # Create combinations by zipping parameter values
+            # Create combinations by zipping parameter values for this group
             param_names = list(flat_group.keys())
             param_values = [flat_group[name] for name in param_names]
 
@@ -88,9 +90,21 @@ class ParameterGenerator:
                 combo_dict = dict(zip(param_names, combination))
                 group_combinations.append(combo_dict)
 
-            all_paired_combinations.extend(group_combinations)
+            group_combinations_list.append(group_combinations)
 
-        return all_paired_combinations if all_paired_combinations else [{}]
+        # Now combine all groups using Cartesian product
+        if not group_combinations_list:
+            return [{}]
+        
+        final_paired_combinations = []
+        for combination_tuple in itertools.product(*group_combinations_list):
+            # Merge all dictionaries from different groups
+            merged_combo = {}
+            for combo_dict in combination_tuple:
+                merged_combo.update(combo_dict)
+            final_paired_combinations.append(merged_combo)
+
+        return final_paired_combinations
 
     def _count_grid_combinations(self) -> int:
         """Count grid combinations without generating them."""
@@ -109,15 +123,16 @@ class ParameterGenerator:
         if not self.config.paired:
             return 0
 
-        total_count = 0
+        # Calculate the product of all group sizes
+        total_count = 1
         for group in self.config.paired:
             # Get the length of the first parameter in the group
-            for group_name, params in group.items():
+            for _, params in group.items():
                 flat_params = self._flatten_dict(params)
                 if flat_params:
                     # All params in a group have same length, so take any one
                     group_length = len(next(iter(flat_params.values())))
-                    total_count += group_length
+                    total_count *= group_length
                     break
 
         return total_count
