@@ -16,6 +16,7 @@ class SweepConfig:
     paired: List[Dict[str, Dict[str, List[Any]]]] = field(default_factory=list)
     defaults: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    script: str = None  # Training script path (optional)
 
     @classmethod
     def from_yaml(cls, config_path: Union[str, Path]) -> "SweepConfig":
@@ -43,6 +44,7 @@ class SweepConfig:
             paired=sweep_config.get("paired", []),
             defaults=config_dict.get("defaults", {}),
             metadata=config_dict.get("metadata", {}),
+            script=config_dict.get("script"),  # Extract script from top level
         )
 
     @classmethod
@@ -109,11 +111,14 @@ class SweepConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
-        return {
+        result = {
             "sweep": {"grid": self.grid, "paired": self.paired},
             "defaults": self.defaults,
             "metadata": self.metadata,
         }
+        if self.script:
+            result["script"] = self.script
+        return result
 
     def save(self, output_path: Union[str, Path]) -> None:
         """Save sweep config to YAML file."""

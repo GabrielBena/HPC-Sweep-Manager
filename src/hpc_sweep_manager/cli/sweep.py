@@ -281,7 +281,9 @@ def _generate_parameter_combinations(
     return combinations
 
 
-def _detect_project_paths(hsm_config: Optional["HSMConfig"]) -> tuple[str, str, str]:
+def _detect_project_paths(
+    hsm_config: Optional["HSMConfig"], sweep_config: Optional["SweepConfig"] = None
+) -> tuple[str, str, str]:
     """Detect or get project paths for execution.
 
     Returns:
@@ -291,15 +293,28 @@ def _detect_project_paths(hsm_config: Optional["HSMConfig"]) -> tuple[str, str, 
 
     detector = PathDetector()
 
-    # Try to get paths from HSM config first, then auto-detect
+    # First determine project dir and python path
     if hsm_config:
         python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
-        script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
         project_dir = hsm_config.get_project_root() or str(Path.cwd())
     else:
         python_path = detector.detect_python_path()
-        script_path = detector.detect_train_script()
         project_dir = str(Path.cwd())
+
+    # Priority order for script: sweep_config > hsm_config > auto-detect
+    # 1. Try sweep config script first
+    if sweep_config and sweep_config.script:
+        script_path = sweep_config.script
+        # If script path is relative, resolve it relative to project root
+        script_path_obj = Path(script_path)
+        if not script_path_obj.is_absolute():
+            script_path = str(Path(project_dir) / script_path)
+    # 2. Then try HSM config
+    elif hsm_config:
+        script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
+    # 3. Fall back to auto-detection
+    else:
+        script_path = detector.detect_train_script()
 
     return python_path, script_path, project_dir
 
@@ -886,8 +901,8 @@ def run_sweep(
         if combinations is None:  # count_only was True
             return
 
-        # Detect project paths for execution
-        python_path, script_path, project_dir = _detect_project_paths(hsm_config)
+        # Detect project paths for execution (with script from sweep config if specified)
+        python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
 
         # Create appropriate job manager based on mode
         job_manager, mode = _create_job_manager(
