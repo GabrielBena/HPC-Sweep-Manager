@@ -1,7 +1,7 @@
 """CLI tests for sweep command."""
 
 import logging
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from rich.console import Console
@@ -63,12 +63,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1", "job_2"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1", "job_2"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 2
 
@@ -263,12 +261,10 @@ class TestSweepCommand:
                 custom_config_dir / "hsm_config.yaml",
             )
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -304,12 +300,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -338,12 +332,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -379,12 +371,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -420,12 +410,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1", "job_2"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1", "job_2"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -457,12 +445,10 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -497,12 +483,10 @@ class TestSweepCommand:
             with open(custom_sweep_path, "w") as f:
                 yaml.dump(custom_sweep, f)
 
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager:
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = ["job_1"]
+                mock_instance.submit_sweep = AsyncMock(return_value=["job_1"])
                 mock_instance.system_type = "local"
                 mock_instance.max_parallel_jobs = 1
 
@@ -540,14 +524,12 @@ class TestSweepCommand:
             os.chdir(str(mock_project_dir))
 
             # Mock all necessary components
-            with patch(
-                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
-            ) as mock_manager, patch(
+            with patch("hpc_sweep_manager.cli.sweep.LocalJobManager") as mock_manager, patch(
                 "hpc_sweep_manager.core.local.LocalComputeSource"
             ) as mock_local:
                 mock_manager_instance = Mock()
                 mock_manager.return_value = mock_manager_instance
-                mock_manager_instance.submit_sweep.return_value = ["job_1", "job_2"]
+                mock_manager_instance.submit_sweep = AsyncMock(return_value=["job_1", "job_2"])
                 mock_manager_instance.system_type = "local"
                 mock_manager_instance.max_parallel_jobs = 2
 

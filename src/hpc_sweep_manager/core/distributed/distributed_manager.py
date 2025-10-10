@@ -563,11 +563,11 @@ class DistributedJobManager:
                 candidate_idx = self._round_robin_index % len(self.sources)
                 self._round_robin_index += 1
                 attempts += 1
-                
+
                 candidate = self.sources[candidate_idx]
                 if candidate.is_available and candidate.name not in self.disabled_sources:
                     return candidate
-            
+
             # No available sources found after cycling through all
             return None
 

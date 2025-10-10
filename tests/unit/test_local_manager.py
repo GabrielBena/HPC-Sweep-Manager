@@ -152,18 +152,23 @@ class TestLocalJobManager:
         sweep_dir = temp_dir / "individual_sweep"
         sweep_dir.mkdir()
 
+        # Set max_parallel_jobs high enough to avoid waiting in the loop
+        local_manager.max_parallel_jobs = len(sample_params) + 1
+
         with patch("subprocess.Popen") as mock_popen:
             mock_process = MagicMock()
             mock_process.pid = 12345
             mock_process.poll.return_value = None
             mock_popen.return_value = mock_process
 
-            job_ids = await local_manager.submit_sweep(
-                param_combinations=sample_params,
-                mode="individual",
-                sweep_dir=sweep_dir,
-                sweep_id="individual_test",
-            )
+            # Mock wait_for_all_jobs to avoid hanging
+            with patch.object(local_manager, "wait_for_all_jobs"):
+                job_ids = await local_manager.submit_sweep(
+                    param_combinations=sample_params,
+                    mode="individual",
+                    sweep_dir=sweep_dir,
+                    sweep_id="individual_test",
+                )
 
             assert len(job_ids) == len(sample_params)
             assert all(job_id.startswith("local_individual_test_") for job_id in job_ids)
