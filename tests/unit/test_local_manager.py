@@ -79,7 +79,8 @@ class TestLocalJobManager:
             assert local_manager.running_processes[job_id]["job_name"] == "test_job"
 
     @pytest.mark.unit
-    def test_submit_array_job(self, local_manager, temp_dir, sample_params):
+    @pytest.mark.anyio
+    async def test_submit_array_job(self, local_manager, temp_dir, sample_params):
         """Test submitting a local array job."""
         sweep_dir = temp_dir / "local_array_sweep"
         sweep_dir.mkdir()
@@ -94,7 +95,7 @@ class TestLocalJobManager:
 
             # Mock the wait_for_all_jobs method to avoid actually waiting
             with patch.object(local_manager, "wait_for_all_jobs"):
-                job_id = local_manager.submit_array_job(
+                job_id = await local_manager.submit_array_job(
                     param_combinations=sample_params,
                     sweep_id="local_array_test",
                     sweep_dir=sweep_dir,
@@ -145,7 +146,8 @@ class TestLocalJobManager:
             assert status == "FAILED"
 
     @pytest.mark.unit
-    def test_submit_sweep_individual(self, local_manager, temp_dir, sample_params):
+    @pytest.mark.anyio
+    async def test_submit_sweep_individual(self, local_manager, temp_dir, sample_params):
         """Test submitting sweep with individual jobs."""
         sweep_dir = temp_dir / "individual_sweep"
         sweep_dir.mkdir()
@@ -156,7 +158,7 @@ class TestLocalJobManager:
             mock_process.poll.return_value = None
             mock_popen.return_value = mock_process
 
-            job_ids = local_manager.submit_sweep(
+            job_ids = await local_manager.submit_sweep(
                 param_combinations=sample_params,
                 mode="individual",
                 sweep_dir=sweep_dir,
@@ -167,7 +169,8 @@ class TestLocalJobManager:
             assert all(job_id.startswith("local_individual_test_") for job_id in job_ids)
 
     @pytest.mark.unit
-    def test_submit_sweep_array(self, local_manager, temp_dir, sample_params):
+    @pytest.mark.anyio
+    async def test_submit_sweep_array(self, local_manager, temp_dir, sample_params):
         """Test submitting sweep with array job."""
         sweep_dir = temp_dir / "array_sweep"
         sweep_dir.mkdir()
@@ -178,7 +181,7 @@ class TestLocalJobManager:
             mock_popen.return_value = mock_process
 
             with patch.object(local_manager, "wait_for_all_jobs"):
-                job_ids = local_manager.submit_sweep(
+                job_ids = await local_manager.submit_sweep(
                     param_combinations=sample_params,
                     mode="array",
                     sweep_dir=sweep_dir,

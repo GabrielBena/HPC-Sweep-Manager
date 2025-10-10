@@ -1,6 +1,6 @@
 # API Reference
 
-This section provides detailed documentation for all HSM modules and classes.
+This section provides detailed documentation for HSM's core modules and classes for developers who want to extend or integrate HSM.
 
 ## Core Modules
 
@@ -11,30 +11,8 @@ This section provides detailed documentation for all HSM modules and classes.
 ### Execution Modes
 - [Local Execution](local/README.md) - Single machine parallel execution
 - [HPC Execution](hpc/README.md) - HPC cluster job submission (PBS/Slurm)
-- [Remote Execution](remote/README.md) - SSH-based remote execution
-- [Distributed Execution](distributed/README.md) - Multi-machine coordination
 
-### Common Utilities
-- [Configuration](common/config.md) - Configuration management
-- [Parameter Generation](common/param_generator.md) - Parameter sweep generation
-- [Path Detection](common/path_detector.md) - Automatic path discovery
-- [Utilities](common/utils.md) - Common utility functions
-
-## CLI Commands
-
-### Core Commands
-- [sweep](../cli/sweep.md) - Parameter sweep execution
-- [monitor](../cli/monitor.md) - Job monitoring and status
-- [init](../cli/init.md) - Project initialization
-
-### Management Commands
-- [remote](../cli/remote.md) - Remote machine management
-- [collect](../cli/collect.md) - Result collection
-- [configure](../cli/configure.md) - Configuration management
-
-### HPC-Specific Commands
-- [hpc](../cli/hpc.md) - HPC system interaction
-- [local](../cli/local.md) - Local execution management
+For complete CLI documentation, see the [CLI Reference](../cli/README.md).
 
 ## Architecture Overview
 

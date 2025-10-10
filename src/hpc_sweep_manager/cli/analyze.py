@@ -2,24 +2,20 @@
 
 import ast
 import json
-import os
-import subprocess
 from pathlib import Path
-from typing import Dict, List, Set, Any
-import importlib.util
+import subprocess
+from typing import Any, Dict, List
 
 import click
 from rich.console import Console
-from rich.table import Table
-from rich.tree import Tree
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from ..core.common.usage_tracker import (
-    UsageTracker,
     analyze_usage_patterns,
-    generate_usage_report,
     enable_usage_tracking,
+    generate_usage_report,
 )
 from .common import common_options
 
@@ -212,7 +208,7 @@ class DeadCodeAnalyzer:
 
         for file_path in python_files:
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     tree = ast.parse(f.read(), filename=str(file_path))
 
                 visitor = FunctionCallVisitor()
@@ -226,7 +222,7 @@ class DeadCodeAnalyzer:
 
                 calls.update(visitor.calls)
 
-            except (SyntaxError, UnicodeDecodeError) as e:
+            except (SyntaxError, UnicodeDecodeError):
                 continue  # Skip files with syntax errors
 
         # Find potentially unused definitions
@@ -359,7 +355,7 @@ class DependencyAnalyzer:
 
         for file_path in python_files:
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     tree = ast.parse(f.read(), filename=str(file_path))
 
                 visitor = ImportVisitor()

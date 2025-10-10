@@ -134,7 +134,7 @@ def track_usage(func: Callable) -> Callable:
             execution_time = time.time() - start_time
             tracker.track_function_call(func.__name__, func.__module__, execution_time)
             return result
-        except Exception as e:
+        except Exception:
             execution_time = time.time() - start_time
             tracker.track_function_call(func.__name__, func.__module__, execution_time)
             raise
@@ -199,7 +199,7 @@ def analyze_usage_patterns(tracking_dir: Optional[Path] = None) -> Dict[str, Any
     total_sessions = len(session_files)
 
     for session_file in session_files:
-        with open(session_file, "r") as f:
+        with open(session_file) as f:
             data = json.load(f)
 
         for func, count in data.get("function_calls", {}).items():

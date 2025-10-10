@@ -2,21 +2,17 @@
 
 HSM provides a comprehensive command-line interface for managing parameter sweeps across different execution environments.
 
-## Command Overview
+## Core Commands
 
-### Core Commands
-- [`hsm sweep`](sweep.md) - Execute parameter sweeps
-- [`hsm monitor`](monitor.md) - Monitor job progress and status
-- [`hsm init`](init.md) - Initialize project configuration
-
-### Management Commands  
-- [`hsm remote`](remote.md) - Manage remote machines
-- [`hsm collect-results`](collect.md) - Collect and aggregate results
-- [`hsm configure`](configure.md) - Manage HSM configuration
-
-### Execution Mode Commands
-- [`hsm local`](local.md) - Local execution management
-- [`hsm hpc`](hpc.md) - HPC system interaction
+- **`hsm init`** - Initialize HSM in your project (creates config files)
+- **`hsm sweep run`** - Execute parameter sweeps across different modes (shortcut: `hsm run`)
+- **`hsm sweep complete`** - Complete partially finished sweeps
+- **`hsm sweep status`** - Show sweep completion status
+- **`hsm sweep errors`** - Show error summaries for sweeps
+- **`hsm monitor`** - Monitor job progress and status  
+- **`hsm remote`** - Manage remote machines for SSH-based execution
+- **`hsm distributed`** - Manage distributed computing across multiple sources
+- **`hsm collect-results`** - Collect and aggregate results from remote runs
 
 ## Quick Reference
 
@@ -28,7 +24,7 @@ HSM provides a comprehensive command-line interface for managing parameter sweep
 hsm init
 
 # Small local test
-hsm sweep --mode local --parallel-jobs 2 --max-runs 5 --show-output
+hsm sweep run --mode local --parallel-jobs 2 --max-runs 5 --show-output
 
 # Monitor progress
 hsm monitor --watch
@@ -37,10 +33,10 @@ hsm monitor --watch
 #### Production HPC Runs
 ```bash
 # Large array job
-hsm sweep --mode array --walltime "08:00:00" --resources "select=4:ncpus=8:mem=32gb"
+hsm sweep run --mode array --walltime "08:00:00" --resources "select=4:ncpus=8:mem=32gb"
 
-# Monitor HPC queue
-hsm monitor --mode hpc --watch
+# Monitor sweep progress
+hsm monitor --watch
 
 # Check queue status
 hsm queue --watch
@@ -55,7 +51,7 @@ hsm remote add gpu-server --host "gpu.university.edu"
 hsm remote test gpu-server
 
 # Execute sweep
-hsm sweep --mode remote --remote gpu-server --max-runs 20
+hsm sweep run --mode remote --remote gpu-server --max-runs 20
 ```
 
 ## Global Options
@@ -165,13 +161,13 @@ hpc:
 ### Dry Run Mode
 Test commands without execution:
 ```bash
-hsm sweep --dry-run    # Show what would be executed
+hsm sweep run --dry-run    # Show what would be executed
 ```
 
 ### Verbose Output
 Get detailed information:
 ```bash
-hsm sweep --verbose    # Detailed execution info
+hsm sweep run --verbose    # Detailed execution info
 hsm remote test --verbose  # Connection diagnostics
 ```
 

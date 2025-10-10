@@ -37,12 +37,15 @@ dependencies = [
     "pandas>=1.5.0",
     "numpy>=1.21.0",
     "psutil>=5.9.0",
+    "asyncssh>=2.13.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
+    "anyio>=3.6.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
@@ -54,10 +57,11 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/hpc-sweep-manager"
-Documentation = "https://hpc-sweep-manager.readthedocs.io"
-Repository = "https://github.com/yourusername/hpc-sweep-manager"
-Changelog = "https://github.com/yourusername/hpc-sweep-manager/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/GabrielBena/HPC-Sweep-Manager"
+Documentation = "https://github.com/GabrielBena/HPC-Sweep-Manager/tree/main/docs"
+Repository = "https://github.com/GabrielBena/HPC-Sweep-Manager"
+Changelog = "https://github.com/GabrielBena/HPC-Sweep-Manager/blob/main/CHANGELOG.md"
+"Bug Tracker" = "https://github.com/GabrielBena/HPC-Sweep-Manager/issues"
 
 [project.scripts]
 hsm = "hpc_sweep_manager.cli.main:main"

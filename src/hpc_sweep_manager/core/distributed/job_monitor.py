@@ -1,10 +1,10 @@
 """Job monitoring component for distributed sweeps with real-time status tracking."""
 
 import asyncio
-import logging
 from datetime import datetime
+import logging
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Optional, Set
 
 try:
     from dateutil.parser import parse as parse_date
@@ -224,7 +224,7 @@ class JobMonitor:
                     return reported_status
 
             # Read the task info file to get the actual status
-            with open(task_info_file, "r") as f:
+            with open(task_info_file) as f:
                 content = f.read()
 
             # Check if this might be an old task_info.txt file by looking at timestamps
@@ -274,7 +274,7 @@ class JobMonitor:
                         f"Remote task {task_name}: reported={reported_status} vs local_file={actual_status}"
                     )
                     logger.warning(
-                        f"Local file might be from previous run - checking result collection status"
+                        "Local file might be from previous run - checking result collection status"
                     )
 
                     # Check if we have evidence that result collection failed for this task

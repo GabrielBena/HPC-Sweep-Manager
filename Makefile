@@ -61,7 +61,7 @@ test-fast:
 
 test-coverage:
 	@echo "Running tests with coverage report..."
-	pytest -v tests/ --cov=hsm --cov-report=html --cov-report=term-missing
+	pytest -v tests/ --cov=hpc_sweep_manager --cov-report=html --cov-report=term-missing
 	@echo "Coverage report generated in htmlcov/"
 
 test-simple-mlp:
@@ -151,18 +151,18 @@ build:
 # Installation verification
 verify-install:
 	@echo "Verifying HSM installation..."
-	python -c "import hsm; print('HSM package imported successfully')"
+	python -c "import hpc_sweep_manager; print('HSM package imported successfully')"
 	hsm --help
 	@echo "HSM installation verified!"
 
 # Coverage targets
 coverage-unit:
 	@echo "Running unit tests with coverage..."
-	pytest tests/unit/ --cov=hsm --cov-report=term-missing
+	pytest tests/unit/ --cov=hpc_sweep_manager --cov-report=term-missing
 
 coverage-integration:
 	@echo "Running integration tests with coverage..."
-	pytest tests/integration/ --cov=hsm --cov-report=term-missing
+	pytest tests/integration/ --cov=hpc_sweep_manager --cov-report=term-missing
 
 # Ruff-specific targets
 ruff-all:

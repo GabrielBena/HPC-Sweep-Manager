@@ -1,8 +1,8 @@
 """Utility for rendering Jinja2 templates."""
 
+from datetime import datetime
 import logging
 from pathlib import Path
-from datetime import datetime
 
 try:
     from jinja2 import Environment, FileSystemLoader, select_autoescape

@@ -326,10 +326,10 @@ HPC execution integrates with HSM CLI commands:
 
 ```bash
 # Array job submission
-hsm sweep --mode array --walltime "08:00:00" --resources "select=2:ncpus=8:mem=32gb"
+hsm sweep run --mode array --walltime "08:00:00" --resources "select=2:ncpus=8:mem=32gb"
 
 # Individual job submission
-hsm sweep --mode individual --walltime "04:00:00"
+hsm sweep run --mode individual --walltime "04:00:00"
 
 # HPC-specific monitoring
 hsm monitor --mode hpc --sweep-id hpc_sweep

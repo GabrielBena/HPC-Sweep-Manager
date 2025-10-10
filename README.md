@@ -43,20 +43,20 @@ sweep:
 
 ```bash
 # Local execution (parallel jobs)
-hsm sweep --mode local --parallel-jobs 4
+hsm sweep run --mode local --parallel-jobs 4
 
 # HPC cluster (array job)
-hsm sweep --mode array
+hsm sweep run --mode array
 
 # Remote machine execution
-hsm sweep --mode remote --remote machine_name
+hsm sweep run --mode remote --remote machine_name
 ```
 
 ## 🛠️ Execution Modes
 
 ### **Local Mode** - Single Machine Parallel Execution
 ```bash
-hsm sweep --mode local --parallel-jobs 4 --show-output
+hsm sweep run --mode local --parallel-jobs 4 --show-output
 ```
 - Runs jobs in parallel on your local machine
 - Real-time output display option
@@ -64,7 +64,7 @@ hsm sweep --mode local --parallel-jobs 4 --show-output
 
 ### **Array Mode** - HPC Cluster Array Jobs  
 ```bash
-hsm sweep --mode array --walltime "04:00:00"
+hsm sweep run --mode array --walltime "04:00:00"
 ```
 - Submits efficient array jobs to PBS/Torque or Slurm
 - Auto-detects HPC system and generates appropriate scripts
@@ -72,7 +72,7 @@ hsm sweep --mode array --walltime "04:00:00"
 
 ### **Remote Mode** - Single Remote Machine via SSH
 ```bash
-hsm sweep --mode remote --remote blossom
+hsm sweep run --mode remote --remote blossom
 ```
 - Executes jobs on a remote machine via SSH
 - Auto-discovery of remote environments and paths
@@ -133,7 +133,7 @@ your-project/
 ### Core Workflow
 ```bash
 hsm init                          # Initialize project
-hsm sweep                         # Run parameter sweep
+hsm sweep run                     # Run parameter sweep
 hsm monitor SWEEP_ID              # Monitor progress
 hsm collect-results SWEEP_ID      # Collect remote results
 ```
@@ -200,21 +200,21 @@ distributed:
 ### Basic Grid Search
 ```bash
 # Edit sweeps/sweep.yaml with your parameters
-hsm sweep --dry-run              # Preview jobs
-hsm sweep --mode array           # Submit to cluster
-hsm monitor --watch             # Monitor progress
+hsm sweep run --dry-run              # Preview jobs
+hsm sweep run --mode array           # Submit to cluster
+hsm monitor --watch                  # Monitor progress
 ```
 
 ### Remote Execution
 ```bash
 hsm remote add gpu-server --host "gpu.university.edu"
 hsm remote test gpu-server
-hsm sweep --mode remote --remote gpu-server --max-runs 10
+hsm sweep run --mode remote --remote gpu-server --max-runs 10
 ```
 
 ### Local Development
 ```bash
-hsm sweep --mode local --parallel-jobs 2 --show-output --max-runs 5
+hsm sweep run --mode local --parallel-jobs 2 --show-output --max-runs 5
 ```
 
 ## 🔧 Advanced Features
@@ -257,14 +257,14 @@ hsm sweep --mode local --parallel-jobs 2 --show-output --max-runs 5
 - **Organized outputs** for easy analysis
 - **Extensible design** for future enhancements
 
-## 🤝 Contributing
+## 📚 Documentation
 
-HSM is designed to be extensible. Key areas for contribution:
-- Additional HPC schedulers (GridEngine, etc.)
-- Enhanced monitoring and visualization
-- Distributed load balancing strategies
-- Integration with other ML frameworks
+For comprehensive documentation, see the [`docs/`](docs/) directory:
+- **[User Guide](docs/user_guide/getting_started.md)** - Detailed setup and usage
+- **[CLI Reference](docs/cli/README.md)** - Complete command documentation
+- **[API Reference](docs/api_reference/README.md)** - For developers
+- **[Examples](examples/)** - Working examples to get started
 
 ## 📄 License
 
-MIT License - see LICENSE file for details. 
+MIT License - see [LICENSE](LICENSE) file for details. 

@@ -2,13 +2,12 @@
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 import logging
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List
 
 from ..common.base_manager import BaseJobManager
 from ..common.compute_source import ComputeSource, JobInfo

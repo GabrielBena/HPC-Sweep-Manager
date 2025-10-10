@@ -95,7 +95,7 @@ class ParameterGenerator:
         # Now combine all groups using Cartesian product
         if not group_combinations_list:
             return [{}]
-        
+
         final_paired_combinations = []
         for combination_tuple in itertools.product(*group_combinations_list):
             # Merge all dictionaries from different groups

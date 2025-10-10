@@ -1,10 +1,10 @@
 """Local compute source implementation."""
 
+import asyncio
 from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import asyncio
 
 from ..common.compute_source import ComputeSource, JobInfo
 from .local_manager import LocalJobManager

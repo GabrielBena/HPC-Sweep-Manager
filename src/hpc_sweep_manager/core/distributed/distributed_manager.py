@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import signal
 import sys
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..remote.ssh_compute_source import SSHComputeSource
@@ -142,7 +142,7 @@ class DistributedJobManager:
 
         self._signal_received = True
         logger.info(f"🛑 Signal {signum} received - preserving source mapping and cleaning up...")
-        logger.info(f"📊 Cancelling distributed jobs and saving progress...")
+        logger.info("📊 Cancelling distributed jobs and saving progress...")
 
         try:
             # First preserve the source mapping before any cleanup
@@ -556,10 +556,20 @@ class DistributedJobManager:
             return None
 
         if self.config.strategy == DistributionStrategy.ROUND_ROBIN:
-            # Round-robin selection
-            source = available_sources[self._round_robin_index % len(available_sources)]
-            self._round_robin_index += 1
-            return source
+            # Round-robin selection - cycle through ALL sources, skipping unavailable ones
+            # This ensures fair distribution even when some sources become unavailable
+            attempts = 0
+            while attempts < len(self.sources):
+                candidate_idx = self._round_robin_index % len(self.sources)
+                self._round_robin_index += 1
+                attempts += 1
+                
+                candidate = self.sources[candidate_idx]
+                if candidate.is_available and candidate.name not in self.disabled_sources:
+                    return candidate
+            
+            # No available sources found after cycling through all
+            return None
 
         elif self.config.strategy == DistributionStrategy.LEAST_LOADED:
             # Select source with lowest utilization

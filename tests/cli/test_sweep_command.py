@@ -16,7 +16,14 @@ class TestSweepCommand:
     @pytest.mark.cli
     def test_sweep_help(self, cli_runner):
         """Test sweep command help output."""
+        # Test main sweep group
         result = cli_runner.invoke(sweep_cmd, ["--help"])
+        assert result.exit_code == 0
+        assert "Run and manage parameter sweeps" in result.output
+        assert "run" in result.output
+
+        # Test sweep run subcommand
+        result = cli_runner.invoke(sweep_cmd, ["run", "--help"])
         assert result.exit_code == 0
         assert "Run parameter sweep" in result.output
         assert "--mode" in result.output
@@ -36,7 +43,7 @@ class TestSweepCommand:
 
             result = cli_runner.invoke(
                 sweep_cmd,
-                ["--mode", "local", "--dry-run", "--parallel-jobs", "2"],
+                ["run", "--mode", "local", "--dry-run", "--parallel-jobs", "2"],
                 obj={"console": console, "logger": logger},
             )
 
@@ -56,7 +63,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1", "job_2"]
@@ -76,6 +85,7 @@ class TestSweepCommand:
                     result = cli_runner.invoke(
                         sweep_cmd,
                         [
+                            "run",
                             "--config",
                             str(mock_project_dir / "sweeps" / "sweep.yaml"),
                             "--mode",
@@ -118,6 +128,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--mode",
                         "array",
                         "--walltime",
@@ -178,7 +189,7 @@ class TestSweepCommand:
 
                 result = cli_runner.invoke(
                     sweep_cmd,
-                    ["--mode", "remote", "--remote", "test_remote", "--max-runs", "2"],
+                    ["run", "--mode", "remote", "--remote", "test_remote", "--max-runs", "2"],
                     obj={"console": console, "logger": logger},
                 )
 
@@ -202,7 +213,9 @@ class TestSweepCommand:
             logger = logging.getLogger("test")
 
             result = cli_runner.invoke(
-                sweep_cmd, ["--mode", "invalid_mode"], obj={"console": console, "logger": logger}
+                sweep_cmd,
+                ["run", "--mode", "invalid_mode"],
+                obj={"console": console, "logger": logger},
             )
 
             # Should fail with error
@@ -221,7 +234,7 @@ class TestSweepCommand:
             logger = logging.getLogger("test")
 
             result = cli_runner.invoke(
-                sweep_cmd, ["--mode", "local"], obj={"console": console, "logger": logger}
+                sweep_cmd, ["run", "--mode", "local"], obj={"console": console, "logger": logger}
             )
 
             # Should fail due to missing config
@@ -250,7 +263,9 @@ class TestSweepCommand:
                 custom_config_dir / "hsm_config.yaml",
             )
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -263,6 +278,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--config",
                         str(custom_config_dir / "sweep.yaml"),
                         "--mode",
@@ -288,7 +304,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -300,7 +318,7 @@ class TestSweepCommand:
 
                 result = cli_runner.invoke(
                     sweep_cmd,
-                    ["--verbose", "--mode", "local", "--max-runs", "1"],
+                    ["run", "--verbose", "--mode", "local", "--max-runs", "1"],
                     obj={"console": console, "logger": logger},
                 )
 
@@ -320,7 +338,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -333,6 +353,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--mode",
                         "local",
                         "--group",
@@ -358,7 +379,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -373,6 +396,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--mode",
                         "local",
                         "--max-runs",
@@ -396,7 +420,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1", "job_2"]
@@ -408,7 +434,7 @@ class TestSweepCommand:
 
                 result = cli_runner.invoke(
                     sweep_cmd,
-                    ["--mode", "local", "--max-runs", "2"],
+                    ["run", "--mode", "local", "--max-runs", "2"],
                     obj={"console": console, "logger": logger},
                 )
 
@@ -431,7 +457,9 @@ class TestSweepCommand:
 
             os.chdir(str(mock_project_dir))
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -443,7 +471,7 @@ class TestSweepCommand:
 
                 result = cli_runner.invoke(
                     sweep_cmd,
-                    ["--mode", "local", "--show-output", "--max-runs", "1"],
+                    ["run", "--mode", "local", "--show-output", "--max-runs", "1"],
                     obj={"console": console, "logger": logger},
                 )
 
@@ -469,7 +497,9 @@ class TestSweepCommand:
             with open(custom_sweep_path, "w") as f:
                 yaml.dump(custom_sweep, f)
 
-            with patch("hpc_sweep_manager.core.local.manager.LocalJobManager") as mock_manager:
+            with patch(
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
+            ) as mock_manager:
                 mock_instance = Mock()
                 mock_manager.return_value = mock_instance
                 mock_instance.submit_sweep.return_value = ["job_1"]
@@ -482,6 +512,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--config",
                         str(custom_sweep_path),
                         "--mode",
@@ -510,7 +541,7 @@ class TestSweepCommand:
 
             # Mock all necessary components
             with patch(
-                "hpc_sweep_manager.core.local.manager.LocalJobManager"
+                "hpc_sweep_manager.core.local.local_manager.LocalJobManager"
             ) as mock_manager, patch(
                 "hpc_sweep_manager.core.local.LocalComputeSource"
             ) as mock_local:
@@ -530,6 +561,7 @@ class TestSweepCommand:
                 result = cli_runner.invoke(
                     sweep_cmd,
                     [
+                        "run",
                         "--mode",
                         "local",
                         "--parallel-jobs",

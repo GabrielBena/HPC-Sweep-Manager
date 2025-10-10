@@ -528,7 +528,7 @@ class SweepCompletor:
                 source_mapping_backup = backup_path
 
                 # Also keep the original content in memory for immediate restore
-                with open(self.analyzer.source_mapping_path, "r") as f:
+                with open(self.analyzer.source_mapping_path) as f:
                     original_mapping_content = f.read()
 
                 logger.info(f"Created source mapping backup: {backup_path}")

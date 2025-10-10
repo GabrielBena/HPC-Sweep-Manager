@@ -195,7 +195,7 @@ The local module integrates seamlessly with HSM CLI commands:
 
 ```bash
 # Local mode execution
-hsm sweep --mode local --parallel-jobs 4 --show-output
+hsm sweep run --mode local --parallel-jobs 4 --show-output
 
 # Local monitoring
 hsm monitor --mode local --sweep-id local_test

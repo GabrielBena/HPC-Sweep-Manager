@@ -62,10 +62,10 @@ sweep:
 ### 3. Run Local Sweep
 ```bash
 # Small test run
-hsm sweep --mode local --parallel-jobs 2 --max-runs 6
+hsm sweep run --mode local --parallel-jobs 2 --max-runs 6
 
 # With real-time output
-hsm sweep --mode local --parallel-jobs 2 --show-output
+hsm sweep run --mode local --parallel-jobs 2 --show-output
 ```
 
 ## 🌐 Remote Mode - Quick Start
@@ -101,7 +101,7 @@ Expected output:
 
 ### 4. Run Remote Sweep
 ```bash
-hsm sweep --mode remote --remote gpu-server --max-runs 12
+hsm sweep run --mode remote --remote gpu-server --max-runs 12
 ```
 
 ## 🌟 Distributed Mode - Quick Start
@@ -130,7 +130,7 @@ hsm distributed test --all
 
 ### 4. Run Distributed Sweep
 ```bash
-hsm sweep --mode distributed
+hsm sweep run --mode distributed
 ```
 
 HSM will automatically balance jobs across all available sources:
@@ -171,7 +171,7 @@ hpc:
 
 ### 3. Submit Array Job
 ```bash
-hsm sweep --mode array --walltime "02:00:00"
+hsm sweep run --mode array --walltime "02:00:00"
 ```
 
 ### 4. Monitor Progress
@@ -250,58 +250,3 @@ metadata:
   description: "Hyperparameter sweep for model comparison"
   tags: ["baseline", "comparison"]
 ```
-
-## 📈 Scaling Guidelines
-
-| Jobs | Recommended Mode | Example Command |
-|------|------------------|-----------------|
-| 1-10 | Local | `hsm sweep --mode local --max-runs 10` |
-| 10-50 | Remote | `hsm sweep --mode remote --remote gpu-server` |
-| 50-200 | Distributed | `hsm sweep --mode distributed` |
-| 200+ | HPC Array | `hsm sweep --mode array` |
-
-## 🆘 Troubleshooting
-
-### SSH Connection Issues
-```bash
-# Test SSH manually
-ssh -vvv user@remote-server.edu
-
-# Check SSH key permissions
-chmod 600 ~/.ssh/id_rsa
-chmod 644 ~/.ssh/id_rsa.pub
-```
-
-### HPC Submission Failures
-```bash
-# Check queue status
-qstat  # PBS
-squeue # Slurm
-
-# Verify resource requests
-hsm sweep --dry-run --mode array
-```
-
-### Import Errors
-```bash
-# Check HSM installation
-hsm --version
-
-# Verify dependencies
-pip install -r requirements.txt
-```
-
-## ➡️ Next Steps
-
-- **[Configuration Guide](configuration.md)** - Detailed configuration options
-- **[Execution Modes](execution_modes.md)** - Deep dive into each mode  
-- **[Advanced Features](advanced_features.md)** - Power user features
-- **[Examples](../examples/)** - Real-world use cases
-
-## 💡 Tips for Success
-
-1. **Start small**: Begin with local mode to validate your setup
-2. **Test connections**: Always run `hsm remote test` or `hsm distributed test` 
-3. **Use dry runs**: Preview jobs with `--dry-run` before submission
-4. **Monitor progress**: Use `--watch` flags for real-time updates
-5. **Organize outputs**: HSM creates clean directory structures automatically 

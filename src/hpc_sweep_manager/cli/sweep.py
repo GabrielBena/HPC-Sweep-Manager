@@ -16,6 +16,7 @@ import asyncio
 from ..core.common.config import HSMConfig
 from ..core.common.config_parser import SweepConfig
 from ..core.common.sweep_tracker import SweepTaskTracker
+from ..core.local.local_manager import LocalJobManager
 from ..core.remote.discovery import RemoteDiscovery
 from ..core.remote.remote_manager import RemoteJobManager
 from .common import common_options
@@ -341,8 +342,6 @@ def _create_job_manager(
     from ..core.hpc.hpc_base import HPCJobManager
 
     if mode == "local":
-        from ..core.local.local_manager import LocalJobManager
-
         # For local mode, determine parallel jobs from CLI, HSM config, or default
         max_parallel_jobs = 1
         if parallel_jobs is not None:
@@ -409,8 +408,6 @@ def _create_job_manager(
             if mode == "auto":
                 console.print("[yellow]No HPC system detected, falling back to local mode[/yellow]")
                 mode = "local"
-
-                from ..core.local.local_manager import LocalJobManager
 
                 # For local mode, determine parallel jobs from CLI, HSM config, or default
                 max_parallel_jobs = 4  # Better default for auto-detected local
@@ -644,8 +641,6 @@ def _submit_and_track_jobs(
     console.print(f"\n[bold]Submitting {len(combinations)} jobs in {mode} mode...[/bold]")
 
     # Handle async submission for LocalJobManager
-    from ..core.local.local_manager import LocalJobManager
-
     if isinstance(job_manager, LocalJobManager):
         import asyncio
 

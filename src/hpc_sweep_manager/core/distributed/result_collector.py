@@ -1,10 +1,10 @@
 """Result collection and normalization component for distributed sweeps."""
 
 import asyncio
-import logging
-import shutil
 from datetime import datetime
+import logging
 from pathlib import Path
+import shutil
 from typing import Dict, List, Optional
 
 from ..common.compute_source import ComputeSource
@@ -274,7 +274,7 @@ class ResultCollector:
 
         # If we can't find the directory, provide comprehensive debugging information
         logger.warning(f"No source directory found for task {task_name} from source {source_name}")
-        logger.warning(f"Searched in potential directories:")
+        logger.warning("Searched in potential directories:")
         for i, potential_dir in enumerate(potential_dirs, 1):
             exists_status = "EXISTS" if potential_dir.exists() else "NOT_FOUND"
             logger.warning(f"  {i}. {potential_dir} - {exists_status}")
@@ -389,7 +389,7 @@ class ResultCollector:
             if not task_info_file.exists():
                 return "UNKNOWN"
 
-            with open(task_info_file, "r") as f:
+            with open(task_info_file) as f:
                 content = f.read()
 
             # Get the last status line (most recent)
@@ -536,7 +536,6 @@ class ResultCollector:
                 return
 
             # Use rsync to collect scripts and logs from remote
-            import subprocess
 
             # Collect scripts
             remote_scripts_dir = f"{remote_manager.remote_sweep_dir}/scripts"
