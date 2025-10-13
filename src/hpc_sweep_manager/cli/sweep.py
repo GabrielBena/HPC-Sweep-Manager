@@ -1265,6 +1265,19 @@ def complete_cmd(
         elif exec_mode == "local":
             console.print("[yellow]⚠ Will execute locally (not recommended for HPC)[/yellow]")
 
+        # Show script path from sweep_config
+        sweep_config_path = sweep_dir / "sweep_config.yaml"
+        if sweep_config_path.exists():
+            try:
+                import yaml
+
+                with open(sweep_config_path) as f:
+                    sweep_cfg = yaml.safe_load(f)
+                    if sweep_cfg and "script" in sweep_cfg:
+                        console.print(f"[green]✓ Training script: {sweep_cfg['script']}[/green]")
+            except Exception:
+                pass
+
         console.print(f"\nMissing combinations to run: {result['missing_count']}")
         if not no_retry_failed:
             console.print(f"Failed combinations to retry: {result['failed_count']}")

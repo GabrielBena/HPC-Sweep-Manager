@@ -651,7 +651,7 @@ class SweepCompletor:
         # Method 1: Use source_mapping if available
         existing_task_assignments = self.analyzer.source_mapping.get("task_assignments", {})
         if existing_task_assignments:
-            for task_name in existing_task_assignments.keys():
+            for task_name in existing_task_assignments:
                 task_match = re.search(r"task_(\d+)", task_name)
                 if task_match:
                     task_num = int(task_match.group(1))
@@ -841,6 +841,14 @@ class SweepCompletor:
                 elif mode == "local":
                     console.print("[cyan]• Will execute locally[/cyan]")
 
+                # Show script info (CRITICAL for user to verify)
+                if self.analyzer.sweep_config and self.analyzer.sweep_config.script:
+                    console.print(
+                        f"[green]• Training script: {self.analyzer.sweep_config.script} (from sweep_config)[/green]"
+                    )
+                else:
+                    console.print("[yellow]• Training script: (will be auto-detected)[/yellow]")
+
                 console.print(f"\n[bold]Task numbers to run:[/bold]")
                 if len(task_numbers) <= 20:
                     console.print(f"  {task_numbers}")
@@ -969,16 +977,37 @@ class SweepCompletor:
             # Load HSM config
             hsm_config = HSMConfig.load()
 
-            # Auto-detect paths
+            # Auto-detect paths, but PRIORITIZE script from sweep_config if available
             detector = PathDetector()
             if hsm_config:
                 python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
-                script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
                 project_dir = hsm_config.get_project_root() or str(Path.cwd())
+
+                # CRITICAL: Use script from sweep_config if specified, otherwise fallback to detection
+                if self.analyzer.sweep_config and self.analyzer.sweep_config.script:
+                    script_path = self.analyzer.sweep_config.script
+                    # Resolve relative to project dir if not absolute
+                    if not Path(script_path).is_absolute():
+                        script_path = str(Path(project_dir) / script_path)
+                    logger.info(f"Using script from sweep_config: {script_path}")
+                else:
+                    script_path = (
+                        hsm_config.get_default_script_path() or detector.detect_train_script()
+                    )
+                    logger.info(f"Script auto-detected (no script in sweep_config): {script_path}")
             else:
                 python_path = detector.detect_python_path()
-                script_path = detector.detect_train_script()
                 project_dir = str(Path.cwd())
+
+                # CRITICAL: Use script from sweep_config if specified
+                if self.analyzer.sweep_config and self.analyzer.sweep_config.script:
+                    script_path = self.analyzer.sweep_config.script
+                    if not Path(script_path).is_absolute():
+                        script_path = str(Path(project_dir) / script_path)
+                    logger.info(f"Using script from sweep_config: {script_path}")
+                else:
+                    script_path = detector.detect_train_script()
+                    logger.info(f"Script auto-detected (no script in sweep_config): {script_path}")
 
             # Extract options
             walltime = kwargs.get("walltime", "23:59:59")
