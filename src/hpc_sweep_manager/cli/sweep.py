@@ -1097,9 +1097,9 @@ def run_cmd(
 @click.argument("sweep_id")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "local", "remote", "distributed"]),
-    default="local",
-    help="Job submission mode for completion",
+    type=click.Choice(["auto", "local", "remote", "distributed", "array"]),
+    default="auto",
+    help="Job submission mode for completion (auto=detect from original sweep)",
 )
 @click.option("--dry-run", "-d", is_flag=True, help="Show what would be completed without running")
 @click.option(
@@ -1252,7 +1252,20 @@ def complete_cmd(
 
     if result["status"] == "dry_run":
         console.print("\n[yellow]DRY RUN - Completion Plan:[/yellow]")
-        console.print(f"Missing combinations to run: {result['missing_count']}")
+
+        # Show execution mode prominently
+        exec_mode = result.get("execution_mode", mode)
+        console.print(f"\n[bold cyan]Execution Mode: {exec_mode.upper()}[/bold cyan]")
+        if exec_mode == "array":
+            console.print("[green]✓ Will submit as PBS/Slurm array job (HPC cluster)[/green]")
+        elif exec_mode == "distributed":
+            console.print("[green]✓ Will distribute across multiple compute sources[/green]")
+        elif exec_mode == "remote":
+            console.print("[green]✓ Will execute on remote machine[/green]")
+        elif exec_mode == "local":
+            console.print("[yellow]⚠ Will execute locally (not recommended for HPC)[/yellow]")
+
+        console.print(f"\nMissing combinations to run: {result['missing_count']}")
         if not no_retry_failed:
             console.print(f"Failed combinations to retry: {result['failed_count']}")
             cancelled_count = result.get("cancelled_count", 0)
@@ -1265,7 +1278,9 @@ def complete_cmd(
             for i, combo in enumerate(result["combinations_to_run"][:3], 1):
                 console.print(f"  {i}. {combo}")
 
-        console.print("\nTo execute the completion, run the same command without --dry-run")
+        console.print(
+            "\n[dim]To execute the completion, run the same command without --dry-run[/dim]"
+        )
 
     elif result["status"] == "complete":
         console.print(f"\n[green]{result['message']}[/green]")
@@ -1476,6 +1491,162 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
 
     else:
         console.print("[red]Error: Please specify a sweep ID or use --all/--incomplete-only[/red]")
+
+
+@sweep_cmd.command("report")
+@click.argument("sweep_id")
+@click.option(
+    "--scan-tasks", is_flag=True, help="Force scanning task directories (useful for PBS array jobs)"
+)
+@click.option("--save-json", is_flag=True, help="Save detailed report to JSON file")
+@common_options
+@click.pass_context
+def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
+    """Generate detailed completion report for a sweep."""
+    import json
+
+    from rich.table import Table
+
+    from ..core.common.completion import SweepCompletionAnalyzer
+
+    console = ctx.obj["console"]
+
+    # Find sweep directory
+    sweep_dir = Path("sweeps/outputs") / sweep_id
+    if not sweep_dir.exists():
+        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
+        return
+
+    console.print(f"[bold blue]Sweep Completion Report: {sweep_id}[/bold blue]")
+    console.print(f"Directory: {sweep_dir}")
+
+    # Create analyzer and run analysis
+    analyzer = SweepCompletionAnalyzer(sweep_dir)
+
+    if scan_tasks:
+        console.print("\n[cyan]Scanning task directories...[/cyan]")
+        analysis = analyzer.analyze_from_task_directories()
+    else:
+        console.print("\n[cyan]Analyzing completion status...[/cyan]")
+        analysis = analyzer.analyze_completion_status()
+
+    if "error" in analysis:
+        console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
+        return
+
+    # Display summary table
+    console.print("\n[bold]Summary:[/bold]")
+    table = Table()
+    table.add_column("Metric", style="cyan")
+    table.add_column("Count", style="green")
+    table.add_column("Percentage", style="yellow")
+
+    total_expected = analysis["total_expected"]
+    total_completed = analysis["total_completed"]
+    total_failed = analysis["total_failed"]
+    total_missing = analysis["total_missing"]
+    total_running = analysis.get("total_running", 0)
+
+    table.add_row("Expected Combinations", str(total_expected), "100.0%")
+    table.add_row("Completed", str(total_completed), f"{analysis['completion_rate']:.1f}%")
+    table.add_row(
+        "Failed",
+        str(total_failed),
+        f"{total_failed / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
+    )
+    table.add_row(
+        "Missing",
+        str(total_missing),
+        f"{total_missing / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
+    )
+    if total_running > 0:
+        table.add_row(
+            "Running",
+            str(total_running),
+            f"{total_running / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
+        )
+
+    console.print(table)
+
+    # Show detailed task status if available
+    if "task_statuses" in analysis and analysis["task_statuses"]:
+        console.print(f"\n[bold]Task Status Details:[/bold]")
+        console.print(f"Total tasks found: {len(analysis['task_statuses'])}")
+
+        # Group by status
+        status_groups = {}
+        for task_id, status in analysis["task_statuses"].items():
+            if status not in status_groups:
+                status_groups[status] = []
+            status_groups[status].append(task_id)
+
+        for status, tasks in sorted(status_groups.items()):
+            console.print(f"  {status}: {len(tasks)} tasks")
+
+    # Show missing task numbers
+    if "missing_task_numbers" in analysis and analysis["missing_task_numbers"]:
+        missing_numbers = analysis["missing_task_numbers"]
+        if len(missing_numbers) <= 20:
+            console.print(f"\n[yellow]Missing task numbers: {missing_numbers}[/yellow]")
+        else:
+            console.print(
+                f"\n[yellow]Missing task numbers (first 20): {missing_numbers[:20]}...[/yellow]"
+            )
+            console.print(f"[yellow]Total missing: {len(missing_numbers)}[/yellow]")
+
+    # Show failed task numbers
+    if analysis.get("failed_tasks"):
+        failed_tasks = analysis["failed_tasks"]
+        if len(failed_tasks) <= 20:
+            console.print(f"\n[red]Failed tasks: {failed_tasks}[/red]")
+        else:
+            console.print(f"\n[red]Failed tasks (first 20): {failed_tasks[:20]}...[/red]")
+            console.print(f"[red]Total failed: {len(failed_tasks)}[/red]")
+
+    # Save detailed report if requested
+    if save_json:
+        report_file = sweep_dir / "detailed_completion_report.json"
+        try:
+            # Create a JSON-serializable version
+            json_report = {
+                "sweep_id": sweep_id,
+                "sweep_dir": str(sweep_dir),
+                "timestamp": analysis.get("timestamp", datetime.now().isoformat()),
+                "scan_method": analysis.get("scan_method", "source_mapping"),
+                "summary": {
+                    "total_expected": total_expected,
+                    "total_completed": total_completed,
+                    "total_failed": total_failed,
+                    "total_missing": total_missing,
+                    "total_running": total_running,
+                    "completion_rate": analysis["completion_rate"],
+                },
+                "completed_tasks": analysis.get("completed_tasks", []),
+                "failed_tasks": analysis.get("failed_tasks", []),
+                "running_tasks": analysis.get("running_tasks", []),
+                "missing_task_numbers": analysis.get("missing_task_numbers", []),
+                "task_statuses": analysis.get("task_statuses", {}),
+            }
+
+            with open(report_file, "w") as f:
+                json.dump(json_report, f, indent=2)
+
+            console.print(f"\n[green]✓ Detailed report saved to: {report_file}[/green]")
+        except Exception as e:
+            console.print(f"[red]Error saving report: {e}[/red]")
+
+    # Show next steps
+    if analysis.get("needs_completion"):
+        console.print(
+            f"\n[yellow]⚠ Sweep needs completion. Run 'hsm sweep complete {sweep_id}' to finish it.[/yellow]"
+        )
+    else:
+        console.print("\n[green]✓ Sweep is complete![/green]")
+
+    # Show where source mapping is stored (single source of truth)
+    source_mapping = sweep_dir / "source_mapping.yaml"
+    if source_mapping.exists():
+        console.print(f"\n[dim]Task tracking: {source_mapping}[/dim]")
 
 
 @sweep_cmd.command("errors")

@@ -152,6 +152,14 @@ class PBSJobManager(HPCJobManager):
 
         total_combinations = len(param_combinations)
 
+        # Check if this is a completion run
+        is_completion_run = (
+            param_combinations
+            and isinstance(param_combinations[0], dict)
+            and "task_number" in param_combinations[0]
+            and "params" in param_combinations[0]
+        )
+
         # Check if we need to split into chunks
         if total_combinations <= self.max_array_size:
             # Submit as a single array job
@@ -165,6 +173,7 @@ class PBSJobManager(HPCJobManager):
                 tasks_dir=tasks_dir,
                 chunk_id=None,
                 global_offset=0,
+                is_completion_run=is_completion_run,
             )
 
         # Split into multiple chunks
@@ -196,6 +205,7 @@ class PBSJobManager(HPCJobManager):
                 tasks_dir=tasks_dir,
                 chunk_id=chunk_id,
                 global_offset=start_idx,
+                is_completion_run=is_completion_run,
             )
             job_ids.append(job_id)
 
@@ -213,6 +223,7 @@ class PBSJobManager(HPCJobManager):
         tasks_dir: Path,
         chunk_id: Optional[int] = None,
         global_offset: int = 0,
+        is_completion_run: bool = False,
     ) -> str:
         """Submit a single PBS array job chunk.
 
@@ -243,14 +254,27 @@ class PBSJobManager(HPCJobManager):
         # Save parameter combinations to JSON file
         # Use local indices to match PBS_ARRAY_INDEX, but also store global index
         params_file = sweep_dir / f"parameter_combinations{file_suffix}.json"
-        indexed_combinations = [
-            {
-                "index": i + 1,  # Local index for PBS_ARRAY_INDEX matching
-                "global_index": global_offset + i + 1,  # Global index for unique naming
-                "params": params,
-            }
-            for i, params in enumerate(param_combinations)
-        ]
+
+        if is_completion_run:
+            # For completion runs, use the provided task_number as global_index
+            indexed_combinations = [
+                {
+                    "index": i + 1,  # Local index for PBS_ARRAY_INDEX matching
+                    "global_index": combo["task_number"],  # Use completion task number
+                    "params": combo["params"],  # Extract actual params from nested dict
+                }
+                for i, combo in enumerate(param_combinations)
+            ]
+        else:
+            # For regular sweeps, use sequential numbering with offset
+            indexed_combinations = [
+                {
+                    "index": i + 1,  # Local index for PBS_ARRAY_INDEX matching
+                    "global_index": global_offset + i + 1,  # Global index for unique naming
+                    "params": params,
+                }
+                for i, params in enumerate(param_combinations)
+            ]
 
         with open(params_file, "w") as f:
             json.dump(indexed_combinations, f, indent=2)
@@ -289,6 +313,13 @@ class PBSJobManager(HPCJobManager):
         logger.info(
             f"Submitted PBS job {array_job_id} ({job_name}) with {len(param_combinations)} tasks"
         )
+
+        # Create source_mapping.yaml for consistency with distributed sweeps
+        # Pass is_completion_run flag to handle task numbering correctly
+        self._create_source_mapping(
+            sweep_dir, sweep_id, param_combinations, global_offset, is_completion_run
+        )
+
         return array_job_id
 
     def get_job_status(self, job_id: str) -> str:
@@ -343,3 +374,89 @@ class PBSJobManager(HPCJobManager):
         except Exception as e:
             logger.warning(f"Error checking PBS job status for {job_id}: {e}")
             return "unknown"
+
+    def _create_source_mapping(
+        self,
+        sweep_dir: Path,
+        sweep_id: str,
+        param_combinations: List[Dict[str, Any]],
+        global_offset: int = 0,
+        is_completion_run: bool = False,
+    ):
+        """Create source_mapping.yaml for PBS array jobs to unify with distributed sweeps."""
+        try:
+            from datetime import datetime
+
+            import yaml
+
+            mapping_file = sweep_dir / "source_mapping.yaml"
+
+            # Load existing mapping if this is a completion run
+            if mapping_file.exists():
+                with open(mapping_file) as f:
+                    mapping_data = yaml.safe_load(f) or {}
+            else:
+                mapping_data = {
+                    "sweep_metadata": {},
+                    "task_assignments": {},
+                }
+
+            # Determine total tasks and update metadata
+            if is_completion_run:
+                # For completion runs, preserve existing total_tasks
+                total_tasks = mapping_data["sweep_metadata"].get("total_tasks", 0)
+            else:
+                # For new sweeps, calculate from combinations
+                total_tasks = max(
+                    len(param_combinations) + global_offset,
+                    mapping_data["sweep_metadata"].get("total_tasks", 0),
+                )
+
+            mapping_data["sweep_metadata"].update(
+                {
+                    "total_tasks": total_tasks,
+                    "compute_sources": ["HPC"],  # PBS array jobs run on HPC cluster
+                    "strategy": "pbs_array",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
+
+            # Add task assignments
+            if is_completion_run:
+                # For completion runs, use task_number from each combination
+                for combo in param_combinations:
+                    task_number = combo["task_number"]
+                    task_name = f"task_{task_number:03d}"
+
+                    # Only add if not already present
+                    if task_name not in mapping_data["task_assignments"]:
+                        mapping_data["task_assignments"][task_name] = {
+                            "compute_source": "HPC",
+                            "status": "PENDING",
+                            "start_time": None,
+                            "complete_time": None,
+                        }
+            else:
+                # For regular sweeps, use sequential numbering with offset
+                for i, _ in enumerate(param_combinations):
+                    task_number = global_offset + i + 1
+                    task_name = f"task_{task_number:03d}"
+
+                    # Only add if not already present
+                    if task_name not in mapping_data["task_assignments"]:
+                        mapping_data["task_assignments"][task_name] = {
+                            "compute_source": "HPC",
+                            "status": "PENDING",
+                            "start_time": None,
+                            "complete_time": None,
+                        }
+
+            # Save to YAML file
+            with open(mapping_file, "w") as f:
+                yaml.dump(mapping_data, f, default_flow_style=False, indent=2)
+
+            logger.debug(f"Created source mapping for PBS array job: {mapping_file}")
+
+        except Exception as e:
+            logger.warning(f"Failed to create source mapping: {e}")
+            # Don't fail the job submission if mapping creation fails

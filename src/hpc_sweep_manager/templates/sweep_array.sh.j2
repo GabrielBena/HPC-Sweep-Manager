@@ -108,9 +108,22 @@ echo "Global task index: $GLOBAL_INDEX"
 
 # Create a unique output directory for this task using global index
 TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${GLOBAL_INDEX}"
+
+# Safety check: Don't overwrite completed tasks
+if [[ -f "$TASK_OUTPUT_DIR/task_info.txt" ]]; then
+    if grep -q "Status: SUCCESS" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null || \
+       grep -q "Status: COMPLETED" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null; then
+        echo "WARNING: Task $GLOBAL_INDEX is already COMPLETED. Skipping to avoid overwriting."
+        echo "If you want to re-run this task, manually delete: $TASK_OUTPUT_DIR"
+        exit 0
+    else
+        echo "Task $GLOBAL_INDEX exists but is not completed (likely failed). Re-running..."
+    fi
+fi
+
 mkdir -p "$TASK_OUTPUT_DIR"
 
-# Save task info
+# Save task info (overwrite for retries, or create new)
 echo "PBS Array Index: $PBS_ARRAY_INDEX" > "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Global Task Index: $GLOBAL_INDEX" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Parameters: $PARAMS_JSON" >> "$TASK_OUTPUT_DIR/task_info.txt"

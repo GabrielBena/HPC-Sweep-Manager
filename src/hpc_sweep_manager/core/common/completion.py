@@ -57,17 +57,162 @@ class SweepCompletionAnalyzer:
             logger.error(f"Error loading sweep data: {e}")
             return False
 
-    def analyze_completion_status(self) -> Dict[str, Any]:
-        """Analyze the completion status of the sweep."""
+    def analyze_from_task_directories(self) -> Dict[str, Any]:
+        """Analyze completion status by directly scanning task directories.
+
+        This method works independently of source_mapping.yaml and is ideal for
+        PBS array jobs where the mapping file might not be properly maintained.
+        """
         if not self.load_sweep_data():
             return {"error": "Failed to load sweep data"}
 
         # Generate original combinations
         generator = ParameterGenerator(self.sweep_config)
         self.original_combinations = list(generator.generate_combinations())
+        total_expected = len(self.original_combinations)
 
-        # Analyze task assignments
+        # Scan task directories
+        tasks_dir = self.sweep_dir / "tasks"
+        if not tasks_dir.exists():
+            return {
+                "error": "Tasks directory not found",
+                "tasks_dir": str(tasks_dir),
+                "total_expected": total_expected,
+                "total_completed": 0,
+                "total_failed": 0,
+                "total_missing": total_expected,
+                "completion_rate": 0.0,
+            }
+
+        # Find all task directories
+        task_dirs = sorted(
+            [d for d in tasks_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
+        )
+
+        completed_tasks = []
+        failed_tasks = []
+        running_tasks = []
+        task_statuses = {}
+
+        for task_dir in task_dirs:
+            task_id = task_dir.name
+            task_info_file = task_dir / "task_info.txt"
+
+            if not task_info_file.exists():
+                # Task directory exists but no info file - treat as running/incomplete
+                running_tasks.append(task_id)
+                task_statuses[task_id] = "RUNNING"
+                continue
+
+            try:
+                with open(task_info_file) as f:
+                    content = f.read()
+
+                # Check for status lines (last occurrence wins)
+                status_lines = [line for line in content.split("\n") if line.startswith("Status: ")]
+
+                if status_lines:
+                    last_status_line = status_lines[-1]
+                    if "SUCCESS" in last_status_line or "COMPLETED" in last_status_line:
+                        completed_tasks.append(task_id)
+                        task_statuses[task_id] = "COMPLETED"
+                    elif "FAILED" in last_status_line:
+                        failed_tasks.append(task_id)
+                        task_statuses[task_id] = "FAILED"
+                    elif "RUNNING" in last_status_line:
+                        running_tasks.append(task_id)
+                        task_statuses[task_id] = "RUNNING"
+                    else:
+                        running_tasks.append(task_id)
+                        task_statuses[task_id] = "UNKNOWN"
+                else:
+                    # No status line found - task might be running
+                    running_tasks.append(task_id)
+                    task_statuses[task_id] = "RUNNING"
+
+            except Exception as e:
+                logger.warning(f"Error reading task info for {task_id}: {e}")
+                running_tasks.append(task_id)
+                task_statuses[task_id] = "ERROR"
+
+        # Determine missing tasks by checking which task numbers don't exist
+        existing_task_numbers = set()
+        for task_dir in task_dirs:
+            task_match = re.search(r"task_(\d+)", task_dir.name)
+            if task_match:
+                existing_task_numbers.add(int(task_match.group(1)))
+
+        missing_task_numbers = []
+        for i in range(1, total_expected + 1):
+            if i not in existing_task_numbers:
+                missing_task_numbers.append(i)
+
+        # Get actual combinations for completed/failed/missing tasks
+        self.completed_combinations = self._get_combinations_for_tasks(completed_tasks)
+        self.failed_combinations = self._get_combinations_for_tasks(failed_tasks)
+        self.missing_combinations = [
+            self.original_combinations[i - 1] for i in missing_task_numbers
+        ]
+
+        total_completed = len(completed_tasks)
+        total_failed = len(failed_tasks)
+        total_missing = len(missing_task_numbers)
+        total_running = len(running_tasks)
+
+        # Create summary report
+        summary = {
+            "sweep_dir": str(self.sweep_dir),
+            "total_expected": total_expected,
+            "total_completed": total_completed,
+            "total_failed": total_failed,
+            "total_cancelled": 0,  # PBS array jobs don't have cancelled status, only SUCCESS/FAILED
+            "total_missing": total_missing,
+            "total_running": total_running,
+            "completion_rate": (total_completed / total_expected * 100)
+            if total_expected > 0
+            else 0,
+            "completed_tasks": completed_tasks,
+            "failed_tasks": failed_tasks,
+            "cancelled_tasks": [],  # PBS array jobs don't have cancelled status
+            "running_tasks": running_tasks,
+            "missing_task_numbers": missing_task_numbers,
+            "missing_combinations": self.missing_combinations,
+            "failed_combinations": self.failed_combinations,
+            "cancelled_combinations": [],  # PBS array jobs don't have cancelled status
+            "needs_completion": total_missing > 0 or total_failed > 0,
+            "task_statuses": task_statuses,
+            "scan_method": "task_directories",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Update source_mapping.yaml with actual task statuses from directories
+        # This makes source_mapping.yaml the single source of truth
+        self._update_source_mapping_from_directories(task_statuses)
+
+        return summary
+
+    def analyze_completion_status(self) -> Dict[str, Any]:
+        """Analyze the completion status of the sweep.
+
+        Uses source_mapping.yaml if available, otherwise falls back to
+        direct task directory scanning (useful for PBS array jobs).
+        """
+        if not self.load_sweep_data():
+            return {"error": "Failed to load sweep data"}
+
+        # If source_mapping.yaml doesn't exist or has no task assignments,
+        # fall back to task directory scanning (useful for PBS array jobs)
         task_assignments = self.source_mapping.get("task_assignments", {})
+        if not task_assignments:
+            logger.info("No task assignments in source_mapping.yaml, using task directory scanning")
+            return self.analyze_from_task_directories()
+
+        # Generate original combinations
+        generator = ParameterGenerator(self.sweep_config)
+        self.original_combinations = list(generator.generate_combinations())
+
+        # Analyze task assignments from source_mapping.yaml
+        # (Keep the rest of the existing logic)
 
         # Get completed, failed, cancelled, and running tasks
         completed_tasks = []
@@ -120,12 +265,13 @@ class SweepCompletionAnalyzer:
                 running_tasks.append(task_id)
 
         # Save the corrected mapping if we made any status fixes
+        # This keeps source_mapping.yaml as the single source of truth
         if status_fixes_count > 0:
             try:
                 with open(self.source_mapping_path, "w") as f:
                     yaml.dump(self.source_mapping, f, default_flow_style=False, indent=2)
                 logger.info(
-                    f"Saved corrected source mapping with {status_fixes_count} status fixes"
+                    f"Updated source_mapping.yaml with {status_fixes_count} status corrections"
                 )
             except Exception as e:
                 logger.error(f"Error saving corrected source mapping: {e}")
@@ -224,7 +370,8 @@ class SweepCompletionAnalyzer:
                     try:
                         with open(task_info_file) as f:
                             content = f.read()
-                            if "Status: COMPLETED" in content:
+                            # Support both PBS array format (SUCCESS) and local format (COMPLETED)
+                            if "Status: COMPLETED" in content or "Status: SUCCESS" in content:
                                 # Get the combination for this task
                                 task_match = re.search(r"task_(\d+)", task_id)
                                 if task_match:
@@ -237,6 +384,56 @@ class SweepCompletionAnalyzer:
                         logger.warning(f"Error reading task info for {task_id}: {e}")
 
         return verified_combinations
+
+    def _update_source_mapping_from_directories(self, task_statuses: Dict[str, str]):
+        """Update source_mapping.yaml with actual task statuses from directories.
+
+        This makes source_mapping.yaml the single source of truth by syncing it
+        with actual task directory statuses.
+        """
+        try:
+            import yaml
+
+            if not self.source_mapping_path.exists():
+                # Create initial source mapping if it doesn't exist
+                mapping_data = {
+                    "sweep_metadata": {
+                        "total_tasks": len(self.original_combinations),
+                        "compute_sources": ["HPC"],
+                        "strategy": "task_directory_scan",
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                    "task_assignments": {},
+                }
+            else:
+                with open(self.source_mapping_path) as f:
+                    mapping_data = yaml.safe_load(f) or {}
+
+            # Update task assignments with actual statuses
+            for task_id, status in task_statuses.items():
+                if task_id not in mapping_data["task_assignments"]:
+                    mapping_data["task_assignments"][task_id] = {}
+
+                # Update status from actual directory
+                mapping_data["task_assignments"][task_id]["status"] = status
+
+                # Set compute source if not already set
+                if "compute_source" not in mapping_data["task_assignments"][task_id]:
+                    mapping_data["task_assignments"][task_id]["compute_source"] = "HPC"
+
+            # Update timestamp
+            if "sweep_metadata" not in mapping_data:
+                mapping_data["sweep_metadata"] = {}
+            mapping_data["sweep_metadata"]["timestamp"] = datetime.now().isoformat()
+
+            # Save updated mapping
+            with open(self.source_mapping_path, "w") as f:
+                yaml.dump(mapping_data, f, default_flow_style=False, indent=2)
+
+            logger.info(f"Updated source_mapping.yaml with {len(task_statuses)} task statuses")
+
+        except Exception as e:
+            logger.warning(f"Could not update source mapping from directories: {e}")
 
     def _params_to_key(self, params: Dict[str, Any]) -> str:
         """Convert parameters to a hashable key for comparison."""
@@ -273,7 +470,11 @@ class SweepCompletionAnalyzer:
                     ]
                     if status_lines:
                         last_status_line = status_lines[-1]
-                        if "Status: COMPLETED" in last_status_line:
+                        # Support both PBS array format (SUCCESS/FAILED) and local format (COMPLETED/FAILED)
+                        if (
+                            "Status: COMPLETED" in last_status_line
+                            or "Status: SUCCESS" in last_status_line
+                        ):
                             return "COMPLETED"
                         elif "Status: FAILED" in last_status_line:
                             return "FAILED"
@@ -303,7 +504,7 @@ class SweepCompletionAnalyzer:
                                                     f"Process {pid} not running for {task_id}, likely failed"
                                                 )
                                                 return "FAILED"
-                                    except:
+                                    except Exception:
                                         pass
                             return "RUNNING"
 
@@ -319,6 +520,42 @@ class SweepCompletor:
     def __init__(self, sweep_dir: Path):
         self.sweep_dir = Path(sweep_dir)
         self.analyzer = SweepCompletionAnalyzer(sweep_dir)
+
+    def _detect_original_sweep_mode(self) -> str:
+        """Detect the original sweep's execution mode from source_mapping.yaml."""
+        try:
+            if not self.analyzer.source_mapping_path.exists():
+                logger.info("No source_mapping.yaml found, defaulting to array mode detection")
+                return "array"  # Will auto-detect HPC system
+
+            import yaml
+
+            with open(self.analyzer.source_mapping_path) as f:
+                mapping_data = yaml.safe_load(f) or {}
+
+            strategy = mapping_data.get("sweep_metadata", {}).get("strategy", "")
+            compute_sources = mapping_data.get("sweep_metadata", {}).get("compute_sources", [])
+
+            # Detect mode from strategy
+            if strategy == "pbs_array":
+                logger.info("Detected PBS array sweep, using array mode for completion")
+                return "array"
+            elif strategy in ["round_robin", "least_loaded", "capability_based"]:
+                logger.info(f"Detected distributed sweep ({strategy}), using distributed mode")
+                return "distributed"
+            elif len(compute_sources) > 1:
+                logger.info("Detected multiple compute sources, using distributed mode")
+                return "distributed"
+            elif "HPC" in compute_sources:
+                logger.info("Detected HPC execution, using array mode for completion")
+                return "array"
+            else:
+                logger.info("Could not determine mode, defaulting to array")
+                return "array"
+
+        except Exception as e:
+            logger.warning(f"Error detecting original sweep mode: {e}, defaulting to array")
+            return "array"
 
     def generate_completion_plan(self) -> Dict[str, Any]:
         """Generate a plan for completing the sweep."""
@@ -386,43 +623,82 @@ class SweepCompletor:
             return plan
 
         analysis = plan["analysis"]
+
+        # Auto-detect mode from original sweep if mode is "auto"
+        if mode == "auto":
+            mode = self._detect_original_sweep_mode()
+            if kwargs.get("console"):
+                kwargs["console"].print(f"[cyan]Auto-detected execution mode: {mode}[/cyan]")
+
+        # Handle both source_mapping and task_directory analysis formats
         missing_combinations = analysis["missing_combinations"]
-        failed_combinations = analysis["failed_combinations"] if retry_failed else []
-        cancelled_combinations = analysis["cancelled_combinations"] if retry_failed else []
+        failed_combinations = analysis.get("failed_combinations", []) if retry_failed else []
+        cancelled_combinations = analysis.get("cancelled_combinations", []) if retry_failed else []
+
+        # Get task number information for proper re-use
+        missing_task_numbers = analysis.get("missing_task_numbers", [])
 
         # Combine missing, failed, and cancelled combinations to re-run
         combinations_to_run = missing_combinations + failed_combinations + cancelled_combinations
 
         total_available_to_run = len(combinations_to_run)
 
-        # Find the highest existing task number in source_mapping to continue from there
-        existing_task_assignments = self.analyzer.source_mapping.get("task_assignments", {})
+        # Find the highest existing task number to continue from there
+        # This works with both source_mapping and task_directory analysis
         max_existing_task_num = 0
+        failed_task_map = {}  # Maps task number to combination key
 
-        # Get all existing task numbers
-        for task_name in existing_task_assignments.keys():
-            task_match = re.search(r"task_(\d+)", task_name)
-            if task_match:
-                task_num = int(task_match.group(1))
-                max_existing_task_num = max(max_existing_task_num, task_num)
+        # Method 1: Use source_mapping if available
+        existing_task_assignments = self.analyzer.source_mapping.get("task_assignments", {})
+        if existing_task_assignments:
+            for task_name in existing_task_assignments.keys():
+                task_match = re.search(r"task_(\d+)", task_name)
+                if task_match:
+                    task_num = int(task_match.group(1))
+                    max_existing_task_num = max(max_existing_task_num, task_num)
 
-        # For failed and cancelled tasks, we need to re-use their existing task numbers
-        failed_task_map = {}
-        if retry_failed and (failed_combinations or cancelled_combinations):
-            for task_name, task_info in existing_task_assignments.items():
-                task_status = task_info.get("status")
-                if task_status in ["FAILED", "CANCELLED"]:
-                    task_match = re.search(r"task_(\d+)", task_name)
-                    if task_match:
-                        task_num = int(task_match.group(1))
-                        # Find the combination for this failed/cancelled task
-                        retry_combinations = failed_combinations + cancelled_combinations
-                        for combo in retry_combinations:
-                            # Check if this combination hasn't been assigned yet
+            # For failed and cancelled tasks, we need to re-use their existing task numbers
+            if retry_failed and (failed_combinations or cancelled_combinations):
+                for task_name, task_info in existing_task_assignments.items():
+                    task_status = task_info.get("status")
+                    if task_status in ["FAILED", "CANCELLED"]:
+                        task_match = re.search(r"task_(\d+)", task_name)
+                        if task_match:
+                            task_num = int(task_match.group(1))
+                            # Find the combination for this failed/cancelled task
+                            retry_combinations = failed_combinations + cancelled_combinations
+                            for combo in retry_combinations:
+                                # Check if this combination hasn't been assigned yet
+                                combo_key = self.analyzer._params_to_key(combo)
+                                if combo_key not in failed_task_map.values():
+                                    failed_task_map[task_num] = combo_key
+                                    break
+
+        # Method 2: Use task directory scanning results if source_mapping is not available
+        else:
+            # Get task numbers from failed tasks
+            failed_tasks = analysis.get("failed_tasks", [])
+            for task_id in failed_tasks:
+                task_match = re.search(r"task_(\d+)", task_id)
+                if task_match:
+                    task_num = int(task_match.group(1))
+                    max_existing_task_num = max(max_existing_task_num, task_num)
+
+                    if retry_failed and failed_combinations:
+                        # Map this task number to its combination
+                        # Task numbers are 1-indexed, combinations are 0-indexed
+                        if 1 <= task_num <= len(self.analyzer.original_combinations):
+                            combo = self.analyzer.original_combinations[task_num - 1]
                             combo_key = self.analyzer._params_to_key(combo)
-                            if combo_key not in failed_task_map.values():
-                                failed_task_map[task_num] = combo_key
-                                break
+                            failed_task_map[task_num] = combo_key
+
+            # Also check completed tasks to find max task number
+            completed_tasks = analysis.get("completed_tasks", [])
+            for task_id in completed_tasks:
+                task_match = re.search(r"task_(\d+)", task_id)
+                if task_match:
+                    task_num = int(task_match.group(1))
+                    max_existing_task_num = max(max_existing_task_num, task_num)
 
         # Create tasks to run with proper task numbering
         tasks_to_run = []
@@ -460,12 +736,78 @@ class SweepCompletor:
                     )
                     next_task_num += 1
 
-        # Then, assign missing combinations to new task numbers
-        for combo in missing_combinations:
-            tasks_to_run.append(
-                {"task_index": next_task_num - 1, "task_number": next_task_num, "params": combo}
-            )
-            next_task_num += 1
+        # Then, assign missing combinations to their proper task numbers
+        # If we have missing_task_numbers from task directory scanning, use those
+        # This ensures we fill the gaps rather than creating new task numbers
+        if missing_task_numbers:
+            for i, combo in enumerate(missing_combinations):
+                if i < len(missing_task_numbers):
+                    task_num = missing_task_numbers[i]
+                    # SAFETY CHECK: Only prevent overwriting COMPLETED tasks
+                    # Failed/running tasks can be safely retried
+                    task_dir = self.analyzer.sweep_dir / "tasks" / f"task_{task_num:03d}"
+                    if task_dir.exists():
+                        # Check if this is a completed task
+                        task_info_file = task_dir / "task_info.txt"
+                        is_completed = False
+                        if task_info_file.exists():
+                            try:
+                                with open(task_info_file) as f:
+                                    content = f.read()
+                                    # Check for SUCCESS or COMPLETED status
+                                    if (
+                                        "Status: SUCCESS" in content
+                                        or "Status: COMPLETED" in content
+                                    ):
+                                        is_completed = True
+                            except Exception:
+                                pass
+
+                        if is_completed:
+                            # Don't overwrite completed tasks
+                            if logger := kwargs.get("logger"):
+                                logger.warning(
+                                    f"Task {task_num:03d} is already COMPLETED, "
+                                    f"using new task number to avoid overwriting"
+                                )
+                            tasks_to_run.append(
+                                {
+                                    "task_index": next_task_num - 1,
+                                    "task_number": next_task_num,
+                                    "params": combo,
+                                }
+                            )
+                            next_task_num += 1
+                        else:
+                            # Allow overwriting failed/incomplete tasks
+                            tasks_to_run.append(
+                                {
+                                    "task_index": task_num - 1,
+                                    "task_number": task_num,
+                                    "params": combo,
+                                }
+                            )
+                    else:
+                        tasks_to_run.append(
+                            {"task_index": task_num - 1, "task_number": task_num, "params": combo}
+                        )
+                else:
+                    # Fallback to sequential numbering if we run out of missing numbers
+                    tasks_to_run.append(
+                        {
+                            "task_index": next_task_num - 1,
+                            "task_number": next_task_num,
+                            "params": combo,
+                        }
+                    )
+                    next_task_num += 1
+        else:
+            # No missing_task_numbers available, use sequential numbering
+            for combo in missing_combinations:
+                tasks_to_run.append(
+                    {"task_index": next_task_num - 1, "task_number": next_task_num, "params": combo}
+                )
+                next_task_num += 1
 
         if max_runs is not None and max_runs > 0:
             if console := kwargs.get("console"):
@@ -489,11 +831,26 @@ class SweepCompletor:
             # Show which task numbers would be used
             task_numbers = [t["task_number"] for t in tasks_to_run]
             if console := kwargs.get("console"):
-                console.print(f"Task numbers that would be used: {task_numbers}")
+                console.print(f"\n[bold yellow]Execution Mode: {mode.upper()}[/bold yellow]")
+                if mode == "array":
+                    console.print("[cyan]• Will submit as PBS/Slurm array job[/cyan]")
+                elif mode == "distributed":
+                    console.print("[cyan]• Will distribute across multiple compute sources[/cyan]")
+                elif mode == "remote":
+                    console.print("[cyan]• Will execute on remote machine[/cyan]")
+                elif mode == "local":
+                    console.print("[cyan]• Will execute locally[/cyan]")
+
+                console.print(f"\n[bold]Task numbers to run:[/bold]")
+                if len(task_numbers) <= 20:
+                    console.print(f"  {task_numbers}")
+                else:
+                    console.print(f"  {task_numbers[:20]}... and {len(task_numbers) - 20} more")
 
             return {
                 "status": "dry_run",
                 "message": message,
+                "execution_mode": mode,
                 "combinations_to_run": [t["params"] for t in tasks_to_run],
                 "task_numbers": task_numbers,
                 "missing_count": len(missing_combinations),
