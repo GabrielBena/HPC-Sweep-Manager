@@ -5,10 +5,12 @@ import json
 import logging
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Dict, List, Optional, Set
 
 from rich.console import Console
+from rich.prompt import Confirm
 import yaml
 
 from .config import SyncTarget
@@ -157,6 +159,101 @@ class WandbSyncer:
             self._mark_runs_as_synced(sweep_id, runs_to_sync)
 
         return success
+
+    def clean_wandb_runs(
+        self,
+        sweep_id: str,
+        dry_run: bool = False,
+        confirm: bool = True,
+    ) -> bool:
+        """
+        Clean (delete) local wandb runs for a sweep.
+
+        Uses cached metadata to efficiently locate runs without full scan.
+
+        Args:
+            sweep_id: Sweep ID to clean runs for
+            dry_run: If True, only show what would be deleted without actually deleting
+            confirm: If True, prompt for confirmation before deletion (ignored in dry_run)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Find wandb directory
+        wandb_dir = self._find_wandb_dir()
+        if not wandb_dir:
+            self.console.print("[red]Error: Wandb directory not found[/red]")
+            return False
+
+        # Find runs belonging to this sweep (reuse cache)
+        run_dirs = self._find_sweep_runs(wandb_dir, sweep_id)
+        if not run_dirs:
+            self.console.print(f"[yellow]No wandb runs found for sweep {sweep_id}[/yellow]")
+            return True  # Not an error, just no runs
+
+        # Calculate total size
+        total_size = 0
+        for run_dir in run_dirs:
+            total_size += sum(f.stat().st_size for f in run_dir.rglob("*") if f.is_file())
+
+        size_mb = total_size / (1024 * 1024)
+        size_gb = total_size / (1024 * 1024 * 1024)
+
+        # Display what will be deleted
+        self.console.print(f"\n[bold]Found {len(run_dirs)} wandb runs for sweep {sweep_id}:[/bold]")
+        for run_dir in run_dirs:
+            run_size = sum(f.stat().st_size for f in run_dir.rglob("*") if f.is_file())
+            run_size_mb = run_size / (1024 * 1024)
+            self.console.print(f"  • {run_dir.name} ({run_size_mb:.1f} MB)")
+
+        if size_gb >= 1:
+            self.console.print(f"\n[bold]Total size: {size_gb:.2f} GB[/bold]")
+        else:
+            self.console.print(f"\n[bold]Total size: {size_mb:.1f} MB[/bold]")
+
+        if dry_run:
+            self.console.print("\n[yellow]DRY RUN: No files will be deleted[/yellow]")
+            return True
+
+        # Confirm deletion
+        if confirm:
+            self.console.print()
+            confirmed = Confirm.ask(
+                f"[bold red]Delete {len(run_dirs)} runs ({size_gb:.2f} GB)?[/bold red]",
+                default=False,
+            )
+            if not confirmed:
+                self.console.print("[yellow]Deletion cancelled[/yellow]")
+                return False
+
+        # Delete runs
+        self.console.print(f"\n[bold]Deleting {len(run_dirs)} runs...[/bold]")
+        deleted = 0
+        failed = 0
+
+        for run_dir in run_dirs:
+            try:
+                shutil.rmtree(run_dir)
+                self.console.print(f"  [green]✓ Deleted {run_dir.name}[/green]")
+                deleted += 1
+            except Exception as e:
+                self.console.print(f"  [red]✗ Failed to delete {run_dir.name}: {e}[/red]")
+                logger.error(f"Failed to delete {run_dir.name}: {e}")
+                failed += 1
+
+        # Summary
+        self.console.print()
+        if deleted > 0:
+            self.console.print(f"[green]Successfully deleted {deleted} runs[/green]")
+        if failed > 0:
+            self.console.print(f"[red]Failed to delete {failed} runs[/red]")
+
+        # Clear cache for this sweep since runs are deleted
+        if deleted > 0:
+            self.console.print("[dim]Clearing cache for deleted sweep...[/dim]")
+            self.clear_cache(sweep_id)
+
+        return failed == 0
 
     def _find_wandb_dir(self) -> Optional[Path]:
         """Find the wandb directory."""

@@ -2,11 +2,13 @@
 
 import logging
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 from typing import Optional
 
 from rich.console import Console
+from rich.prompt import Confirm
 
 from .config import SyncTarget
 
@@ -72,6 +74,74 @@ class SweepSyncer:
 
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to sync sweep metadata: {e}")
+            return False
+
+    def clean_sweep_metadata(
+        self,
+        sweep_id: str,
+        dry_run: bool = False,
+        confirm: bool = True,
+    ) -> bool:
+        """
+        Clean (delete) local sweep metadata directory.
+
+        Args:
+            sweep_id: Sweep ID to clean metadata for
+            dry_run: If True, only show what would be deleted without actually deleting
+            confirm: If True, prompt for confirmation before deletion (ignored in dry_run)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        # Find sweep output directory
+        sweep_dir = self._find_sweep_dir(sweep_id)
+        if not sweep_dir:
+            self.console.print(f"[yellow]No sweep directory found for {sweep_id}[/yellow]")
+            return True  # Not an error, just no directory
+
+        # Calculate total size
+        total_size = sum(f.stat().st_size for f in sweep_dir.rglob("*") if f.is_file())
+        size_mb = total_size / (1024 * 1024)
+        size_gb = total_size / (1024 * 1024 * 1024)
+
+        # Count files
+        file_count = sum(1 for _ in sweep_dir.rglob("*") if _.is_file())
+
+        # Display what will be deleted
+        self.console.print(f"\n[bold]Found sweep directory: {sweep_dir}[/bold]")
+        self.console.print(f"  Files: {file_count}")
+        if size_gb >= 1:
+            self.console.print(f"  Size: {size_gb:.2f} GB")
+        else:
+            self.console.print(f"  Size: {size_mb:.1f} MB")
+
+        if dry_run:
+            self.console.print("\n[yellow]DRY RUN: No files will be deleted[/yellow]")
+            return True
+
+        # Confirm deletion
+        if confirm:
+            self.console.print()
+            size_str = f"{size_gb:.2f} GB" if size_gb >= 1 else f"{size_mb:.1f} MB"
+
+            confirmed = Confirm.ask(
+                f"[bold red]Delete sweep directory '{sweep_dir.name}' ({size_str})?[/bold red]",
+                default=False,
+            )
+            if not confirmed:
+                self.console.print("[yellow]Deletion cancelled[/yellow]")
+                return False
+
+        # Delete sweep directory
+        self.console.print("\n[bold]Deleting sweep directory...[/bold]")
+        try:
+            shutil.rmtree(sweep_dir)
+            self.console.print(f"[green]✓ Successfully deleted {sweep_dir}[/green]")
+            logger.info(f"Deleted sweep directory: {sweep_dir}")
+            return True
+        except Exception as e:
+            self.console.print(f"[red]✗ Failed to delete sweep directory: {e}[/red]")
+            logger.error(f"Failed to delete sweep directory {sweep_dir}: {e}")
             return False
 
     def _find_sweep_dir(self, sweep_id: str) -> Optional[Path]:

@@ -381,5 +381,131 @@ def cache_management(ctx, sweep_id: str, clear: bool, clear_all: bool, verbose: 
             console.print(f"Cache location: {cache_dir}")
 
 
+@sync.command("clean")
+@click.argument("sweep_id")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be deleted without actually deleting",
+)
+@click.option(
+    "--no-confirm",
+    is_flag=True,
+    help="Skip confirmation prompt (use with caution!)",
+)
+@click.option(
+    "--wandb-only",
+    is_flag=True,
+    help="Only clean wandb runs (not sweep metadata)",
+)
+@click.option(
+    "--sweep-only",
+    is_flag=True,
+    help="Only clean sweep metadata (not wandb runs)",
+)
+@common_options
+@click.pass_context
+def clean_sweep(
+    ctx,
+    sweep_id: str,
+    dry_run: bool,
+    no_confirm: bool,
+    wandb_only: bool,
+    sweep_only: bool,
+    verbose: bool,
+    quiet: bool,
+):
+    """Clean (delete) local sweep data including wandb runs and metadata.
+
+    By default, cleans both wandb runs and sweep metadata directories.
+    Use --wandb-only or --sweep-only to clean specific parts.
+
+    Examples:
+        # Dry run to preview what would be deleted
+        hsm sync clean sweep_20251020_212836 --dry-run
+
+        # Delete with confirmation prompt
+        hsm sync clean sweep_20251020_212836
+
+        # Delete without confirmation (use with caution!)
+        hsm sync clean sweep_20251020_212836 --no-confirm
+
+        # Only delete wandb runs
+        hsm sync clean sweep_20251020_212836 --wandb-only
+
+        # Only delete sweep metadata
+        hsm sync clean sweep_20251020_212836 --sweep-only
+    """
+    console = ctx.obj["console"]
+
+    # Validate options
+    if wandb_only and sweep_only:
+        console.print("[red]Error: Cannot specify both --wandb-only and --sweep-only[/red]")
+        return
+
+    # Show header
+    console.print(
+        Panel.fit(
+            f"[bold red]Clean Sweep: {sweep_id}[/bold red]",
+            border_style="red",
+        )
+    )
+
+    if dry_run:
+        console.print("[yellow]DRY RUN MODE - No files will be deleted[/yellow]\n")
+
+    # Import syncers
+    from ..sync.config import SyncTarget
+    from ..sync.sweep_sync import SweepSyncer
+    from ..sync.wandb_sync import WandbSyncer
+
+    # Create dummy target (not needed for cleaning, but required by constructor)
+    dummy_target = SyncTarget(
+        name="local",
+        ssh_host="localhost",
+        paths={},
+    )
+
+    success = True
+
+    # Clean wandb runs
+    if not sweep_only:
+        console.print("\n[bold]Cleaning wandb runs...[/bold]")
+        wandb_syncer = WandbSyncer(dummy_target, console)
+
+        if not wandb_syncer.clean_wandb_runs(
+            sweep_id=sweep_id,
+            dry_run=dry_run,
+            confirm=not no_confirm,
+        ):
+            success = False
+            if not dry_run:
+                console.print("[red]Failed to clean wandb runs[/red]")
+
+    # Clean sweep metadata
+    if not wandb_only:
+        console.print("\n[bold]Cleaning sweep metadata...[/bold]")
+        sweep_syncer = SweepSyncer(dummy_target, console)
+
+        if not sweep_syncer.clean_sweep_metadata(
+            sweep_id=sweep_id,
+            dry_run=dry_run,
+            confirm=not no_confirm,
+        ):
+            success = False
+            if not dry_run:
+                console.print("[red]Failed to clean sweep metadata[/red]")
+
+    # Final summary
+    console.print()
+    if dry_run:
+        console.print("[yellow]DRY RUN completed - no files were deleted[/yellow]")
+    elif success:
+        console.print("[green]✅ Clean completed successfully[/green]")
+    else:
+        console.print("[red]❌ Clean completed with errors[/red]")
+        ctx.exit(1)
+
+
 if __name__ == "__main__":
     sync()
