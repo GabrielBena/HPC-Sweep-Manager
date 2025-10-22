@@ -161,7 +161,9 @@ class SweepSyncer:
             temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
 
             # Use find to get files within depth limit, preserving folder structure
-            # Like rsync.sh: find "$folder_name" -maxdepth "$max_depth" -type f -printf "$folder_name/%P\n"
+            # We need the full relative path from project root: sweeps/outputs/sweep_id
+            sweep_relative_path = sweep_dir.relative_to(Path.cwd())
+
             find_cmd = [
                 "find",
                 str(sweep_dir),
@@ -170,7 +172,7 @@ class SweepSyncer:
                 "-type",
                 "f",
                 "-printf",
-                f"{sweep_dir.name}/%P\\n",
+                f"{sweep_relative_path}/%P\\n",
             ]
 
             result = subprocess.run(find_cmd, capture_output=True, text=True, check=True)
