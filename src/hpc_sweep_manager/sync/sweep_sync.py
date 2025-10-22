@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 import subprocess
+import tempfile
 from typing import Optional
 
 from rich.console import Console
@@ -44,65 +45,27 @@ class SweepSyncer:
             return False
 
         # Get sync depth
-        max_depth = self.target.get_option("max_depth", 1)
+        max_depth = self.target.get_option("max_depth", None)
 
-        # Build rsync command
-        rsync_cmd = [
-            "rsync",
-            "-avz",
-            "--progress",
-        ]
-
-        if dry_run:
-            rsync_cmd.append("--dry-run")
-
-        # Handle depth limiting using find + --files-from (like rsync.sh)
-        temp_file_path = None
-        if max_depth:
-            # Create temporary file with files to sync (respecting depth limit)
-            temp_file_path = self._create_depth_limited_file_list(sweep_dir, max_depth)
-            if temp_file_path:
-                rsync_cmd.extend(
-                    [
-                        "--files-from",
-                        temp_file_path,
-                        "--dirs",  # Create directories as needed
-                    ]
-                )
-                # Source is the parent directory for --files-from
-                source = str(sweep_dir.parent) + "/"
-            else:
-                # Fallback to regular sync if file list creation failed
-                source = str(sweep_dir) + "/"
-        else:
-            # Regular sync without depth limiting
-            source = str(sweep_dir) + "/"
-
-        # Add exclusions
-        rsync_cmd.extend(
-            [
-                "--exclude=wandb/",  # Don't sync wandb runs here
-                "--exclude=*.ckpt",  # Exclude large checkpoint files
-                "--exclude=*.pth",
-            ]
-        )
-
-        # Destination
+        # Source and destination
         sweep_dir_name = sweep_dir.name
         remote_sweeps_path = self.target.get_path("sweeps")
         destination = f"{self.target.ssh_host}:{remote_sweeps_path}/{sweep_dir_name}/"
 
-        rsync_cmd.extend([source, destination])
+        self.console.print(f"  Source: {sweep_dir}")
+        self.console.print(f"  Destination: {destination}")
 
-        # Execute rsync
+        if dry_run:
+            self.console.print("  [dim](dry run)[/dim]")
+
+        # Execute rsync (with or without depth limiting)
         try:
-            self.console.print(f"  Source: {sweep_dir}")
-            self.console.print(f"  Destination: {destination}")
-
-            if dry_run:
-                self.console.print("  [dim](dry run)[/dim]")
-
-            result = subprocess.run(rsync_cmd, capture_output=False, text=True, check=True)
+            if max_depth:
+                # Use find + rsync --files-from for depth limiting (like rsync.sh)
+                self._sync_with_depth_limit(sweep_dir, destination, max_depth, dry_run)
+            else:
+                # Simple rsync without depth limiting
+                self._sync_simple(sweep_dir, destination, dry_run)
 
             logger.info(f"Successfully synced sweep metadata for {sweep_id}")
             return True
@@ -110,13 +73,6 @@ class SweepSyncer:
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to sync sweep metadata: {e}")
             return False
-        finally:
-            # Clean up temporary file
-            if temp_file_path and Path(temp_file_path).exists():
-                try:
-                    Path(temp_file_path).unlink()
-                except Exception as e:
-                    logger.debug(f"Failed to remove temp file {temp_file_path}: {e}")
 
     def _find_sweep_dir(self, sweep_id: str) -> Optional[Path]:
         """
@@ -143,27 +99,35 @@ class SweepSyncer:
         logger.warning(f"Sweep directory not found for {sweep_id}")
         return None
 
-    def _create_depth_limited_file_list(self, sweep_dir: Path, max_depth: int) -> Optional[str]:
-        """
-        Create a temporary file list for rsync with depth limiting.
+    def _sync_simple(self, sweep_dir: Path, destination: str, dry_run: bool) -> None:
+        """Sync sweep directory without depth limiting."""
+        rsync_cmd = [
+            "rsync",
+            "-avz",
+            "--progress",
+            "--exclude=wandb/",  # Don't sync wandb runs here
+            "--exclude=*.ckpt",  # Exclude large checkpoint files
+            "--exclude=*.pth",
+        ]
 
-        Args:
-            sweep_dir: Sweep directory to sync
-            max_depth: Maximum directory depth
+        if dry_run:
+            rsync_cmd.append("--dry-run")
 
-        Returns:
-            Path to temporary file with file list, or None if failed
-        """
-        import tempfile
+        # Source with trailing slash for directory sync
+        source = str(sweep_dir) + "/"
+        rsync_cmd.extend([source, destination])
 
-        try:
-            # Create temporary file
-            temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+        subprocess.run(rsync_cmd, capture_output=False, text=True, check=True)
 
-            # Use find to get files within depth limit, preserving folder structure
-            # We need the full relative path from project root: sweeps/outputs/sweep_id
-            sweep_relative_path = sweep_dir.relative_to(Path.cwd())
+    def _sync_with_depth_limit(
+        self, sweep_dir: Path, destination: str, max_depth: int, dry_run: bool
+    ) -> None:
+        """Sync sweep directory with depth limiting using find + rsync --files-from."""
+        # Create temporary file for file list (like rsync.sh)
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as temp_file:
+            temp_file_path = temp_file.name
 
+            # Use find to generate file list within depth limit
             find_cmd = [
                 "find",
                 str(sweep_dir),
@@ -171,23 +135,45 @@ class SweepSyncer:
                 str(max_depth),
                 "-type",
                 "f",
-                "-printf",
-                f"{sweep_relative_path}/%P\\n",
+                "!",
+                "-path",
+                "*/wandb/*",  # Exclude wandb
+                "!",
+                "-name",
+                "*.ckpt",  # Exclude checkpoints
+                "!",
+                "-name",
+                "*.pth",
             ]
 
-            result = subprocess.run(find_cmd, capture_output=True, text=True, check=True)
+            try:
+                # Run find and write to temp file
+                result = subprocess.run(find_cmd, capture_output=True, text=True, check=True)
 
-            # Write the paths directly (they already include the folder prefix)
-            for file_path in result.stdout.strip().split("\n"):
-                if file_path:  # Skip empty lines
-                    temp_file.write(file_path + "\n")
+                # Write relative paths to temp file
+                with open(temp_file_path, "w") as f:
+                    for file_path in result.stdout.strip().split("\n"):
+                        if file_path:
+                            # Convert to relative path from sweep_dir parent
+                            rel_path = Path(file_path).relative_to(sweep_dir.parent)
+                            f.write(str(rel_path) + "\n")
 
-            temp_file.flush()
-            temp_file.close()
+                # Run rsync with --files-from
+                rsync_cmd = [
+                    "rsync",
+                    "-avz",
+                    "--progress",
+                    "--files-from",
+                    temp_file_path,
+                    str(sweep_dir.parent) + "/",  # Source base directory
+                    destination.rsplit("/", 1)[0] + "/",  # Destination base directory
+                ]
 
-            logger.debug(f"Created depth-limited file list: {temp_file.name}")
-            return temp_file.name
+                if dry_run:
+                    rsync_cmd.append("--dry-run")
 
-        except Exception as e:
-            logger.error(f"Failed to create depth-limited file list: {e}")
-            return None
+                subprocess.run(rsync_cmd, capture_output=False, text=True, check=True)
+
+            finally:
+                # Clean up temp file
+                Path(temp_file_path).unlink(missing_ok=True)
