@@ -141,11 +141,10 @@ Thumbs.db
 outputs/
 sweeps/outputs/
 *.hsm_cache
-.hsm/
+.hsm/cache/
 
 # W&B
 wandb/
-.wandb_sweep_cache.json
 
 # Temporary files
 *.tmp

@@ -65,7 +65,13 @@ class WandbSyncer:
         """
         self.target = target
         self.console = console or Console()
-        self._cache_file = Path.cwd() / ".wandb_sweep_cache.json"
+
+        # Cache directory in .hsm folder
+        self._cache_dir = Path.cwd() / ".hsm" / "cache"
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Master cache file for all sweeps
+        self._cache_file = self._cache_dir / "wandb_sync_cache.json"
         self._cache: Optional[Dict] = None
 
     def sync_wandb_runs(
