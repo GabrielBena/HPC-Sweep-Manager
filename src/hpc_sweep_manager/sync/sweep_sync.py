@@ -47,10 +47,10 @@ class SweepSyncer:
         # Get sync depth
         max_depth = self.target.get_option("max_depth", None)
 
-        # Source and destination
+        # Source and destination - preserve outputs/ subfolder structure
         sweep_dir_name = sweep_dir.name
         remote_sweeps_path = self.target.get_path("sweeps")
-        destination = f"{self.target.ssh_host}:{remote_sweeps_path}/{sweep_dir_name}/"
+        destination = f"{self.target.ssh_host}:{remote_sweeps_path}/outputs/{sweep_dir_name}/"
 
         self.console.print(f"  Source: {sweep_dir}")
         self.console.print(f"  Destination: {destination}")
