@@ -66,7 +66,7 @@ class SweepSyncer:
                     [
                         "--files-from",
                         temp_file_path,
-                        "--relative",  # Preserve directory structure
+                        "--dirs",  # Create directories as needed
                     ]
                 )
                 # Source is the parent directory for --files-from
@@ -160,17 +160,25 @@ class SweepSyncer:
             # Create temporary file
             temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
 
-            # Use find to get files within depth limit
-            find_cmd = ["find", str(sweep_dir), "-maxdepth", str(max_depth), "-type", "f"]
+            # Use find to get files within depth limit, preserving folder structure
+            # Like rsync.sh: find "$folder_name" -maxdepth "$max_depth" -type f -printf "$folder_name/%P\n"
+            find_cmd = [
+                "find",
+                str(sweep_dir),
+                "-maxdepth",
+                str(max_depth),
+                "-type",
+                "f",
+                "-printf",
+                f"{sweep_dir.name}/%P\\n",
+            ]
 
             result = subprocess.run(find_cmd, capture_output=True, text=True, check=True)
 
-            # Write relative paths to temp file
+            # Write the paths directly (they already include the folder prefix)
             for file_path in result.stdout.strip().split("\n"):
                 if file_path:  # Skip empty lines
-                    # Convert to relative path from sweep_dir
-                    rel_path = Path(file_path).relative_to(sweep_dir)
-                    temp_file.write(str(rel_path) + "\n")
+                    temp_file.write(file_path + "\n")
 
             temp_file.flush()
             temp_file.close()
