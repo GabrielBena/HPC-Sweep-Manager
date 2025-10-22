@@ -145,6 +145,7 @@ sweeps/outputs/
 
 # W&B
 wandb/
+.wandb_sweep_cache.json
 
 # Temporary files
 *.tmp
