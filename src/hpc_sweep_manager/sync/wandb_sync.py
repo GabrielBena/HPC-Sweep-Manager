@@ -638,6 +638,7 @@ class WandbSyncer:
         Scan all run directories to find those belonging to a sweep.
 
         Uses date filtering as an optimization when possible.
+        Parallelizes metadata scanning for faster processing.
 
         Args:
             wandb_dir: Path to wandb directory
@@ -663,19 +664,30 @@ class WandbSyncer:
             # No date in sweep ID, scan all runs
             run_dirs = list(wandb_dir.glob("run-*"))
 
+        # Filter to only directories
+        run_dirs = [d for d in run_dirs if d.is_dir()]
+
+        if not run_dirs:
+            return []
+
+        # Parallelize metadata scanning for speed
+        logger.debug(f"Scanning {len(run_dirs)} runs in parallel...")
         matching_runs = []
 
-        for run_dir in run_dirs:
-            if not run_dir.is_dir():
-                continue
-
+        def check_run(run_dir: Path) -> Optional[Path]:
+            """Check if run belongs to sweep, return path if it does."""
             try:
                 run_sweep_id = self._extract_sweep_id_from_run(run_dir, sweep_id)
                 if run_sweep_id:
-                    matching_runs.append(run_dir)
+                    return run_dir
             except Exception as e:
                 logger.debug(f"Error processing run {run_dir.name}: {e}")
-                continue
+            return None
+
+        # Use ThreadPoolExecutor for parallel I/O
+        with ThreadPoolExecutor(max_workers=min(20, len(run_dirs))) as executor:
+            results = executor.map(check_run, run_dirs)
+            matching_runs = [r for r in results if r is not None]
 
         logger.debug(f"Found {len(matching_runs)} runs for sweep {sweep_id}")
         return matching_runs
@@ -687,6 +699,7 @@ class WandbSyncer:
         Find new runs for a sweep that aren't in the existing list.
 
         Only checks recently modified run directories for efficiency.
+        Parallelizes metadata scanning for faster processing.
 
         Args:
             wandb_dir: Path to wandb directory
@@ -707,17 +720,23 @@ class WandbSyncer:
         if not new_run_dirs:
             return []
 
-        # Check which new runs belong to this sweep
-        matching_new_runs = []
+        logger.debug(f"Checking {len(new_run_dirs)} new runs in parallel...")
 
-        for run_dir in new_run_dirs:
+        # Check which new runs belong to this sweep (parallelized)
+        def check_run(run_dir: Path) -> Optional[Path]:
+            """Check if run belongs to sweep, return path if it does."""
             try:
                 run_sweep_id = self._extract_sweep_id_from_run(run_dir, sweep_id)
                 if run_sweep_id:
-                    matching_new_runs.append(run_dir)
+                    return run_dir
             except Exception as e:
                 logger.debug(f"Error processing new run {run_dir.name}: {e}")
-                continue
+            return None
+
+        # Use ThreadPoolExecutor for parallel I/O
+        with ThreadPoolExecutor(max_workers=min(20, len(new_run_dirs))) as executor:
+            results = executor.map(check_run, new_run_dirs)
+            matching_new_runs = [r for r in results if r is not None]
 
         return matching_new_runs
 
