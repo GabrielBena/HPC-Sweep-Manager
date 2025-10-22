@@ -262,37 +262,33 @@ def cache_management(ctx, sweep_id: str, clear: bool, clear_all: bool, verbose: 
     """
     console = ctx.obj["console"]
 
-    # Get cache file path
-    cache_dir = Path.cwd() / ".hsm" / "cache"
-    cache_file = cache_dir / "wandb_sync_cache.json"
+    # Get cache directory path (per-sweep files)
+    cache_dir = Path.cwd() / ".hsm" / "cache" / "wandb_sweeps"
 
     if clear:
         if clear_all:
-            # Clear entire cache
-            if cache_file.exists():
+            # Clear entire cache directory
+            if cache_dir.exists():
                 if click.confirm("Clear entire wandb sync cache?", default=False):
-                    cache_file.unlink()
+                    import shutil
+
+                    shutil.rmtree(cache_dir)
+                    cache_dir.mkdir(parents=True, exist_ok=True)
                     console.print("[green]✅ Cleared entire cache[/green]")
                 else:
                     console.print("[dim]Cancelled[/dim]")
             else:
-                console.print("[yellow]No cache file found[/yellow]")
+                console.print("[yellow]No cache directory found[/yellow]")
         elif sweep_id:
-            # Clear specific sweep
-            if not cache_file.exists():
-                console.print("[yellow]No cache file found[/yellow]")
-                return
-
+            # Clear specific sweep file
             import json
 
-            with open(cache_file) as f:
-                cache = json.load(f)
+            safe_sweep_id = sweep_id.replace("/", "_").replace("\\", "_")
+            cache_file = cache_dir / f"{safe_sweep_id}.json"
 
-            if sweep_id in cache.get("sweeps", {}):
+            if cache_file.exists():
                 if click.confirm(f"Clear cache for sweep {sweep_id}?", default=False):
-                    del cache["sweeps"][sweep_id]
-                    with open(cache_file, "w") as f:
-                        json.dump(cache, f, indent=2)
+                    cache_file.unlink()
                     console.print(f"[green]✅ Cleared cache for sweep {sweep_id}[/green]")
                 else:
                     console.print("[dim]Cancelled[/dim]")
@@ -302,31 +298,29 @@ def cache_management(ctx, sweep_id: str, clear: bool, clear_all: bool, verbose: 
             console.print("[red]Error: Specify --sweep-id or --all when using --clear[/red]")
     else:
         # Show cache info
-        if not cache_file.exists():
-            console.print("[yellow]No cache file found[/yellow]")
-            console.print(f"Cache will be created at: {cache_file}")
+        if not cache_dir.exists() or not list(cache_dir.glob("*.json")):
+            console.print("[yellow]No cache files found[/yellow]")
+            console.print(f"Cache will be created at: {cache_dir}")
             return
 
         import json
 
-        with open(cache_file) as f:
-            cache = json.load(f)
-
-        sweeps = cache.get("sweeps", {})
-
-        if not sweeps:
-            console.print("[yellow]Cache is empty[/yellow]")
-            return
-
         if sweep_id:
             # Show specific sweep
-            if sweep_id not in sweeps:
+            safe_sweep_id = sweep_id.replace("/", "_").replace("\\", "_")
+            cache_file = cache_dir / f"{safe_sweep_id}.json"
+
+            if not cache_file.exists():
                 console.print(f"[yellow]No cache found for sweep {sweep_id}[/yellow]")
                 return
 
-            sweep_cache = sweeps[sweep_id]
+            with open(cache_file) as f:
+                sweep_cache = json.load(f)
+
             console.print(f"\n[bold]Cache for {sweep_id}:[/bold]")
-            console.print(f"  Total runs: {sweep_cache.get('count', 0)}")
+            console.print(f"  Cache file: {cache_file.name}")
+            total_runs = len(sweep_cache.get("runs", []))
+            console.print(f"  Total runs: {total_runs}")
 
             run_status = sweep_cache.get("run_status", {})
             finished_count = sum(1 for r in run_status.values() if r.get("finished", False))
@@ -363,20 +357,28 @@ def cache_management(ctx, sweep_id: str, clear: bool, clear_all: bool, verbose: 
             table.add_column("Running", justify="right", style="yellow")
             table.add_column("Synced", justify="right", style="blue")
 
-            for sid, sweep_cache in sweeps.items():
-                total = sweep_cache.get("count", 0)
-                run_status = sweep_cache.get("run_status", {})
-                finished = sum(1 for r in run_status.values() if r.get("finished", False))
-                running = len(run_status) - finished
-                synced_dict = sweep_cache.get("synced", {})
-                synced = sum(1 for v in synced_dict.values() if v)
+            cache_files = sorted(cache_dir.glob("*.json"))
+            for cache_file in cache_files:
+                try:
+                    with open(cache_file) as f:
+                        sweep_cache = json.load(f)
 
-                table.add_row(sid, str(total), str(finished), str(running), str(synced))
+                    sid = sweep_cache.get("sweep_id", cache_file.stem)
+                    total = len(sweep_cache.get("runs", []))
+                    run_status = sweep_cache.get("run_status", {})
+                    finished = sum(1 for r in run_status.values() if r.get("finished", False))
+                    running = len(run_status) - finished
+                    synced_dict = sweep_cache.get("synced", {})
+                    synced = sum(1 for v in synced_dict.values() if v)
+
+                    table.add_row(sid, str(total), str(finished), str(running), str(synced))
+                except Exception as e:
+                    console.print(f"[red]Error reading {cache_file.name}: {e}[/red]")
 
             console.print()
             console.print(table)
             console.print()
-            console.print(f"Cache location: {cache_file}")
+            console.print(f"Cache location: {cache_dir}")
 
 
 if __name__ == "__main__":

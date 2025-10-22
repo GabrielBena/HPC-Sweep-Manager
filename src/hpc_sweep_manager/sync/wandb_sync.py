@@ -20,9 +20,27 @@ class WandbSyncer:
     """
     Handles syncing of wandb run directories with optimizations.
 
-    Three-State Caching System:
-    ---------------------------
-    This syncer tracks three independent states for each run:
+    Pre-Organized Directory Optimization:
+    -------------------------------------
+    If your wandb runs are organized in sweep-specific subdirectories:
+      wandb/{sweep_id}/wandb/run-*
+
+    The syncer automatically detects this and:
+    - Skips ALL metadata scanning (much faster!)
+    - Skips ALL caching (not needed)
+    - Directly uses runs from the organized structure
+    - Still applies sync status filtering (finished+synced runs)
+
+    Example structure:
+      wandb/
+        sweep_20251020_212836/
+          wandb/
+            run-20251020_123456/
+            run-20251020_123457/
+
+    Three-State Caching System (for non-organized runs):
+    -----------------------------------------------------
+    When runs are NOT pre-organized, this syncer tracks three independent states:
 
     1. **Cached Metadata (Sweep Membership)**
        - Determines which runs belong to which sweep
@@ -66,12 +84,12 @@ class WandbSyncer:
         self.target = target
         self.console = console or Console()
 
-        # Cache directory in .hsm folder
-        self._cache_dir = Path.cwd() / ".hsm" / "cache"
+        # Cache directory in .hsm folder - use per-sweep files for efficiency
+        self._cache_dir = Path.cwd() / ".hsm" / "cache" / "wandb_sweeps"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Master cache file for all sweeps
-        self._cache_file = self._cache_dir / "wandb_sync_cache.json"
+        # Per-sweep cache (set when loading for a specific sweep)
+        self._current_sweep_id: Optional[str] = None
         self._cache: Optional[Dict] = None
 
     def sync_wandb_runs(
@@ -150,9 +168,12 @@ class WandbSyncer:
 
         for path in search_paths:
             if path.exists() and path.is_dir():
-                # Check if it contains run directories
+                # Check if it contains run directories (either directly or in subdirs)
                 run_dirs = list(path.glob("run-*"))
-                if run_dirs:
+                # Also check for sweep-organized structure: wandb/sweep_id/wandb/run-*
+                sweep_subdirs = list(path.glob("*/wandb/run-*"))
+
+                if run_dirs or sweep_subdirs:
                     logger.debug(f"Found wandb directory: {path}")
                     return path
 
@@ -162,7 +183,12 @@ class WandbSyncer:
         self, wandb_dir: Path, sweep_id: str, force_refresh: bool = False
     ) -> List[Path]:
         """
-        Find all wandb runs belonging to a sweep using cached metadata.
+        Find all wandb runs belonging to a sweep.
+
+        Uses optimized detection if runs are pre-organized in sweep subdirectories:
+          wandb/{sweep_id}/wandb/run-*
+
+        Otherwise falls back to cached metadata scanning.
 
         Args:
             wandb_dir: Path to wandb directory
@@ -172,66 +198,145 @@ class WandbSyncer:
         Returns:
             List of run directory paths belonging to the sweep
         """
-        # Load cache
-        cache = self._load_cache()
+        # OPTIMIZATION: Check for pre-organized sweep directory structure
+        # Structure: wandb/{sweep_id}/wandb/run-*
+        sweep_wandb_dir = wandb_dir / sweep_id / "wandb"
+
+        if sweep_wandb_dir.exists() and sweep_wandb_dir.is_dir():
+            # Found pre-organized structure - no metadata scanning needed!
+            run_dirs = list(sweep_wandb_dir.glob("run-*"))
+            run_dirs = [d for d in run_dirs if d.is_dir()]
+
+            if run_dirs:
+                self.console.print(
+                    f"  [green]Found pre-organized sweep directory: {sweep_id}/wandb/[/green]"
+                )
+                self.console.print(
+                    f"  [green]Skipping metadata scan - using {len(run_dirs)} runs "
+                    f"from organized structure[/green]"
+                )
+                logger.info(
+                    f"Using pre-organized structure for {sweep_id}, found {len(run_dirs)} runs"
+                )
+                return run_dirs
+
+        # Fall back to cache-based metadata scanning
+        self.console.print("  [dim]No pre-organized sweep directory found, using cache...[/dim]")
+        cache = self._load_cache(sweep_id)
 
         # Check if we have cached results for this sweep
-        if not force_refresh and sweep_id in cache.get("sweeps", {}):
-            cached_data = cache["sweeps"][sweep_id]
-            run_names = cached_data.get("runs", [])
+        run_names = cache.get("runs", [])
+        if not force_refresh and run_names:
+            self.console.print(f"  [cyan]Found cached data for sweep {sweep_id}[/cyan]")
+
+            self.console.print(f"  [dim]Validating {len(run_names)} cached runs...[/dim]")
 
             # Validate cached runs still exist
             cached_runs = [wandb_dir / name for name in run_names if (wandb_dir / name).exists()]
 
-            logger.debug(f"Loaded {len(cached_runs)} runs from cache for sweep {sweep_id}")
+            removed = len(run_names) - len(cached_runs)
+            if removed > 0:
+                logger.debug(f"Removed {removed} non-existent runs from cache")
+                self.console.print(f"  [dim]Removed {removed} deleted runs from cache[/dim]")
+
+            logger.debug(f"Loaded {len(cached_runs)} valid runs from cache for sweep {sweep_id}")
+            self.console.print(f"  [green]Loaded {len(cached_runs)} runs from cache[/green]")
 
             # Check for new runs incrementally
+            self.console.print("  [dim]Checking for new runs...[/dim]")
             new_runs = self._find_new_runs(wandb_dir, sweep_id, cached_runs)
 
             if new_runs:
                 logger.debug(f"Found {len(new_runs)} new runs for sweep {sweep_id}")
+                self.console.print(
+                    f"  [cyan]Found {len(new_runs)} new runs, updating cache...[/cyan]"
+                )
                 all_runs = cached_runs + new_runs
                 self._update_cache_for_sweep(sweep_id, all_runs)
                 return all_runs
+            else:
+                self.console.print("  [dim]No new runs found[/dim]")
 
             return cached_runs
 
         # Full scan if no cache or force refresh
+        if force_refresh:
+            self.console.print("  [yellow]Force refresh enabled, performing full scan...[/yellow]")
+        else:
+            self.console.print(
+                f"  [yellow]No cache for {sweep_id}, performing full scan...[/yellow]"
+            )
         logger.debug(f"Performing full scan for sweep {sweep_id}")
         all_runs = self._scan_all_runs_for_sweep(wandb_dir, sweep_id)
 
         # Update cache
+        self.console.print(f"  [cyan]Updating cache with {len(all_runs)} runs...[/cyan]")
         self._update_cache_for_sweep(sweep_id, all_runs)
 
         return all_runs
 
-    def _load_cache(self) -> Dict:
-        """Load sweep-to-runs cache from disk."""
-        if self._cache is not None:
+    def _get_cache_file(self, sweep_id: str) -> Path:
+        """Get the cache file path for a specific sweep."""
+        # Sanitize sweep_id for filename
+        safe_sweep_id = sweep_id.replace("/", "_").replace("\\", "_")
+        return self._cache_dir / f"{safe_sweep_id}.json"
+
+    def _load_cache(self, sweep_id: str) -> Dict:
+        """Load cache for a specific sweep from disk."""
+        # If already loaded for this sweep, return it
+        if self._cache is not None and self._current_sweep_id == sweep_id:
+            logger.debug(f"Using already-loaded cache for {sweep_id}")
             return self._cache
 
-        if not self._cache_file.exists():
-            self._cache = {"sweeps": {}, "version": 1}
+        cache_file = self._get_cache_file(sweep_id)
+
+        if not cache_file.exists():
+            logger.debug(f"No cache file found for {sweep_id}, creating new cache")
+            self.console.print("  [dim]No cache found, will perform full scan[/dim]")
+            self._cache = {
+                "sweep_id": sweep_id,
+                "runs": [],
+                "run_status": {},
+                "synced": {},
+                "version": 1,
+            }
+            self._current_sweep_id = sweep_id
             return self._cache
 
         try:
-            with open(self._cache_file) as f:
+            logger.debug(f"Loading cache from {cache_file}")
+            self.console.print(f"  [dim]Loading cache for {sweep_id}...[/dim]")
+            with open(cache_file) as f:
                 self._cache = json.load(f)
+                run_count = len(self._cache.get("runs", []))
+                logger.debug(f"Loaded cache with {run_count} runs for {sweep_id}")
+                self.console.print(f"  [dim]Cache loaded ({run_count} runs)[/dim]")
+                self._current_sweep_id = sweep_id
                 return self._cache
         except Exception as e:
-            logger.warning(f"Failed to load cache: {e}, starting fresh")
-            self._cache = {"sweeps": {}, "version": 1}
+            logger.warning(f"Failed to load cache for {sweep_id}: {e}, starting fresh")
+            self.console.print("  [yellow]Failed to load cache, starting fresh[/yellow]")
+            self._cache = {
+                "sweep_id": sweep_id,
+                "runs": [],
+                "run_status": {},
+                "synced": {},
+                "version": 1,
+            }
+            self._current_sweep_id = sweep_id
             return self._cache
 
     def _save_cache(self) -> None:
-        """Save cache to disk."""
-        if self._cache is None:
+        """Save cache to disk for current sweep."""
+        if self._cache is None or self._current_sweep_id is None:
             return
 
+        cache_file = self._get_cache_file(self._current_sweep_id)
+
         try:
-            with open(self._cache_file, "w") as f:
+            with open(cache_file, "w") as f:
                 json.dump(self._cache, f, indent=2)
-            logger.debug(f"Cache saved to {self._cache_file}")
+            logger.debug(f"Cache saved to {cache_file}")
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
 
@@ -241,22 +346,32 @@ class WandbSyncer:
 
         Args:
             sweep_id: If provided, only clear cache for this sweep.
-                     If None, clear entire cache.
+                     If None, clear entire cache directory.
         """
         if sweep_id:
             # Clear cache for specific sweep
-            cache = self._load_cache()
-            if "sweeps" in cache and sweep_id in cache["sweeps"]:
-                del cache["sweeps"][sweep_id]
-                self._save_cache()
+            cache_file = self._get_cache_file(sweep_id)
+            if cache_file.exists():
+                cache_file.unlink()
                 self.console.print(f"[green]Cleared cache for sweep {sweep_id}[/green]")
+                # Clear in-memory cache if it matches
+                if self._current_sweep_id == sweep_id:
+                    self._cache = None
+                    self._current_sweep_id = None
             else:
                 self.console.print(f"[yellow]No cache found for sweep {sweep_id}[/yellow]")
         else:
-            # Clear entire cache
-            self._cache = {"sweeps": {}, "version": 1}
-            self._save_cache()
-            self.console.print("[green]Cleared entire wandb sync cache[/green]")
+            # Clear entire cache directory
+            import shutil
+
+            if self._cache_dir.exists():
+                shutil.rmtree(self._cache_dir)
+                self._cache_dir.mkdir(parents=True, exist_ok=True)
+                self._cache = None
+                self._current_sweep_id = None
+                self.console.print("[green]Cleared entire wandb sync cache[/green]")
+            else:
+                self.console.print("[yellow]No cache directory found[/yellow]")
 
     def _update_cache_for_sweep(self, sweep_id: str, run_dirs: List[Path]) -> None:
         """
@@ -267,15 +382,10 @@ class WandbSyncer:
         - Whether each run is finished or running
         - Which runs have been successfully synced (separate from this method)
         """
-        cache = self._load_cache()
+        cache = self._load_cache(sweep_id)
 
-        if "sweeps" not in cache:
-            cache["sweeps"] = {}
-
-        # Preserve existing sync status if it exists
-        existing_synced = {}
-        if sweep_id in cache["sweeps"] and "synced" in cache["sweeps"][sweep_id]:
-            existing_synced = cache["sweeps"][sweep_id]["synced"]
+        # Preserve existing sync status
+        existing_synced = cache.get("synced", {})
 
         # Build run status map
         run_status = {}
@@ -286,12 +396,10 @@ class WandbSyncer:
                 "last_checked": None,  # Could add timestamp here if needed
             }
 
-        cache["sweeps"][sweep_id] = {
-            "runs": [r.name for r in run_dirs],
-            "count": len(run_dirs),
-            "run_status": run_status,
-            "synced": existing_synced,  # Preserve sync status
-        }
+        # Update cache
+        cache["runs"] = [r.name for r in run_dirs]
+        cache["run_status"] = run_status
+        cache["synced"] = existing_synced  # Preserve sync status
 
         self._save_cache()
 
@@ -317,6 +425,8 @@ class WandbSyncer:
             run_dir / "files" / "config.yaml",
             run_dir / "wandb-summary.json",
             run_dir / "files" / "wandb-summary.json",
+            run_dir / "wandb-config.yaml",
+            run_dir / "files" / "wandb-config.yaml",
         ]
 
         for metadata_path in metadata_locations:
@@ -359,18 +469,26 @@ class WandbSyncer:
                     if value:
                         value_str = str(value)
 
+                        # For debugging: log what we found
+                        if target_sweep_id:
+                            logger.debug(f"Run {run_dir.name}: Found {key} = '{value_str}'")
+
                         # Try exact match first
                         if value_str == target_sweep_id:
                             return value_str
 
                         # For group field, try more flexible matching
-                        if key == "group":
+                        if key == "group" and target_sweep_id:
                             # Check if target sweep is contained in the group value
                             if target_sweep_id in value_str:
                                 return target_sweep_id
                             # Check if group value is contained in target sweep
                             if value_str in target_sweep_id:
                                 return value_str
+
+                        # Return any non-empty value as potential sweep ID
+                        if not target_sweep_id:
+                            return value_str
 
                 # Special handling for wandb-metadata.json args format
                 if metadata_path.name == "wandb-metadata.json" and "args" in metadata:
@@ -379,12 +497,42 @@ class WandbSyncer:
                         for arg in args_list:
                             if isinstance(arg, str) and "wandb.group=" in arg:
                                 group_value = arg.split("wandb.group=")[1]
-                                if group_value == target_sweep_id or target_sweep_id in group_value:
-                                    return target_sweep_id
+                                if target_sweep_id:
+                                    logger.debug(
+                                        f"Run {run_dir.name}: "
+                                        f"Found wandb.group in args = '{group_value}'"
+                                    )
+                                    if (
+                                        group_value == target_sweep_id
+                                        or target_sweep_id in group_value
+                                    ):
+                                        return target_sweep_id
+                                else:
+                                    return group_value
 
             except Exception as e:
                 logger.debug(f"Error reading {metadata_path}: {e}")
                 continue
+
+        # If no sweep ID found in metadata, try to extract from run name or group
+        # This is a fallback method
+        try:
+            summary_path = run_dir / "wandb-summary.json"
+            if summary_path.exists():
+                with open(summary_path) as f:
+                    summary = json.load(f)
+                    # Sometimes the run name contains the sweep ID
+                    run_name = summary.get("_wandb", {}).get("run_name", "")
+                    if "sweep_" in run_name:
+                        # Extract sweep ID pattern
+                        match = re.search(r"sweep_\w+", run_name)
+                        if match:
+                            found_sweep = match.group()
+                            if target_sweep_id and target_sweep_id in found_sweep:
+                                return target_sweep_id
+                            return found_sweep
+        except Exception:
+            pass
 
         return None
 
@@ -536,10 +684,9 @@ class WandbSyncer:
         Returns:
             Filtered list of runs that need syncing
         """
-        cache = self._load_cache()
-        sweep_cache = cache.get("sweeps", {}).get(sweep_id, {})
-        run_status_cache = sweep_cache.get("run_status", {})
-        synced_runs = sweep_cache.get("synced", {})
+        cache = self._load_cache(sweep_id)
+        run_status_cache = cache.get("run_status", {})
+        synced_runs = cache.get("synced", {})
 
         runs_to_sync = []
         skipped_finished = 0
@@ -609,14 +756,10 @@ class WandbSyncer:
             sweep_id: Sweep ID
             run_dirs: Run directories that were successfully synced
         """
-        cache = self._load_cache()
+        cache = self._load_cache(sweep_id)
 
-        if "sweeps" not in cache:
-            cache["sweeps"] = {}
-        if sweep_id not in cache["sweeps"]:
-            cache["sweeps"][sweep_id] = {"runs": [], "run_status": {}, "synced": {}}
-        if "synced" not in cache["sweeps"][sweep_id]:
-            cache["sweeps"][sweep_id]["synced"] = {}
+        if "synced" not in cache:
+            cache["synced"] = {}
 
         finished_synced = 0
         running_not_marked = 0
@@ -625,7 +768,7 @@ class WandbSyncer:
             is_finished = self._is_run_finished(run_dir)
             if is_finished:
                 # Only mark finished runs as synced
-                cache["sweeps"][sweep_id]["synced"][run_dir.name] = True
+                cache["synced"][run_dir.name] = True
                 logger.debug(f"Marked {run_dir.name} as synced")
                 finished_synced += 1
             else:
