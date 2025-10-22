@@ -17,6 +17,7 @@ from .monitor import (
 )  # Monitoring: watch, status, recent, queue, cancel, cleanup, delete-jobs, collect-results
 from .remote import remote  # Remote management
 from .sweep import sweep_cmd  # Direct sweep command
+from .sync_commands import sync  # Sync: init, list, run, to
 
 console = Console()
 
@@ -48,6 +49,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 # Register all command groups
 cli.add_command(setup)  # hsm setup init, hsm setup configure
 cli.add_command(sweep_cmd)  # hsm sweep (direct command)
+cli.add_command(sync)  # hsm sync init, list, run, to
 cli.add_command(
     monitor
 )  # hsm monitor watch, status, recent, queue, cancel, cleanup, delete-jobs, collect-results

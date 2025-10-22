@@ -160,21 +160,26 @@ class HSMConfig:
             HSMConfig instance or None if not found
         """
         if config_path is None:
-            # Search for hsm_config.yaml in standard locations
+            # Search for config in standard locations (new .hsm/ location takes priority)
             search_paths = [
-                Path.cwd() / "sweeps" / "hsm_config.yaml",
-                Path.cwd() / "hsm_config.yaml",
-                Path("sweeps") / "hsm_config.yaml",
-                Path("hsm_config.yaml"),
+                Path.cwd() / ".hsm" / "config.yaml",  # NEW: primary location
+                Path(".hsm") / "config.yaml",  # NEW: relative .hsm/
+                Path.cwd() / "sweeps" / "hsm_config.yaml",  # Legacy: for backwards compatibility
+                Path.cwd() / "hsm_config.yaml",  # Legacy
+                Path("sweeps") / "hsm_config.yaml",  # Legacy
+                Path("hsm_config.yaml"),  # Legacy
             ]
 
             for path in search_paths:
                 if path.exists():
                     config_path = path
+                    logger.debug(f"Found HSM config at: {path}")
                     break
 
         if config_path is None or not config_path.exists():
-            logger.debug("No hsm_config.yaml found in standard locations")
+            logger.debug(
+                "No HSM config found in standard locations (.hsm/config.yaml or sweeps/hsm_config.yaml)"
+            )
             return None
 
         try:

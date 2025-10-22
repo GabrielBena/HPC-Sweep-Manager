@@ -28,39 +28,107 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
     project_path = project_path.resolve()
     console.print(f"[green]Initializing project at: {project_path}[/green]")
 
-    # Initialize path detector
-    detector = PathDetector(project_path)
+    # Check for existing old-style config (migration)
+    old_config_path = project_path / "sweeps" / "hsm_config.yaml"
+    migrating = False
 
-    # Get project information
-    console.print("\n[yellow]Scanning project structure...[/yellow]")
-    project_info = detector.get_project_info()
-    issues = detector.validate_paths()
+    if old_config_path.exists():
+        console.print("\n[yellow]📦 Found existing config at sweeps/hsm_config.yaml[/yellow]")
+        console.print("[cyan]Migrating to new .hsm/ structure...[/cyan]\n")
 
-    # Display detected information
-    _display_project_info(project_info, console)
+        try:
+            # Load existing config to preserve settings
+            with open(old_config_path) as f:
+                existing_config = yaml.safe_load(f)
 
-    if issues:
-        console.print("\n[red]⚠️  Issues detected:[/red]")
-        for issue in issues:
-            console.print(f"  - {issue}")
+            config = _extract_config_from_existing(existing_config, project_path)
+            migrating = True
 
-    # Interactive configuration if requested
-    config = {}
-    if interactive:
-        console.print("\n[bold]Interactive Configuration[/bold]")
-        config = _interactive_configuration(project_info, console)
-    else:
-        config = _auto_configuration(project_info)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not read old config: {e}[/yellow]")
+            console.print("[yellow]Proceeding with fresh initialization...[/yellow]\n")
+            migrating = False
+
+    if not migrating:
+        # Initialize path detector
+        detector = PathDetector(project_path)
+
+        # Get project information
+        console.print("\n[yellow]Scanning project structure...[/yellow]")
+        project_info = detector.get_project_info()
+        issues = detector.validate_paths()
+
+        # Display detected information
+        _display_project_info(project_info, console)
+
+        if issues:
+            console.print("\n[red]⚠️  Issues detected:[/red]")
+            for issue in issues:
+                console.print(f"  - {issue}")
+
+        # Interactive configuration if requested
+        config = {}
+        if interactive:
+            console.print("\n[bold]Interactive Configuration[/bold]")
+            config = _interactive_configuration(project_info, console)
+        else:
+            config = _auto_configuration(project_info)
 
     # Create sweep infrastructure
     console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
     success = _create_sweep_infrastructure(project_path, config, console, logger)
 
     if success:
+        # If we migrated, offer to clean up old file
+        if migrating and old_config_path.exists():
+            new_config_path = project_path / ".hsm" / "config.yaml"
+            if new_config_path.exists():
+                console.print(
+                    "\n[green]✅ Successfully migrated config to .hsm/config.yaml[/green]"
+                )
+                if Confirm.ask("Remove old config at sweeps/hsm_config.yaml?", default=False):
+                    old_config_path.unlink()
+                    console.print("  ✅ Removed old config file")
+                else:
+                    console.print(
+                        "  [dim]Kept old config (you can safely delete it manually)[/dim]"
+                    )
+
         console.print("\n[green]✅ Project initialization completed successfully![/green]")
         _display_next_steps(console)
     else:
         console.print("\n[red]❌ Project initialization failed![/red]")
+
+
+def _extract_config_from_existing(
+    existing_config: Dict[str, Any], project_path: Path
+) -> Dict[str, Any]:
+    """Extract configuration from existing hsm_config.yaml for migration."""
+    config = {}
+
+    # Extract project settings
+    project_section = existing_config.get("project", {})
+    config["project_name"] = project_section.get("name", project_path.name)
+
+    # Extract path settings
+    paths_section = existing_config.get("paths", {})
+    config["python_path"] = paths_section.get("python_interpreter", "python")
+    config["train_script"] = paths_section.get("train_script", "scripts/train.py")
+    config["config_dir"] = paths_section.get("config_dir", "configs")
+
+    # Extract HPC settings
+    hpc_section = existing_config.get("hpc", {})
+    config["hpc_system"] = hpc_section.get("system", "pbs")
+    config["default_walltime"] = hpc_section.get("default_walltime", "04:00:00")
+    config["default_resources"] = hpc_section.get("default_resources", "select=1:ncpus=4:mem=16gb")
+
+    # Extract W&B settings if present
+    wandb_section = existing_config.get("wandb", {})
+    if wandb_section:
+        config["wandb_project"] = wandb_section.get("project", config["project_name"])
+        config["wandb_entity"] = wandb_section.get("entity", "")
+
+    return config
 
 
 def _display_project_info(info: Dict[str, Any], console: Console):
@@ -196,6 +264,18 @@ def _create_sweep_infrastructure(
 ) -> bool:
     """Create sweep directories and configuration files."""
     try:
+        # Create .hsm directory structure (NEW)
+        hsm_dir = project_path / ".hsm"
+        hsm_dir.mkdir(exist_ok=True)
+
+        cache_dir = hsm_dir / "cache"
+        cache_dir.mkdir(exist_ok=True)
+
+        logs_dir = hsm_dir / "logs"
+        logs_dir.mkdir(exist_ok=True)
+
+        console.print("  ✅ Created .hsm/ directory structure")
+
         # Create sweep directory structure
         sweeps_dir = project_path / "sweeps"
         sweeps_dir.mkdir(exist_ok=True)
@@ -203,13 +283,13 @@ def _create_sweep_infrastructure(
         outputs_dir = sweeps_dir / "outputs"
         outputs_dir.mkdir(exist_ok=True)
 
-        logs_dir = sweeps_dir / "logs"
-        logs_dir.mkdir(exist_ok=True)
+        sweep_logs_dir = sweeps_dir / "logs"
+        sweep_logs_dir.mkdir(exist_ok=True)
 
-        console.print("  ✅ Created sweep directory structure")
+        console.print("  ✅ Created sweeps/ directory structure")
 
-        # Create HSM configuration file
-        hsm_config_path = sweeps_dir / "hsm_config.yaml"
+        # Create HSM configuration file (in new location)
+        hsm_config_path = hsm_dir / "config.yaml"
         hsm_config = {
             "project": {
                 "name": config["project_name"],
@@ -244,7 +324,17 @@ def _create_sweep_infrastructure(
         with open(hsm_config_path, "w") as f:
             yaml.dump(hsm_config, f, default_flow_style=False, indent=2)
 
-        console.print("  ✅ Created HSM configuration file")
+        console.print(
+            f"  ✅ Created HSM configuration file: {hsm_config_path.relative_to(project_path)}"
+        )
+
+        # Create sync configuration template
+        sync_config_path = hsm_dir / "sync_config.yaml"
+        from ..sync.config import SyncConfig
+
+        SyncConfig.create_template(sync_config_path, config["project_name"])
+        rel_path = sync_config_path.relative_to(project_path)
+        console.print(f"  ✅ Created sync configuration template: {rel_path}")
 
         # Create example sweep configuration
         example_sweep_path = sweeps_dir / "example_sweep.yaml"
@@ -271,27 +361,48 @@ def _create_sweep_infrastructure(
 
         # Create README
         readme_path = sweeps_dir / "README.md"
-        readme_content = f"""# {config["project_name"]} - HPC Sweeps
+        project_name = config["project_name"]
+        readme_content = f"""# {project_name} - HPC Sweeps
 
-This directory contains HPC sweep configurations and outputs for the {config["project_name"]} project.
+This directory contains HPC sweep configurations and outputs for the {project_name} project.
 
-## Files
+## Directory Structure
 
-- `hsm_config.yaml` - HSM project configuration
-- `example_sweep.yaml` - Example sweep configuration
-- `outputs/` - Sweep results and logs
-- `logs/` - HPC job logs
+```
+.hsm/
+├── config.yaml          # HSM project configuration
+├── sync_config.yaml     # Sync targets configuration
+├── cache/               # Cached metadata
+└── logs/                # HSM operation logs
+
+sweeps/
+├── example_sweep.yaml   # Example sweep configuration
+├── outputs/             # Sweep results and logs
+└── logs/                # HPC job logs
+```
 
 ## Usage
 
-1. **Count combinations**: `hsm sweep --config example_sweep.yaml --count`
-2. **Dry run**: `hsm sweep --config example_sweep.yaml --dry-run`
-3. **Submit individual jobs**: `hsm sweep --config example_sweep.yaml --individual`
-4. **Submit array job**: `hsm sweep --config example_sweep.yaml --array`
+### Running Sweeps
+
+1. **Count combinations**: `hsm sweep --config sweeps/example_sweep.yaml --count`
+2. **Dry run**: `hsm sweep --config sweeps/example_sweep.yaml --dry-run`
+3. **Submit individual jobs**: `hsm sweep --config sweeps/example_sweep.yaml --individual`
+4. **Submit array job**: `hsm sweep --config sweeps/example_sweep.yaml --array`
+
+### Syncing Results
+
+1. **Configure sync targets**: Edit `.hsm/sync_config.yaml` with your destination machines
+2. **Sync sweep results**: `hsm sync <sweep-id> --target desktop`
+3. **Dry run**: `hsm sync <sweep-id> --target desktop --dry-run`
 
 ## Configuration
 
-Edit `example_sweep.yaml` or create new sweep configurations. See the HSM documentation for details.
+- **HSM config**: `.hsm/config.yaml` - Project settings, paths, HPC resources
+- **Sync config**: `.hsm/sync_config.yaml` - Remote sync destinations
+- **Sweep configs**: Create YAML files in `sweeps/` directory
+
+See the HSM documentation for details.
 
 Generated by HSM on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 """
@@ -315,13 +426,16 @@ def _display_next_steps(console: Console):
     next_steps = """
 [bold]Next Steps:[/bold]
 
-1. **Review configuration**: Edit `sweeps/hsm_config.yaml` if needed
-2. **Create sweep config**: Use `hsm configure` or edit `sweeps/example_sweep.yaml`
-3. **Test the setup**: Run `hsm sweep --config sweeps/example_sweep.yaml --dry-run`
-4. **Submit jobs**: Run `hsm sweep --config sweeps/example_sweep.yaml --mode array`
+1. **Review HSM configuration**: Edit `.hsm/config.yaml` if needed
+2. **Configure sync targets**: Edit `.hsm/sync_config.yaml` with your destination machines
+3. **Create sweep config**: Use `hsm configure` or edit `sweeps/example_sweep.yaml`
+4. **Test the setup**: Run `hsm sweep --config sweeps/example_sweep.yaml --dry-run`
+5. **Submit jobs**: Run `hsm sweep --config sweeps/example_sweep.yaml --mode array`
+6. **Sync results**: Run `hsm sync <sweep-id> --target <your-target>`
 
 [bold]Useful Commands:[/bold]
 - `hsm sweep --help` - Show sweep options
+- `hsm sync --help` - Show sync options
 - `hsm configure` - Interactive sweep configuration builder
 - `hsm monitor` - Monitor active sweeps
 - `hsm --help` - Show all available commands
