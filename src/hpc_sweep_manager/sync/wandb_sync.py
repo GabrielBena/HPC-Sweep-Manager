@@ -7,7 +7,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Dict, List, Optional, Set
+import tempfile
+from typing import Dict, List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.prompt import Confirm
@@ -16,6 +17,203 @@ import yaml
 from .config import SyncTarget
 
 logger = logging.getLogger(__name__)
+
+
+def extract_version_from_filename(filename: str) -> Tuple[str, Optional[int]]:
+    """
+    Extract base filename and version from a versioned filename.
+
+    Examples:
+        'model:v3' -> ('model', 3)
+        'artifact_v2.json' -> ('artifact.json', 2)
+        'results_latest.csv' -> ('results.csv', float('inf'))
+        'ood_accuracy_results_best_70_hash.table.json' ->
+            ('ood_accuracy_results_best.table.json', 70)
+        'val_accuracy_results_latest_33_hash.table.json' ->
+            ('val_accuracy_results_latest.table.json', 33)
+        'config.yaml' -> ('config.yaml', None)  # no version
+
+    Args:
+        filename: Name of the file
+
+    Returns:
+        Tuple of (base_filename, version_number)
+    """
+    # Handle wandb table format: metric_results_{best|latest}_number_hash.table.json
+    wandb_table_match = re.match(
+        r"^(.+_results_(?:best|latest))_(\d+)_[a-f0-9]+(\.\w+\.\w+)$", filename
+    )
+    if wandb_table_match:
+        base_name = wandb_table_match.group(1)  # e.g., "ood_accuracy_results_best"
+        version = int(wandb_table_match.group(2))  # e.g., 70
+        ext = wandb_table_match.group(3)  # e.g., ".table.json"
+        return (base_name + ext, version)
+
+    # Handle wandb artifact format: name:v[number] or name:latest
+    artifact_match = re.match(r"^(.+):(v(\d+)|latest)$", filename)
+    if artifact_match:
+        base_name = artifact_match.group(1)
+        if artifact_match.group(2) == "latest":
+            return (base_name, float("inf"))  # latest is treated as highest version
+        else:
+            version = int(artifact_match.group(3))
+            return (base_name, version)
+
+    # Handle _v[number] or _version[number] patterns
+    version_patterns = [
+        r"^(.+)_v(\d+)(\..+)?$",  # file_v2.ext
+        r"^(.+)_version(\d+)(\..+)?$",  # file_version2.ext
+        r"^(.+)\.(v\d+)\.(\w+)$",  # file.v2.ext
+    ]
+
+    for pattern in version_patterns:
+        match = re.match(pattern, filename)
+        if match:
+            base_name = match.group(1)
+            version_str = match.group(2)
+            ext = match.group(3) if len(match.groups()) > 2 and match.group(3) else ""
+
+            # Extract numeric version
+            version_num_match = re.search(r"(\d+)", version_str)
+            if version_num_match:
+                version = int(version_num_match.group(1))
+                # Reconstruct base filename without version
+                if ext:
+                    base_name += ext
+                return (base_name, version)
+
+    # Handle 'latest' suffix
+    latest_patterns = [
+        r"^(.+)_latest(\..+)?$",  # file_latest.ext
+        r"^(.+)\.latest\.(\w+)$",  # file.latest.ext
+    ]
+
+    for pattern in latest_patterns:
+        match = re.match(pattern, filename)
+        if match:
+            base_name = match.group(1)
+            ext = match.group(2) if match.group(2) else ""
+            if ext:
+                base_name += ext
+            return (base_name, float("inf"))  # latest treated as highest version
+
+    # No version found
+    return (filename, None)
+
+
+def get_latest_versions(file_paths: List[Path]) -> Dict[str, Path]:
+    """
+    Filter a list of file paths to keep only the latest versions of each file.
+
+    Args:
+        file_paths: List of file paths to filter
+
+    Returns:
+        Dictionary mapping base filename to the path of its latest version
+    """
+    file_versions: Dict[str, List[Tuple[Path, Optional[int]]]] = {}
+
+    # Group files by base name
+    for file_path in file_paths:
+        base_name, version = extract_version_from_filename(file_path.name)
+
+        if base_name not in file_versions:
+            file_versions[base_name] = []
+        file_versions[base_name].append((file_path, version))
+
+    # Select latest version for each base name
+    latest_files = {}
+
+    for base_name, versions in file_versions.items():
+        if len(versions) == 1:
+            # Only one version, keep it
+            latest_files[base_name] = versions[0][0]
+        else:
+            # Multiple versions, find the latest
+            # Separate versioned and unversioned files
+            versioned = [(path, ver) for path, ver in versions if ver is not None]
+            unversioned = [(path, ver) for path, ver in versions if ver is None]
+
+            if versioned:
+                # If we have versioned files, pick the highest version
+                latest_path = max(versioned, key=lambda x: x[1])[0]
+                latest_files[base_name] = latest_path
+            elif unversioned:
+                # If only unversioned files, pick the first one (arbitrary choice)
+                latest_files[base_name] = unversioned[0][0]
+
+    return latest_files
+
+
+def create_filtered_file_list(run_dir: Path, latest_only: bool = False) -> List[Path]:
+    """
+    Create a list of files to sync from a run directory.
+
+    Args:
+        run_dir: Path to wandb run directory
+        latest_only: If True, only include latest versions of files
+
+    Returns:
+        List of file paths to sync
+    """
+    if not latest_only:
+        # Return all files
+        all_files = []
+        for file_path in run_dir.rglob("*"):
+            if file_path.is_file():
+                all_files.append(file_path)
+        return all_files
+
+    # Group files by directory and filter each directory separately
+    files_to_sync = []
+
+    # Process each subdirectory separately to maintain directory structure
+    directories_to_process = [run_dir]
+
+    # Add all subdirectories
+    for item in run_dir.rglob("*"):
+        if item.is_dir():
+            directories_to_process.append(item)
+
+    for directory in directories_to_process:
+        # Get direct files in this directory (not recursive)
+        direct_files = [f for f in directory.iterdir() if f.is_file()]
+
+        if not direct_files:
+            continue
+
+        # Filter to latest versions within this directory
+        latest_files = get_latest_versions(direct_files)
+        files_to_sync.extend(latest_files.values())
+
+    return files_to_sync
+
+
+def create_rsync_file_list(files_to_sync: List[Path], run_dir: Path) -> str:
+    """
+    Create a temporary file containing the list of files to sync for rsync --files-from.
+
+    Args:
+        files_to_sync: List of absolute file paths to sync
+        run_dir: Base run directory path
+
+    Returns:
+        Path to temporary file containing relative paths
+    """
+    # Create temporary file with context manager
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as temp_file:
+        for file_path in files_to_sync:
+            # Convert to relative path from run_dir
+            try:
+                rel_path = file_path.relative_to(run_dir)
+                temp_file.write(str(rel_path) + "\n")
+            except ValueError:
+                # Path is not relative to run_dir, skip it
+                logger.debug(f"Skipping file outside run directory: {file_path}")
+                continue
+
+        temp_file.flush()
+        return temp_file.name
 
 
 class WandbSyncer:
@@ -1001,6 +1199,7 @@ class WandbSyncer:
         latest_only: bool,
     ) -> bool:
         """Sync a single run directory."""
+        file_list_path = None
         try:
             rsync_cmd = [
                 "rsync",
@@ -1012,11 +1211,17 @@ class WandbSyncer:
                 rsync_cmd.append("--dry-run")
 
             if latest_only:
-                # Add filters to skip old artifact versions
+                # Create filtered file list instead of using exclude patterns
+                # This properly handles versioned files (including WandB tables with hashes)
+                files_to_sync = create_filtered_file_list(run_dir, latest_only=True)
+                file_list_path = create_rsync_file_list(files_to_sync, run_dir)
+
+                # Use --files-from to sync only the filtered files
                 rsync_cmd.extend(
                     [
-                        "--exclude=*:v[0-9]*",  # Exclude versioned artifacts except latest
-                        "--exclude=*_[0-9]*_*.table.json",  # Exclude old table versions
+                        "--files-from",
+                        file_list_path,
+                        "--relative",  # Preserve directory structure
                     ]
                 )
 
@@ -1044,3 +1249,10 @@ class WandbSyncer:
         except subprocess.TimeoutExpired:
             logger.error(f"Timeout syncing {run_dir.name}")
             return False
+        finally:
+            # Clean up temporary file list
+            if file_list_path and Path(file_list_path).exists():
+                try:
+                    Path(file_list_path).unlink()
+                except Exception as e:
+                    logger.debug(f"Failed to clean up temp file {file_list_path}: {e}")
