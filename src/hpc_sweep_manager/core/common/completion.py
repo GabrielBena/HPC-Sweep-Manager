@@ -5,7 +5,7 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import yaml
 
@@ -57,7 +57,9 @@ class SweepCompletionAnalyzer:
             logger.error(f"Error loading sweep data: {e}")
             return False
 
-    def analyze_from_task_directories(self) -> Dict[str, Any]:
+    def analyze_from_task_directories(
+        self, overwrite_source_mapping: bool = False
+    ) -> Dict[str, Any]:
         """Analyze completion status by directly scanning task directories.
 
         This method works independently of source_mapping.yaml and is ideal for
@@ -96,12 +98,20 @@ class SweepCompletionAnalyzer:
 
         for task_dir in task_dirs:
             task_id = task_dir.name
+
+            task_statuses[task_id] = {}
+
             task_info_file = task_dir / "task_info.txt"
+            main_results_file = task_dir / "results.csv"
+            baseline_results_file = task_dir / "transformation_baseline_results.csv"
+
+            task_statuses[task_id]["main_results_present"] = main_results_file.exists()
+            task_statuses[task_id]["baseline_results_present"] = baseline_results_file.exists()
 
             if not task_info_file.exists():
                 # Task directory exists but no info file - treat as running/incomplete
                 running_tasks.append(task_id)
-                task_statuses[task_id] = "RUNNING"
+                task_statuses[task_id]["status"] = "RUNNING"
                 continue
 
             try:
@@ -115,16 +125,16 @@ class SweepCompletionAnalyzer:
                     last_status_line = status_lines[-1]
                     if "SUCCESS" in last_status_line or "COMPLETED" in last_status_line:
                         completed_tasks.append(task_id)
-                        task_statuses[task_id] = "COMPLETED"
+                        task_statuses[task_id]["status"] = "COMPLETED"
                     elif "FAILED" in last_status_line:
                         failed_tasks.append(task_id)
-                        task_statuses[task_id] = "FAILED"
+                        task_statuses[task_id]["status"] = "FAILED"
                     elif "RUNNING" in last_status_line:
                         running_tasks.append(task_id)
-                        task_statuses[task_id] = "RUNNING"
+                        task_statuses[task_id]["status"] = "RUNNING"
                     else:
                         running_tasks.append(task_id)
-                        task_statuses[task_id] = "UNKNOWN"
+                        task_statuses[task_id]["status"] = "UNKNOWN"
                 else:
                     # No status line found - task might be running
                     running_tasks.append(task_id)
@@ -187,11 +197,11 @@ class SweepCompletionAnalyzer:
 
         # Update source_mapping.yaml with actual task statuses from directories
         # This makes source_mapping.yaml the single source of truth
-        self._update_source_mapping_from_directories(task_statuses)
+        self._update_source_mapping_from_directories(task_statuses, overwrite_source_mapping)
 
         return summary
 
-    def analyze_completion_status(self) -> Dict[str, Any]:
+    def analyze_completion_status(self, overwrite_source_mapping: bool = False) -> Dict[str, Any]:
         """Analyze the completion status of the sweep.
 
         Uses source_mapping.yaml if available, otherwise falls back to
@@ -203,9 +213,9 @@ class SweepCompletionAnalyzer:
         # If source_mapping.yaml doesn't exist or has no task assignments,
         # fall back to task directory scanning (useful for PBS array jobs)
         task_assignments = self.source_mapping.get("task_assignments", {})
-        if not task_assignments:
+        if not task_assignments or overwrite_source_mapping:
             logger.info("No task assignments in source_mapping.yaml, using task directory scanning")
-            return self.analyze_from_task_directories()
+            return self.analyze_from_task_directories(overwrite_source_mapping)
 
         # Generate original combinations
         generator = ParameterGenerator(self.sweep_config)
@@ -385,7 +395,9 @@ class SweepCompletionAnalyzer:
 
         return verified_combinations
 
-    def _update_source_mapping_from_directories(self, task_statuses: Dict[str, str]):
+    def _update_source_mapping_from_directories(
+        self, task_statuses: Dict[str, str], overwrite: bool = False
+    ):
         """Update source_mapping.yaml with actual task statuses from directories.
 
         This makes source_mapping.yaml the single source of truth by syncing it
@@ -394,7 +406,7 @@ class SweepCompletionAnalyzer:
         try:
             import yaml
 
-            if not self.source_mapping_path.exists():
+            if not self.source_mapping_path.exists() or overwrite:
                 # Create initial source mapping if it doesn't exist
                 mapping_data = {
                     "sweep_metadata": {
@@ -410,12 +422,18 @@ class SweepCompletionAnalyzer:
                     mapping_data = yaml.safe_load(f) or {}
 
             # Update task assignments with actual statuses
-            for task_id, status in task_statuses.items():
+            for task_id, task_info in task_statuses.items():
                 if task_id not in mapping_data["task_assignments"]:
                     mapping_data["task_assignments"][task_id] = {}
 
                 # Update status from actual directory
-                mapping_data["task_assignments"][task_id]["status"] = status
+                mapping_data["task_assignments"][task_id]["status"] = task_info["status"]
+                mapping_data["task_assignments"][task_id]["main_results_present"] = task_info[
+                    "main_results_present"
+                ]
+                mapping_data["task_assignments"][task_id]["baseline_results_present"] = task_info[
+                    "baseline_results_present"
+                ]
 
                 # Set compute source if not already set
                 if "compute_source" not in mapping_data["task_assignments"][task_id]:
@@ -614,9 +632,22 @@ class SweepCompletor:
         dry_run: bool = False,
         retry_failed: bool = True,
         max_runs: int = None,
+        complete_baselines: bool = False,
+        complete_main_training: bool = False,
+        baselines_only: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Execute the completion plan."""
+        """Execute the completion plan.
+
+        Args:
+            mode: Execution mode (auto, local, remote, distributed, array)
+            dry_run: If True, only show what would be executed
+            retry_failed: If True, retry failed combinations
+            max_runs: Maximum number of runs to execute
+            complete_baselines: If True, complete missing baseline runs for completed tasks
+            complete_main_training: If True, complete missing main training runs
+            baselines_only: If True, ONLY run baselines (skip regular missing/failed runs)
+        """
         plan = self.generate_completion_plan()
 
         if "error" in plan:
@@ -638,10 +669,44 @@ class SweepCompletor:
         # Get task number information for proper re-use
         missing_task_numbers = analysis.get("missing_task_numbers", [])
 
+        # Handle baseline completion: find tasks that are completed but missing baseline results
+        baseline_combinations_to_run = []
+        baseline_task_numbers = []
+        if complete_baselines:
+            baseline_combinations_to_run, baseline_task_numbers = self._identify_missing_baselines(
+                analysis, kwargs.get("logger")
+            )
+            if baseline_combinations_to_run and kwargs.get("console"):
+                kwargs["console"].print(
+                    f"[cyan]Found {len(baseline_combinations_to_run)} completed tasks missing baseline results[/cyan]"
+                )
+
+        # If baselines_only is True, skip regular missing/failed runs
+        if baselines_only:
+            missing_combinations = []
+            failed_combinations = []
+            cancelled_combinations = []
+            missing_task_numbers = []
+            if kwargs.get("console"):
+                kwargs["console"].print(
+                    "[yellow]--baselines-only: Skipping regular missing/failed runs, "
+                    "only running baseline completions[/yellow]"
+                )
+
         # Combine missing, failed, and cancelled combinations to re-run
         combinations_to_run = missing_combinations + failed_combinations + cancelled_combinations
 
-        total_available_to_run = len(combinations_to_run)
+        # For missing tasks with complete_baselines=True, we need to run both main training + baseline
+        # For completed tasks missing baselines, we only need to run baseline (with overrides)
+        if complete_baselines:
+            # Add baseline runs for missing tasks (these will run with default config:
+            # main training enabled, baseline enabled)
+            if kwargs.get("console"):
+                kwargs["console"].print(
+                    "[cyan]Missing tasks will run both main training and baseline[/cyan]"
+                )
+
+        total_available_to_run = len(combinations_to_run) + len(baseline_combinations_to_run)
 
         # Find the highest existing task number to continue from there
         # This works with both source_mapping and task_directory analysis
@@ -809,6 +874,29 @@ class SweepCompletor:
                 )
                 next_task_num += 1
 
+        # Add baseline combinations for completed tasks missing baseline results
+        if complete_baselines and baseline_combinations_to_run:
+            for combo, task_num in zip(baseline_combinations_to_run, baseline_task_numbers):
+                # Apply baseline overrides: disable main training, enable baseline transformation
+                baseline_combo = self._apply_baseline_overrides(combo.copy())
+
+                # Set output.dir to point to the original task directory
+                # This ensures baseline results are saved in the same directory as the original run
+                tasks_dir = self.analyzer.sweep_dir / "tasks"
+                original_task_dir = tasks_dir / f"task_{task_num:03d}"
+                baseline_combo["output.dir"] = str(original_task_dir)
+
+                # Use the original task number so results go to the same directory
+                tasks_to_run.append(
+                    {
+                        "task_index": task_num - 1,  # Use original task index
+                        "task_number": task_num,  # Use original task number
+                        "params": baseline_combo,
+                        "is_baseline_completion": True,  # Mark as baseline completion
+                        "original_task_number": task_num,  # Track original task number
+                    }
+                )
+
         if max_runs is not None and max_runs > 0:
             if console := kwargs.get("console"):
                 console.print(
@@ -827,6 +915,10 @@ class SweepCompletor:
             message = f"Would run {len(tasks_to_run)} combinations"
             if max_runs is not None and max_runs > 0:
                 message += f" (limited by --max-runs from {total_available_to_run} needed)"
+
+            # Separate regular runs from baseline-only runs
+            regular_runs = [t for t in tasks_to_run if not t.get("is_baseline_completion", False)]
+            baseline_runs = [t for t in tasks_to_run if t.get("is_baseline_completion", False)]
 
             # Show which task numbers would be used
             task_numbers = [t["task_number"] for t in tasks_to_run]
@@ -849,11 +941,55 @@ class SweepCompletor:
                 else:
                     console.print("[yellow]• Training script: (will be auto-detected)[/yellow]")
 
-                console.print(f"\n[bold]Task numbers to run:[/bold]")
+                console.print("\n[bold]Task numbers to run:[/bold]")
                 if len(task_numbers) <= 20:
                     console.print(f"  {task_numbers}")
                 else:
                     console.print(f"  {task_numbers[:20]}... and {len(task_numbers) - 20} more")
+
+                # Show regular completion runs (missing/failed tasks)
+                if regular_runs:
+                    console.print(
+                        f"\n[bold green]Regular Completion Runs ({len(regular_runs)}):[/bold green]"
+                    )
+                    for i, task_info in enumerate(regular_runs[:3], 1):
+                        params = task_info["params"]
+                        cmd_str = self._params_to_command_string(params)
+                        console.print(f"\n  [{i}] Task {task_info['task_number']}:")
+                        console.print(f"      Parameters: {params}")
+                        console.print(f"      Command: {cmd_str}")
+                    if len(regular_runs) > 3:
+                        console.print(f"      ... and {len(regular_runs) - 3} more regular runs")
+
+                # Show baseline-only runs (completed tasks missing baselines)
+                if baseline_runs:
+                    console.print(
+                        f"\n[bold cyan]Baseline-Only Completion Runs ({len(baseline_runs)}):[/bold cyan]"
+                    )
+                    console.print(
+                        "[dim]  (These run with training.do_main_training=False "
+                        "and baselines.transformation.enabled=True)[/dim]"
+                    )
+                    console.print(
+                        "[dim]  Results will be saved in the original task directories[/dim]"
+                    )
+                    for i, task_info in enumerate(baseline_runs[:3], 1):
+                        params = task_info["params"]
+                        cmd_str = self._params_to_command_string(params)
+                        original_task = task_info.get("original_task_number", "?")
+                        task_num = task_info["task_number"]
+                        console.print(
+                            f"\n  [{i}] Task {task_num} "
+                            f"(baseline for original task {original_task}):"
+                        )
+                        console.print(f"      Parameters: {params}")
+                        console.print(f"      Command: {cmd_str}")
+                        if "output.dir" in params:
+                            console.print(
+                                f"      [green]Output directory: {params['output.dir']}[/green]"
+                            )
+                    if len(baseline_runs) > 3:
+                        console.print(f"      ... and {len(baseline_runs) - 3} more baseline runs")
 
             return {
                 "status": "dry_run",
@@ -864,13 +1000,119 @@ class SweepCompletor:
                 "missing_count": len(missing_combinations),
                 "failed_count": len(failed_combinations),
                 "cancelled_count": len(cancelled_combinations),
+                "baseline_count": len(baseline_combinations_to_run) if complete_baselines else 0,
                 "total_to_run": len(tasks_to_run),
+                "regular_runs": regular_runs,
+                "baseline_runs": baseline_runs,
             }
 
         # Execute the actual completion
         console = kwargs.pop("console", None)
         logger = kwargs.pop("logger", None)
         return self._execute_combinations(tasks_to_run, mode, console, logger, **kwargs)
+
+    def _identify_missing_baselines(
+        self, analysis: Dict[str, Any], logger=None
+    ) -> Tuple[List[Dict[str, Any]], List[int]]:
+        """Identify tasks that are completed but missing baseline results.
+
+        Returns:
+            Tuple of (baseline_combinations, task_numbers) for tasks needing baseline completion
+        """
+        baseline_combinations = []
+        task_numbers = []
+
+        # Get task statuses from analysis
+        task_statuses = analysis.get("task_statuses", {})
+        completed_tasks = analysis.get("completed_tasks", [])
+
+        # Also check source_mapping if available
+        task_assignments = self.analyzer.source_mapping.get("task_assignments", {})
+
+        for task_id in completed_tasks:
+            baseline_results_present = False
+
+            # Check task_statuses first (from task directory scanning)
+            if task_id in task_statuses:
+                baseline_results_present = task_statuses[task_id].get(
+                    "baseline_results_present", False
+                )
+            # Fall back to source_mapping
+            elif task_id in task_assignments:
+                baseline_results_present = task_assignments[task_id].get(
+                    "baseline_results_present", False
+                )
+            # Last resort: check task directory directly
+            else:
+                tasks_dir = self.analyzer.sweep_dir / "tasks"
+                task_dir = tasks_dir / task_id
+                baseline_results_file = task_dir / "transformation_baseline_results.csv"
+                baseline_results_present = baseline_results_file.exists()
+
+            if not baseline_results_present:
+                # Find the parameter combination for this task
+                task_match = re.search(r"task_(\d+)", task_id)
+                if task_match:
+                    task_num = int(task_match.group(1))
+                    # Task numbers are 1-indexed, combinations are 0-indexed
+                    if 1 <= task_num <= len(self.analyzer.original_combinations):
+                        combo = self.analyzer.original_combinations[task_num - 1]
+                        baseline_combinations.append(combo)
+                        task_numbers.append(task_num)
+                        if logger:
+                            logger.debug(
+                                f"Task {task_id} (task_{task_num}) missing baseline results"
+                            )
+
+        return baseline_combinations, task_numbers
+
+    def _apply_baseline_overrides(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply baseline completion overrides to parameter combination.
+
+        Overrides:
+            - training.do_main_training = False
+            - baselines.transformation.enabled = True
+
+        Args:
+            params: Original parameter combination
+
+        Returns:
+            Modified parameter combination with baseline overrides
+        """
+        # Create a copy to avoid modifying the original
+        modified_params = params.copy()
+
+        # Apply overrides
+        modified_params["training.do_main_training"] = False
+        modified_params["baselines.transformation.enabled"] = True
+
+        return modified_params
+
+    def _params_to_command_string(self, params: Dict[str, Any]) -> str:
+        """Convert parameters dictionary to command line arguments for Hydra.
+
+        Args:
+            params: Parameter dictionary
+
+        Returns:
+            Command line string with Hydra format parameters
+        """
+        param_strs = []
+        for key, value in params.items():
+            if isinstance(value, (list, tuple)):
+                # Convert list/tuple to Hydra format: [item1,item2,...]
+                value_str = str(list(value))  # Ensure it's in list format
+                param_strs.append(f'"{key}={value_str}"')
+            elif value is None:
+                param_strs.append(f'"{key}=null"')
+            elif isinstance(value, bool):
+                param_strs.append(f'"{key}={str(value).lower()}"')
+            elif isinstance(value, str) and (" " in value or "," in value):
+                # Quote strings that contain spaces or commas
+                param_strs.append(f'"{key}={value}"')
+            else:
+                param_strs.append(f'"{key}={value}"')
+        return " ".join(param_strs)
 
     def _execute_combinations(
         self, tasks_to_run: List[Dict[str, Any]], mode: str, console=None, logger=None, **kwargs

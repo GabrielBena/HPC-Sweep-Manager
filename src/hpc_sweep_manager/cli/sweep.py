@@ -1119,6 +1119,16 @@ def run_cmd(
     is_flag=True,
     help="Automatically sync mismatched files to remote without prompting",
 )
+@click.option("--complete-baselines", is_flag=True, help="Complete all baseline combinations")
+@click.option("--complete-main-training", is_flag=True, help="Complete main training combinations")
+@click.option(
+    "--baselines-only",
+    is_flag=True,
+    help="Run ONLY baseline completion (skip regular missing/failed runs)",
+)
+@click.option(
+    "--overwrite-source-mapping", is_flag=True, help="Overwrite source mapping with new analysis"
+)
 @common_options
 @click.pass_context
 def complete_cmd(
@@ -1139,6 +1149,10 @@ def complete_cmd(
     auto_sync,
     verbose,
     quiet,
+    complete_baselines,
+    complete_main_training,
+    baselines_only,
+    overwrite_source_mapping,
 ):
     """Complete a partially finished sweep by running missing/failed combinations."""
     from rich.table import Table
@@ -1157,10 +1171,14 @@ def complete_cmd(
     console.print("[bold blue]HPC Sweep Manager - Completion[/bold blue]")
     console.print(f"Sweep: {sweep_id}")
     console.print(f"Directory: {sweep_dir}")
+    console.print(f"Baselines only: {baselines_only}")
+    console.print(f"Overwrite source mapping: {overwrite_source_mapping}")
 
     # Create completor and analyze
     completor = SweepCompletor(sweep_dir)
-    analysis = completor.analyzer.analyze_completion_status()
+    analysis = completor.analyzer.analyze_completion_status(
+        overwrite_source_mapping=overwrite_source_mapping
+    )
 
     if "error" in analysis:
         console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
@@ -1227,6 +1245,11 @@ def complete_cmd(
             hsm_config.get_default_resources() if hsm_config else "select=1:ncpus=4:mem=64gb"
         )
 
+    # If baselines_only is set, ensure complete_baselines is also set
+    if baselines_only and not complete_baselines:
+        complete_baselines = True
+        console.print("[yellow]--baselines-only implies --complete-baselines[/yellow]")
+
     # Execute completion
     result = completor.execute_completion(
         mode=mode,
@@ -1242,6 +1265,9 @@ def complete_cmd(
         remote=remote,
         no_verify_sync=no_verify_sync,
         auto_sync=auto_sync,
+        complete_baselines=complete_baselines,
+        complete_main_training=complete_main_training,
+        baselines_only=baselines_only,
         console=console,
         logger=logger,
     )
@@ -1284,12 +1310,29 @@ def complete_cmd(
             cancelled_count = result.get("cancelled_count", 0)
             if cancelled_count > 0:
                 console.print(f"Cancelled combinations to retry: {cancelled_count}")
+        if complete_baselines:
+            baseline_count = result.get("baseline_count", 0)
+            if baseline_count > 0:
+                console.print(
+                    f"[cyan]Baseline completion runs: {baseline_count} "
+                    f"(completed tasks missing baseline results)[/cyan]"
+                )
         console.print(f"Total combinations to run: {result['total_to_run']}")
 
-        if result["total_to_run"] > 0:
-            console.print("\n[bold]First 3 combinations that would be run:[/bold]")
-            for i, combo in enumerate(result["combinations_to_run"][:3], 1):
-                console.print(f"  {i}. {combo}")
+        # Detailed combinations and commands are already shown in completion.py dry_run output
+        # Only show summary here if there are more than 3 of each type
+        regular_runs = result.get("regular_runs", [])
+        baseline_runs = result.get("baseline_runs", [])
+        if regular_runs and len(regular_runs) > 3:
+            console.print(
+                f"\n[dim]Showing first 3 of {len(regular_runs)} regular completion runs "
+                f"(see above for details)[/dim]"
+            )
+        if baseline_runs and len(baseline_runs) > 3:
+            console.print(
+                f"[dim]Showing first 3 of {len(baseline_runs)} baseline completion runs "
+                f"(see above for details)[/dim]"
+            )
 
         console.print(
             "\n[dim]To execute the completion, run the same command without --dry-run[/dim]"

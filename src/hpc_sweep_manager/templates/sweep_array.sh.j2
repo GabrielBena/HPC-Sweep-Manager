@@ -137,7 +137,7 @@ WANDB_GROUP="{{ wandb_group }}"
 WANDB_GROUP="{{ sweep_id }}"
 {% endif %}
 
-COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP"
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR"
 
 echo "Executing: $COMMAND"
 echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
