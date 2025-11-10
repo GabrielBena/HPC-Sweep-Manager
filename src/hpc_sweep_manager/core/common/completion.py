@@ -58,7 +58,7 @@ class SweepCompletionAnalyzer:
             return False
 
     def analyze_from_task_directories(
-        self, overwrite_source_mapping: bool = False
+        self, overwrite_source_mapping: bool = False, verify_running: bool = True
     ) -> Dict[str, Any]:
         """Analyze completion status by directly scanning task directories.
 
@@ -145,13 +145,16 @@ class SweepCompletionAnalyzer:
                 running_tasks.append(task_id)
                 task_statuses[task_id] = "ERROR"
 
-        # Determine missing tasks by checking which task numbers don't exist
+        # Determine missing tasks by checking which task numbers don't exist AT ALL
+        # (no directory exists for them)
         existing_task_numbers = set()
         for task_dir in task_dirs:
             task_match = re.search(r"task_(\d+)", task_dir.name)
             if task_match:
                 existing_task_numbers.add(int(task_match.group(1)))
 
+        # Missing = tasks with no directory at all
+        # Running/Failed/Completed = tasks with directories (already counted above)
         missing_task_numbers = []
         for i in range(1, total_expected + 1):
             if i not in existing_task_numbers:
@@ -201,11 +204,17 @@ class SweepCompletionAnalyzer:
 
         return summary
 
-    def analyze_completion_status(self, overwrite_source_mapping: bool = False) -> Dict[str, Any]:
+    def analyze_completion_status(
+        self, overwrite_source_mapping: bool = False, verify_running: bool = True
+    ) -> Dict[str, Any]:
         """Analyze the completion status of the sweep.
 
         Uses source_mapping.yaml if available, otherwise falls back to
         direct task directory scanning (useful for PBS array jobs).
+
+        Args:
+            overwrite_source_mapping: If True, ignore existing source_mapping and rescan
+            verify_running: If True, verify RUNNING tasks against actual system state
         """
         if not self.load_sweep_data():
             return {"error": "Failed to load sweep data"}
@@ -215,7 +224,7 @@ class SweepCompletionAnalyzer:
         task_assignments = self.source_mapping.get("task_assignments", {})
         if not task_assignments or overwrite_source_mapping:
             logger.info("No task assignments in source_mapping.yaml, using task directory scanning")
-            return self.analyze_from_task_directories(overwrite_source_mapping)
+            return self.analyze_from_task_directories(overwrite_source_mapping, verify_running)
 
         # Generate original combinations
         generator = ParameterGenerator(self.sweep_config)
@@ -242,7 +251,7 @@ class SweepCompletionAnalyzer:
                     f"Task {task_id} shows RUNNING but has complete_time, checking actual status"
                 )
                 # Check the actual task directory to determine real status
-                actual_status = self._get_actual_task_status(task_id)
+                actual_status = self._get_actual_task_status(task_id, verify_running)
                 if actual_status and actual_status != "RUNNING":
                     logger.info(f"Updated {task_id} status from RUNNING to {actual_status}")
                     status = actual_status
@@ -255,7 +264,7 @@ class SweepCompletionAnalyzer:
 
             # CRITICAL: For completion analysis, always verify status against actual directories
             # This catches cases where job tracking was wrong (like silent local failures)
-            actual_status = self._get_actual_task_status(task_id)
+            actual_status = self._get_actual_task_status(task_id, verify_running)
             if actual_status and actual_status != status:
                 logger.warning(
                     f"Status mismatch for {task_id}: mapping shows {status}, directory shows {actual_status}"
@@ -290,15 +299,23 @@ class SweepCompletionAnalyzer:
         self.completed_combinations = self._get_combinations_for_tasks(completed_tasks)
         self.failed_combinations = self._get_combinations_for_tasks(failed_tasks)
         self.cancelled_combinations = self._get_combinations_for_tasks(cancelled_tasks)
+        running_combinations = self._get_combinations_for_tasks(running_tasks)
 
-        # Find missing combinations (exclude only completed ones)
-        completed_params_set = {
-            self._params_to_key(params) for params in self.completed_combinations
-        }
+        # Find missing combinations (exclude completed, failed, cancelled, AND running)
+        # Missing = tasks that have NO directory/status at all
+        accounted_for_params = set()
+        for params in (
+            self.completed_combinations
+            + self.failed_combinations
+            + self.cancelled_combinations
+            + running_combinations
+        ):
+            accounted_for_params.add(self._params_to_key(params))
+
         self.missing_combinations = [
             params
             for params in self.original_combinations
-            if self._params_to_key(params) not in completed_params_set
+            if self._params_to_key(params) not in accounted_for_params
         ]
 
         # Verify actual completion by checking task directories
@@ -468,8 +485,13 @@ class SweepCompletionAnalyzer:
             items.append((key, value))
         return str(tuple(items))
 
-    def _get_actual_task_status(self, task_id: str) -> str:
-        """Get the actual status of a task from its directory."""
+    def _get_actual_task_status(self, task_id: str, verify_running: bool = True) -> str:
+        """Get the actual status of a task from its directory.
+
+        Args:
+            task_id: Task identifier (e.g., "task_001")
+            verify_running: If True, verify RUNNING status against actual processes/jobs
+        """
         try:
             tasks_dir = self.sweep_dir / "tasks"
             task_dir = tasks_dir / task_id
@@ -499,37 +521,113 @@ class SweepCompletionAnalyzer:
                         elif "Status: CANCELLED" in last_status_line:
                             return "CANCELLED"
                         elif "Status: RUNNING" in last_status_line:
-                            # If we find RUNNING but the process finished, it might be stale
-                            # Check if there are any process-related files that indicate completion
-                            pid_files = list(task_dir.glob("*.pid"))
-                            if pid_files:
-                                # If we have PID files, check if processes are still running
-                                import subprocess
+                            # If verify_running is disabled, trust the status file
+                            if not verify_running:
+                                return "RUNNING"
 
-                                for pid_file in pid_files:
-                                    try:
-                                        with open(pid_file) as f:
-                                            pid = f.read().strip()
-                                        if pid and pid.isdigit():
-                                            # Check if process is still running
-                                            result = subprocess.run(
-                                                ["ps", "-p", pid], capture_output=True, text=True
-                                            )
-                                            if result.returncode != 0:
-                                                # Process not running but status shows RUNNING
-                                                # This is likely a failed task that didn't update status
-                                                logger.debug(
-                                                    f"Process {pid} not running for {task_id}, likely failed"
-                                                )
-                                                return "FAILED"
-                                    except Exception:
-                                        pass
-                            return "RUNNING"
+                            # Verify RUNNING status against actual system state
+                            is_actually_running = self._verify_task_is_running(
+                                task_id, task_dir, content
+                            )
+                            if is_actually_running:
+                                return "RUNNING"
+                            else:
+                                # Task shows RUNNING but isn't actually running
+                                logger.debug(
+                                    f"Task {task_id} shows RUNNING but verification failed, "
+                                    "marking as FAILED"
+                                )
+                                return "FAILED"
 
             return None
         except Exception as e:
             logger.warning(f"Error reading task status for {task_id}: {e}")
             return None
+
+    def _verify_task_is_running(self, task_id: str, task_dir: Path, task_info_content: str) -> bool:
+        """Verify if a task marked as RUNNING is actually running.
+
+        Checks:
+        1. PBS/Slurm job status (if job ID found in task_info)
+        2. Local process PIDs (if PID files exist)
+
+        Returns:
+            True if task is verified to be running, False otherwise
+        """
+        import subprocess
+
+        # Method 1: Check PBS/Slurm job status
+        job_id_match = re.search(r"Job ID: (\S+)", task_info_content)
+        if job_id_match:
+            job_id = job_id_match.group(1)
+
+            # Skip local job IDs (they use PID checking instead)
+            if not job_id.startswith("local_"):
+                # Try PBS qstat
+                try:
+                    result = subprocess.run(
+                        ["qstat", "-f", job_id],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0:
+                        # Job found in PBS queue - check its state
+                        output = result.stdout
+                        # Look for job_state line in qstat -f output
+                        if "job_state = R" in output or "job_state = Q" in output:
+                            logger.debug(f"Task {task_id} verified running via PBS (job {job_id})")
+                            return True
+                        elif "job_state = C" in output:
+                            logger.debug(f"Task {task_id} PBS job {job_id} shows completed")
+                            return False
+                    else:
+                        # Job not in queue - likely finished
+                        logger.debug(f"Task {task_id} PBS job {job_id} not in queue")
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+
+                # Try Slurm squeue
+                try:
+                    result = subprocess.run(
+                        ["squeue", "-j", job_id, "-h"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        # Job found in Slurm queue
+                        logger.debug(f"Task {task_id} verified running via Slurm (job {job_id})")
+                        return True
+                    else:
+                        logger.debug(f"Task {task_id} Slurm job {job_id} not in queue")
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    pass
+
+        # Method 2: Check local PIDs
+        pid_files = list(task_dir.glob("*.pid"))
+        if pid_files:
+            for pid_file in pid_files:
+                try:
+                    with open(pid_file) as f:
+                        pid = f.read().strip()
+                    if pid and pid.isdigit():
+                        # Check if process is still running
+                        result = subprocess.run(
+                            ["ps", "-p", pid],
+                            capture_output=True,
+                            text=True,
+                            timeout=2,
+                        )
+                        if result.returncode == 0:
+                            logger.debug(f"Task {task_id} verified running via PID {pid}")
+                            return True
+                except Exception as e:
+                    logger.debug(f"Error checking PID for {task_id}: {e}")
+                    continue
+
+        # If we got here, we couldn't verify the task is running
+        return False
 
 
 class SweepCompletor:
@@ -543,8 +641,8 @@ class SweepCompletor:
         """Detect the original sweep's execution mode from source_mapping.yaml."""
         try:
             if not self.analyzer.source_mapping_path.exists():
-                logger.info("No source_mapping.yaml found, defaulting to array mode detection")
-                return "array"  # Will auto-detect HPC system
+                logger.info("No source_mapping.yaml found, will try to auto-detect")
+                return "auto"  # Will auto-detect and fallback gracefully
 
             import yaml
 
@@ -555,8 +653,8 @@ class SweepCompletor:
             compute_sources = mapping_data.get("sweep_metadata", {}).get("compute_sources", [])
 
             # Detect mode from strategy
-            if strategy == "pbs_array":
-                logger.info("Detected PBS array sweep, using array mode for completion")
+            if strategy == "pbs_array" or strategy == "slurm_array":
+                logger.info("Detected PBS/Slurm array sweep, using array mode for completion")
                 return "array"
             elif strategy in ["round_robin", "least_loaded", "capability_based"]:
                 logger.info(f"Detected distributed sweep ({strategy}), using distributed mode")
@@ -567,17 +665,24 @@ class SweepCompletor:
             elif "HPC" in compute_sources:
                 logger.info("Detected HPC execution, using array mode for completion")
                 return "array"
+            elif "Local" in compute_sources or "local" in [str(s).lower() for s in compute_sources]:
+                logger.info("Detected local execution, using local mode for completion")
+                return "local"
             else:
-                logger.info("Could not determine mode, defaulting to array")
-                return "array"
+                logger.info("Could not determine mode from metadata, will try to auto-detect")
+                return "auto"
 
         except Exception as e:
-            logger.warning(f"Error detecting original sweep mode: {e}, defaulting to array")
-            return "array"
+            logger.warning(f"Error detecting original sweep mode: {e}, will try to auto-detect")
+            return "auto"
 
-    def generate_completion_plan(self) -> Dict[str, Any]:
-        """Generate a plan for completing the sweep."""
-        analysis = self.analyzer.analyze_completion_status()
+    def generate_completion_plan(self, verify_running: bool = True) -> Dict[str, Any]:
+        """Generate a plan for completing the sweep.
+
+        Args:
+            verify_running: If True, verify RUNNING tasks against actual system state
+        """
+        analysis = self.analyzer.analyze_completion_status(verify_running=verify_running)
 
         if "error" in analysis:
             return analysis
@@ -635,6 +740,8 @@ class SweepCompletor:
         complete_baselines: bool = False,
         complete_main_training: bool = False,
         baselines_only: bool = False,
+        verify_running: bool = True,
+        treat_running_as_failed: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
         """Execute the completion plan.
@@ -647,8 +754,14 @@ class SweepCompletor:
             complete_baselines: If True, complete missing baseline runs for completed tasks
             complete_main_training: If True, complete missing main training runs
             baselines_only: If True, ONLY run baselines (skip regular missing/failed runs)
+            verify_running: If True, verify RUNNING tasks against actual system state (PBS/PIDs)
+            treat_running_as_failed: If True, treat all RUNNING tasks as FAILED (implies verify_running=False)
         """
-        plan = self.generate_completion_plan()
+        # Handle flag interactions
+        if treat_running_as_failed:
+            verify_running = False  # Don't bother verifying if we're treating them all as failed
+
+        plan = self.generate_completion_plan(verify_running=verify_running)
 
         if "error" in plan:
             return plan
@@ -665,6 +778,19 @@ class SweepCompletor:
         missing_combinations = analysis["missing_combinations"]
         failed_combinations = analysis.get("failed_combinations", []) if retry_failed else []
         cancelled_combinations = analysis.get("cancelled_combinations", []) if retry_failed else []
+
+        # Handle treat_running_as_failed flag
+        if treat_running_as_failed:
+            # Get running combinations and treat them as failed
+            running_tasks = analysis.get("running_tasks", [])
+            if running_tasks:
+                running_combinations = self.analyzer._get_combinations_for_tasks(running_tasks)
+                failed_combinations.extend(running_combinations)
+                if kwargs.get("console"):
+                    kwargs["console"].print(
+                        f"[yellow]Treating {len(running_combinations)} RUNNING tasks as FAILED "
+                        f"(--treat-running-as-failed)[/yellow]"
+                    )
 
         # Get task number information for proper re-use
         missing_task_numbers = analysis.get("missing_task_numbers", [])
@@ -1343,7 +1469,7 @@ class SweepCompletor:
                     return {"error": f"Failed to create distributed job manager: {e}"}
 
             elif mode == "auto" or mode in ["individual", "array"]:
-                # Auto-detect HPC system, fall back to local if none found
+                # Auto-detect HPC system, fall back to local if none found (for auto mode)
                 try:
                     job_manager = HPCJobManager.auto_detect(
                         walltime=walltime,
@@ -1357,14 +1483,19 @@ class SweepCompletor:
                         mode = "array"  # Default to array mode for HPC systems
                         if console:
                             console.print(
-                                f"[green]Auto-detected HPC system, using {mode} mode[/green]"
+                                f"[green]✓ Auto-detected HPC system, using {mode} mode[/green]"
                             )
+                    else:
+                        # User explicitly requested array/individual mode and HPC was found
+                        if console:
+                            console.print(f"[green]✓ Using {mode} mode on HPC system[/green]")
                 except RuntimeError as e:
-                    # No HPC system found, fall back to local mode
+                    # No HPC system found
                     if mode == "auto":
+                        # For auto mode, gracefully fall back to local
                         if console:
                             console.print(
-                                "[yellow]No HPC system detected, falling back to local mode[/yellow]"
+                                "[yellow]ℹ No HPC system detected, using local mode[/yellow]"
                             )
                         mode = "local"
 
@@ -1388,8 +1519,15 @@ class SweepCompletor:
                         )
                     else:
                         # User explicitly requested array/individual mode but no HPC found
+                        if console:
+                            console.print(
+                                f"[yellow]⚠ HPC system not found but --mode {mode} was requested[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]  Tip: Use --mode local to run locally, or --mode auto for automatic detection[/yellow]"
+                            )
                         return {
-                            "error": f"HPC system not found: {e}. Consider using --mode local or --mode auto"
+                            "error": f"HPC system not found: {e}. Use --mode local or --mode auto instead."
                         }
 
             else:

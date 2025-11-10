@@ -1129,6 +1129,16 @@ def run_cmd(
 @click.option(
     "--overwrite-source-mapping", is_flag=True, help="Overwrite source mapping with new analysis"
 )
+@click.option(
+    "--no-verify-running",
+    is_flag=True,
+    help="Skip verification of RUNNING tasks (trust status files as-is)",
+)
+@click.option(
+    "--treat-running-as-failed",
+    is_flag=True,
+    help="Treat all RUNNING tasks as FAILED and retry them",
+)
 @common_options
 @click.pass_context
 def complete_cmd(
@@ -1153,6 +1163,8 @@ def complete_cmd(
     complete_main_training,
     baselines_only,
     overwrite_source_mapping,
+    no_verify_running,
+    treat_running_as_failed,
 ):
     """Complete a partially finished sweep by running missing/failed combinations."""
     from rich.table import Table
@@ -1268,6 +1280,8 @@ def complete_cmd(
         complete_baselines=complete_baselines,
         complete_main_training=complete_main_training,
         baselines_only=baselines_only,
+        verify_running=not no_verify_running,
+        treat_running_as_failed=treat_running_as_failed,
         console=console,
         logger=logger,
     )
