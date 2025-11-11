@@ -29,6 +29,7 @@ class SweepConfig:
     defaults: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     script: str = None  # Training script path (optional)
+    complete: str = None  # Completion sweep ID (optional)
 
     @classmethod
     def from_yaml(cls, config_path: Union[str, Path]) -> "SweepConfig":
@@ -54,6 +55,7 @@ class SweepConfig:
             defaults=config_dict.get("defaults", {}),
             metadata=config_dict.get("metadata", {}),
             script=config_dict.get("script"),  # Extract script from top level
+            complete=config_dict.get("complete"),  # Extract completion sweep ID from top level
         )
 
     @classmethod

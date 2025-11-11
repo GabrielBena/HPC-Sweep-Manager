@@ -3,7 +3,8 @@
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+import re
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import click
 from rich.console import Console
@@ -13,8 +14,7 @@ if TYPE_CHECKING:
 
 import asyncio
 
-from ..core.common.config import HSMConfig
-from ..core.common.config_parser import SweepConfig
+from ..core.common.config import HSMConfig, SweepConfig
 from ..core.common.sweep_tracker import SweepTaskTracker
 from ..core.local.local_manager import LocalJobManager
 from ..core.remote.discovery import RemoteDiscovery
@@ -282,6 +282,151 @@ def _generate_parameter_combinations(
     return combinations
 
 
+def _load_completed_tasks(
+    sweep_id: str, console: Console, logger: logging.Logger
+) -> Optional[Dict[str, Any]]:
+    """Load completed tasks from a previous sweep.
+
+    Returns:
+        Dictionary containing completed task parameters, or None if not found
+    """
+    import yaml
+
+    # Look for the previous sweep in outputs directory
+    sweep_dir = Path("sweeps") / "outputs" / sweep_id
+    source_mapping_file = sweep_dir / "source_mapping.yaml"
+
+    if not sweep_dir.exists():
+        console.print(f"[red]Error: Previous sweep directory not found: {sweep_dir}[/red]")
+        return None
+
+    if not source_mapping_file.exists():
+        console.print(f"[red]Error: Source mapping file not found: {source_mapping_file}[/red]")
+        return None
+
+    try:
+        with open(source_mapping_file) as f:
+            mapping_data = yaml.safe_load(f)
+
+        logger.info(f"Loaded source mapping from {source_mapping_file}")
+        return mapping_data
+    except Exception as e:
+        console.print(f"[red]Error loading source mapping: {e}[/red]")
+        logger.error(f"Failed to load source mapping: {e}")
+        return None
+
+
+def _get_max_task_number(completed_tasks: Dict[str, Any]) -> int:
+    """Get the maximum task number from completed tasks.
+
+    Returns:
+        Maximum task number found, or 0 if no tasks exist
+    """
+    if not completed_tasks or "task_assignments" not in completed_tasks:
+        return 0
+
+    max_task_num = 0
+    for task_name in completed_tasks["task_assignments"].keys():
+        # Extract task number from task_001, task_002, etc.
+        match = re.search(r"task_(\d+)", task_name)
+        if match:
+            task_num = int(match.group(1))
+            max_task_num = max(max_task_num, task_num)
+
+    return max_task_num
+
+
+def _filter_completed_combinations(
+    combinations: List[Dict[str, Any]],
+    completed_tasks: Dict[str, Any],
+    console: Console,
+    logger: logging.Logger,
+    completion_sweep_id: str,
+) -> List[Dict[str, Any]]:
+    """Filter out parameter combinations that were already completed.
+
+    Also ensures wandb.group is set to the completion sweep ID for all new combinations.
+
+    Returns:
+        List of parameter combinations that haven't been completed yet
+    """
+    if not completed_tasks or "task_assignments" not in completed_tasks:
+        return combinations
+
+    task_assignments = completed_tasks["task_assignments"]
+
+    # Extract completed parameter sets (only COMPLETED status)
+    completed_params = []
+    for task_info in task_assignments.values():
+        if task_info.get("status") == "COMPLETED":
+            params = task_info.get("params", {})
+            if params:
+                completed_params.append(params)
+
+    logger.info(f"Found {len(completed_params)} completed tasks from previous sweep")
+
+    # Show sample of completed params for debugging
+    if completed_params:
+        console.print("\n[dim]Sample completed task params:[/dim]")
+        sample = completed_params[0]
+        for key, value in list(sample.items())[:5]:
+            console.print(f"[dim]  {key}: {value}[/dim]")
+
+    # Filter out combinations that match completed params
+    def params_match(combo: Dict[str, Any], completed: Dict[str, Any]) -> bool:
+        """Check if a combination matches a completed parameter set."""
+        # Only compare parameters that exist in both (excluding wandb.group)
+        common_keys = set(combo.keys()) & set(completed.keys())
+        common_keys.discard("wandb.group")  # Don't compare wandb.group
+
+        # Debug: log the comparison
+        match = all(combo[key] == completed[key] for key in common_keys)
+        if not match and logger.isEnabledFor(logging.DEBUG):
+            mismatches = [
+                f"{key}: {combo.get(key)} != {completed.get(key)}"
+                for key in common_keys
+                if combo.get(key) != completed.get(key)
+            ]
+            logger.debug(f"No match: {mismatches}")
+
+        return match
+
+    # Keep track of which combinations are new
+    new_combinations = []
+    skipped_count = 0
+
+    # Show sample of new combinations for debugging
+    if combinations:
+        console.print("\n[dim]Sample new combination params:[/dim]")
+        sample = combinations[0]
+        for key, value in list(sample.items())[:5]:
+            console.print(f"[dim]  {key}: {value}[/dim]")
+
+    for combo in combinations:
+        is_completed = False
+        for completed in completed_params:
+            if params_match(combo, completed):
+                is_completed = True
+                skipped_count += 1
+                logger.debug(f"Skipping completed combination: {combo}")
+                break
+
+        if not is_completed:
+            # Ensure wandb.group is set to completion sweep ID
+            combo["wandb.group"] = completion_sweep_id
+            new_combinations.append(combo)
+
+    console.print("\n[yellow]Completion run mode:[/yellow]")
+    console.print(f"  Total combinations in new config: {len(combinations)}")
+    console.print(f"  Already completed: {skipped_count}")
+    console.print(f"  New combinations to run: {len(new_combinations)}")
+
+    if len(new_combinations) == 0:
+        console.print("[green]All combinations already completed![/green]")
+
+    return new_combinations
+
+
 def _detect_project_paths(
     hsm_config: Optional["HSMConfig"], sweep_config: Optional["SweepConfig"] = None
 ) -> tuple[str, str, str]:
@@ -514,10 +659,15 @@ def _handle_dry_run(
                     param_strs.append(f'"{key}={value}"')
             params_str = " ".join(param_strs)
 
-        # Use sweep_id as fallback for wandb group (consistent with actual execution)
-        effective_group = group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        wandb_group_str = f"wandb.group={effective_group}"
-        full_command = f"{python_path} {script_path} {params_str} {wandb_group_str}"
+        # Add wandb.group only if not already in params (e.g., completion runs)
+        if "wandb.group" not in combo:
+            # Use sweep_id as fallback for wandb group
+            effective_group = group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            wandb_group_str = f" wandb.group={effective_group}"
+        else:
+            wandb_group_str = ""
+
+        full_command = f"{python_path} {script_path} {params_str}{wandb_group_str}"
 
         console.print(f"     [dim]Command: {full_command}[/dim]")
         console.print()  # Add spacing between combinations
@@ -534,6 +684,7 @@ def _setup_sweep_directories_and_managers(
     parallel_jobs: Optional[int],
     console: Console,
     logger: logging.Logger,
+    completion_sweep_id: Optional[str] = None,
 ) -> tuple[str, Path, Path, Path, Optional[object]]:
     """Set up sweep directories and create remote/distributed job managers if needed.
 
@@ -542,11 +693,15 @@ def _setup_sweep_directories_and_managers(
     """
     from ..core.common.utils import create_sweep_id
 
-    # Generate sweep ID
-    sweep_id = create_sweep_id()
-    console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
+    # Use existing sweep ID for completion runs, or generate new one
+    if completion_sweep_id:
+        sweep_id = completion_sweep_id
+        console.print(f"\n[yellow]Using existing Sweep ID: {sweep_id}[/yellow]")
+    else:
+        sweep_id = create_sweep_id()
+        console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
 
-    # Create sweep directory
+    # Create or reuse sweep directory
     sweep_dir = Path("sweeps") / "outputs" / sweep_id
     sweep_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Sweep directory: {sweep_dir}")
@@ -891,10 +1046,42 @@ def run_sweep(
         if config is None:
             return
 
+        # Check if this is a completion run
+        is_completion_run = config.complete is not None
+        completion_sweep_id = config.complete if is_completion_run else None
+
+        if is_completion_run:
+            console.print(f"\n[bold cyan]Completion Run Mode Enabled[/bold cyan]")
+            console.print(f"Completing sweep: {completion_sweep_id}")
+
         # Generate parameter combinations and display info
         combinations = _generate_parameter_combinations(config, max_runs, count_only, console)
         if combinations is None:  # count_only was True
             return
+
+        # For completion runs, filter out already completed combinations
+        completed_tasks = None
+        starting_task_number = 1
+        if is_completion_run:
+            completed_tasks = _load_completed_tasks(completion_sweep_id, console, logger)
+            if completed_tasks is None:
+                console.print("[red]Failed to load completed tasks. Aborting completion run.[/red]")
+                return
+
+            # Get the maximum task number to continue numbering from there
+            max_task_num = _get_max_task_number(completed_tasks)
+            starting_task_number = max_task_num + 1
+            console.print(
+                f"[cyan]Continuing task numbering from task_{starting_task_number:03d}[/cyan]"
+            )
+
+            combinations = _filter_completed_combinations(
+                combinations, completed_tasks, console, logger, completion_sweep_id
+            )
+
+            if len(combinations) == 0:
+                console.print("[green]Nothing left to do! All combinations completed.[/green]")
+                return
 
         # Detect project paths for execution (with script from sweep config if specified)
         python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
@@ -919,6 +1106,11 @@ def run_sweep(
 
         if job_manager:
             console.print(f"Detected/Selected execution system: {job_manager.system_type}")
+
+        # For completion runs, ensure wandb group is set to the completion sweep ID
+        if is_completion_run and not group:
+            group = completion_sweep_id
+            console.print(f"[cyan]Setting wandb.group to: {group}[/cyan]")
 
         if dry_run:
             _handle_dry_run(
@@ -949,11 +1141,29 @@ def run_sweep(
             parallel_jobs=parallel_jobs,
             console=console,
             logger=logger,
+            completion_sweep_id=completion_sweep_id,
         )
         if setup_result[0] is None:  # Error occurred
             return
 
         sweep_id, sweep_dir, scripts_dir, logs_dir, job_manager = setup_result
+
+        # Mark job manager as completion run if applicable and set starting task number
+        # Note: For LocalJobManager, we use starting_task_number instead of is_completion_run
+        # to avoid the wrapped param_combinations path
+        if is_completion_run:
+            if hasattr(job_manager, "starting_task_number"):
+                job_manager.starting_task_number = starting_task_number
+                logger.info(f"Set job_manager.starting_task_number = {starting_task_number}")
+            # Only set is_completion_run for RemoteJobManagerWrapper (not LocalJobManager)
+            if (
+                hasattr(job_manager, "is_completion_run")
+                and type(job_manager).__name__ != "LocalJobManager"
+            ):
+                job_manager.is_completion_run = True
+                logger.info("Set job_manager.is_completion_run = True (for remote/distributed)")
+            else:
+                logger.info("Using starting_task_number for local completion run")
 
         # Submit jobs and create tracking files
         try:

@@ -43,15 +43,22 @@ class LocalJobManager(BaseJobManager):
         self.script_path = script_path
         self.project_dir = project_dir
         self.system_type = "local"
-        self.show_output = show_output
+        # Auto-enable output streaming when running single job at a time
+        self.show_output = show_output or (max_parallel_jobs == 1)
         self.running_jobs = self.running_processes  # Alias for compatibility
         self.job_counter = 0
         self.total_jobs_planned = 0
         self.jobs_completed = 0
         self.task_tracker = None  # Will be initialized in submit_sweep
         self.show_progress = show_progress
-        self.show_output = show_output
         self.is_completion_run = False
+        self.starting_task_number = 1  # For completion runs, start numbering from here
+
+        # Output control for parallel jobs - only one job streams at a time
+        import threading
+
+        self.output_lock = threading.Lock()
+        self.current_streaming_job = None
 
         # Task tracking for sweep-wide visibility
         self.progress_bar = ProgressBarManager(show_progress=self.show_progress)
@@ -110,12 +117,13 @@ class LocalJobManager(BaseJobManager):
                     print(f"Warning: Script path {self.script_path} not found")
 
         # Fix python path - ensure it exists
-        if self.python_path and self.python_path != "python":
-            if not Path(self.python_path).exists():
-                print(
-                    f"Warning: Python path {self.python_path} not found, falling back to 'python'"
-                )
-                self.python_path = "python"
+        if (
+            self.python_path
+            and self.python_path != "python"
+            and not Path(self.python_path).exists()
+        ):
+            print(f"Warning: Python path {self.python_path} not found, falling back to 'python'")
+            self.python_path = "python"
 
     def submit_single_job(
         self,
@@ -165,7 +173,15 @@ class LocalJobManager(BaseJobManager):
         job_id = f"local_{sweep_id}_{self.job_counter}"
 
         # Determine the effective wandb group
-        effective_wandb_group = wandb_group or sweep_id
+        # Check if wandb.group is already in params (e.g., for completion runs)
+        if "wandb.group" in params:
+            # Extract and remove wandb.group from params to avoid duplication
+            effective_wandb_group = params["wandb.group"]
+            params_without_wandb = {k: v for k, v in params.items() if k != "wandb.group"}
+            params_str = self._params_to_string(params_without_wandb)
+        else:
+            effective_wandb_group = wandb_group or sweep_id
+            params_str = self._params_to_string(params)
 
         # Register task submission in tracker if available
         if self.task_tracker:
@@ -181,7 +197,7 @@ class LocalJobManager(BaseJobManager):
             task_dir=task_dir,
             job_id=job_id,
             task_name=task_name,
-            params_str=self._params_to_string(params),
+            params_str=params_str,
             python_path=self.python_path,
             script_path=self.script_path,
             effective_wandb_group=effective_wandb_group,
@@ -197,43 +213,71 @@ class LocalJobManager(BaseJobManager):
         log_file = logs_dir / f"{job_name}.log"
         error_file = logs_dir / f"{job_name}.err"
 
+        # Determine if this job should stream output to console
+        # For parallel jobs, only the first one streams at a time
+        should_stream_to_console = False
         if self.show_output:
+            with self.output_lock:
+                if self.current_streaming_job is None:
+                    self.current_streaming_job = job_id
+                    should_stream_to_console = True
+
+        if should_stream_to_console:
             # Show output in real-time while also logging to files
+            # Use unbuffered streaming to properly handle tqdm progress bars
+            import sys
             from threading import Thread
 
-            def stream_output(pipe, file_handle, prefix=""):
-                """Stream output from subprocess to both console and file."""
-                for line in iter(pipe.readline, b""):
-                    line_str = line.decode("utf-8", errors="replace")
-                    file_handle.write(line_str)
-                    file_handle.flush()
-                    if prefix:
-                        print(f"[{prefix}] {line_str.rstrip()}")
-                    else:
-                        print(line_str.rstrip())
-                pipe.close()
+            def stream_output(pipe, file_handle, is_stderr=False):
+                """Stream output from subprocess to both console and file.
 
-            with open(log_file, "w") as log_f, open(error_file, "w") as err_f:
-                process = subprocess.Popen(
-                    ["/bin/bash", str(script_path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=self.project_dir,
-                    preexec_fn=os.setsid,
-                    bufsize=1,
-                    universal_newlines=False,
-                )
+                Handles tqdm progress bars by preserving carriage returns and
+                writing directly to stdout/stderr without buffering.
+                """
+                try:
+                    output_stream = sys.stderr if is_stderr else sys.stdout
+                    while True:
+                        # Read in small chunks for better performance while maintaining responsiveness
+                        chunk = pipe.read(128)
+                        if not chunk:
+                            break
 
-                # Start threads to handle output streaming
-                stdout_thread = Thread(target=stream_output, args=(process.stdout, log_f, job_name))
-                stderr_thread = Thread(
-                    target=stream_output,
-                    args=(process.stderr, err_f, f"{job_name}-ERR"),
-                )
-                stdout_thread.daemon = True
-                stderr_thread.daemon = True
-                stdout_thread.start()
-                stderr_thread.start()
+                        # Write to file
+                        chunk_str = chunk.decode("utf-8", errors="replace")
+                        file_handle.write(chunk_str)
+                        file_handle.flush()
+
+                        # Write to console (preserving \r for tqdm)
+                        output_stream.write(chunk_str)
+                        output_stream.flush()
+
+                except ValueError:
+                    # File handle closed, stop streaming
+                    pass
+                finally:
+                    pipe.close()
+
+            # Open file handles that will be kept open by the threads
+            log_f = open(log_file, "w")
+            err_f = open(error_file, "w")
+
+            process = subprocess.Popen(
+                ["/bin/bash", str(script_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=self.project_dir,
+                preexec_fn=os.setsid,
+                bufsize=0,  # Unbuffered for real-time output
+                universal_newlines=False,
+            )
+
+            # Start threads to handle output streaming
+            stdout_thread = Thread(target=stream_output, args=(process.stdout, log_f, False))
+            stderr_thread = Thread(target=stream_output, args=(process.stderr, err_f, True))
+            stdout_thread.daemon = True
+            stderr_thread.daemon = True
+            stdout_thread.start()
+            stderr_thread.start()
         else:
             # Original behavior: redirect to log files
             with open(log_file, "w") as log_f, open(error_file, "w") as err_f:
@@ -245,6 +289,11 @@ class LocalJobManager(BaseJobManager):
                     preexec_fn=os.setsid,
                 )
 
+        # Store file handles for cleanup if streaming output
+        file_handles = None
+        if should_stream_to_console:
+            file_handles = {"log_f": log_f, "err_f": err_f}
+
         self.running_jobs[job_id] = {
             "process": process,
             "job_name": job_name,
@@ -254,10 +303,15 @@ class LocalJobManager(BaseJobManager):
             "task_dir": str(task_dir),
             "start_time": time.time(),
             "params": params,
+            "file_handles": file_handles,
+            "is_streaming": should_stream_to_console,
         }
 
         if self.show_progress:
-            print(f"Started local job: {job_name} (ID: {job_id})")
+            if should_stream_to_console:
+                print(f"Started local job: {job_name} (ID: {job_id}) [STREAMING OUTPUT]")
+            else:
+                print(f"Started local job: {job_name} (ID: {job_id})")
 
         return job_id
 
@@ -314,9 +368,13 @@ class LocalJobManager(BaseJobManager):
                 job_ids.append(job_id)
         else:
             # Normal runs where param_combinations are just parameter dicts
+            logger.info(f"Array job: starting_task_number={self.starting_task_number}")
             for i, params in enumerate(param_combinations):
-                job_name = f"{sweep_id}_task_{i + 1:03d}"
-                task_names.append(f"task_{i + 1:03d}")
+                # Use starting_task_number offset for completion runs
+                task_num = self.starting_task_number + i
+                job_name = f"{sweep_id}_task_{task_num:03d}"
+                task_names.append(f"task_{task_num:03d}")
+                logger.debug(f"Array job {i + 1}: task_num={task_num}, job_name={job_name}")
 
                 # Wait if we've reached max parallel jobs
                 while len(self.running_jobs) >= self.max_parallel_jobs:
@@ -412,6 +470,22 @@ class LocalJobManager(BaseJobManager):
                     )
                     # Save the updated mapping
                     self.task_tracker.save_mapping()
+
+            # Close file handles if they were opened for streaming
+            if job_info.get("file_handles"):
+                try:
+                    job_info["file_handles"]["log_f"].close()
+                    job_info["file_handles"]["err_f"].close()
+                except Exception as e:
+                    logger.debug(f"Error closing file handles for {job_id}: {e}")
+
+            # If this job was streaming output, release the streaming slot
+            # so the next job can start streaming
+            if job_info.get("is_streaming"):
+                with self.output_lock:
+                    if self.current_streaming_job == job_id:
+                        self.current_streaming_job = None
+                        # Note: The next job to start will automatically claim the slot
 
             del self.running_jobs[job_id]
             self.jobs_completed += 1
@@ -515,6 +589,20 @@ class LocalJobManager(BaseJobManager):
                 with open(task_info_file, "a") as f:
                     f.write(f"Status: {status}\n")
                     f.write(f"End Time: {datetime.now()}\n")
+
+        # Close file handles if they were opened for streaming
+        if job_info.get("file_handles"):
+            try:
+                job_info["file_handles"]["log_f"].close()
+                job_info["file_handles"]["err_f"].close()
+            except Exception as e:
+                logger.debug(f"Error closing file handles for cancelled job {job_id}: {e}")
+
+        # If this job was streaming output, release the streaming slot
+        if job_info.get("is_streaming"):
+            with self.output_lock:
+                if self.current_streaming_job == job_id:
+                    self.current_streaming_job = None
 
         # Remove from running processes
         if job_id in self.running_jobs:
@@ -785,7 +873,12 @@ class LocalJobManager(BaseJobManager):
             else:
                 # Normal runs where param_combinations are just parameter dicts
                 for i, params in enumerate(param_combinations):
-                    job_name = f"{sweep_id}_job_{i + 1:03d}"
+                    # Use starting_task_number offset for completion runs
+                    task_num = self.starting_task_number + i
+                    job_name = f"{sweep_id}_job_{task_num:03d}"
+                    logger.info(
+                        f"Creating job {i + 1}: task_num={task_num}, job_name={job_name}, starting_task_number={self.starting_task_number}"
+                    )
 
                     # Wait if we've reached max parallel jobs
                     while len(self.running_jobs) >= self.max_parallel_jobs:
