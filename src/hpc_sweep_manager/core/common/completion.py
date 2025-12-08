@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 import yaml
 
-from .config_parser import SweepConfig
+from .config import SweepConfig
 from .param_generator import ParameterGenerator
 from .sweep_tracker import SweepTaskTracker
 
@@ -742,6 +742,7 @@ class SweepCompletor:
         baselines_only: bool = False,
         verify_running: bool = True,
         treat_running_as_failed: bool = False,
+        task_ids: List[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Execute the completion plan.
@@ -756,6 +757,7 @@ class SweepCompletor:
             baselines_only: If True, ONLY run baselines (skip regular missing/failed runs)
             verify_running: If True, verify RUNNING tasks against actual system state (PBS/PIDs)
             treat_running_as_failed: If True, treat all RUNNING tasks as FAILED (implies verify_running=False)
+            task_ids: If provided, only run these specific task IDs (overrides other selection logic)
         """
         # Handle flag interactions
         if treat_running_as_failed:
@@ -774,26 +776,75 @@ class SweepCompletor:
             if kwargs.get("console"):
                 kwargs["console"].print(f"[cyan]Auto-detected execution mode: {mode}[/cyan]")
 
-        # Handle both source_mapping and task_directory analysis formats
-        missing_combinations = analysis["missing_combinations"]
-        failed_combinations = analysis.get("failed_combinations", []) if retry_failed else []
-        cancelled_combinations = analysis.get("cancelled_combinations", []) if retry_failed else []
+        # Handle manual task ID list (overrides all other selection logic)
+        if task_ids is not None:
+            if kwargs.get("console"):
+                kwargs["console"].print(
+                    f"[cyan]Manual task ID mode: running {len(task_ids)} specified tasks[/cyan]"
+                )
+                kwargs["console"].print(f"[cyan]Task IDs: {sorted(task_ids)}[/cyan]")
 
-        # Handle treat_running_as_failed flag
-        if treat_running_as_failed:
-            # Get running combinations and treat them as failed
-            running_tasks = analysis.get("running_tasks", [])
-            if running_tasks:
-                running_combinations = self.analyzer._get_combinations_for_tasks(running_tasks)
-                failed_combinations.extend(running_combinations)
-                if kwargs.get("console"):
-                    kwargs["console"].print(
-                        f"[yellow]Treating {len(running_combinations)} RUNNING tasks as FAILED "
-                        f"(--treat-running-as-failed)[/yellow]"
-                    )
+            # Convert task IDs to combinations
+            manual_combinations = []
+            manual_task_numbers = []
 
-        # Get task number information for proper re-use
-        missing_task_numbers = analysis.get("missing_task_numbers", [])
+            for task_id in task_ids:
+                # Validate task ID is within range
+                if task_id < 1 or task_id > len(self.analyzer.original_combinations):
+                    if kwargs.get("logger"):
+                        kwargs["logger"].warning(
+                            f"Task ID {task_id} is out of range (1-{len(self.analyzer.original_combinations)}), skipping"
+                        )
+                    continue
+
+                # Get the combination for this task ID (task IDs are 1-indexed)
+                combo = self.analyzer.original_combinations[task_id - 1]
+                manual_combinations.append(combo)
+                manual_task_numbers.append(task_id)
+
+            if not manual_combinations:
+                return {
+                    "status": "error",
+                    "message": "No valid task IDs provided",
+                    "jobs_submitted": 0,
+                }
+
+            # Override the normal selection logic with manual task IDs
+            missing_combinations = []
+            failed_combinations = []
+            cancelled_combinations = []
+            missing_task_numbers = []
+
+            # Manual tasks will be treated as "manual" runs (similar to failed runs - reuse their task numbers)
+            # We'll handle them separately below
+            manual_run_mode = True
+        else:
+            manual_run_mode = False
+            manual_combinations = []
+            manual_task_numbers = []
+
+            # Handle both source_mapping and task_directory analysis formats
+            missing_combinations = analysis["missing_combinations"]
+            failed_combinations = analysis.get("failed_combinations", []) if retry_failed else []
+            cancelled_combinations = (
+                analysis.get("cancelled_combinations", []) if retry_failed else []
+            )
+
+            # Handle treat_running_as_failed flag
+            if treat_running_as_failed:
+                # Get running combinations and treat them as failed
+                running_tasks = analysis.get("running_tasks", [])
+                if running_tasks:
+                    running_combinations = self.analyzer._get_combinations_for_tasks(running_tasks)
+                    failed_combinations.extend(running_combinations)
+                    if kwargs.get("console"):
+                        kwargs["console"].print(
+                            f"[yellow]Treating {len(running_combinations)} RUNNING tasks as FAILED "
+                            f"(--treat-running-as-failed)[/yellow]"
+                        )
+
+            # Get task number information for proper re-use
+            missing_task_numbers = analysis.get("missing_task_numbers", [])
 
         # Handle baseline completion: find tasks that are completed but missing baseline results
         baseline_combinations_to_run = []
@@ -820,17 +871,27 @@ class SweepCompletor:
                 )
 
         # Combine missing, failed, and cancelled combinations to re-run
-        combinations_to_run = missing_combinations + failed_combinations + cancelled_combinations
-
-        # For missing tasks with complete_baselines=True, we need to run both main training + baseline
-        # For completed tasks missing baselines, we only need to run baseline (with overrides)
-        if complete_baselines:
-            # Add baseline runs for missing tasks (these will run with default config:
-            # main training enabled, baseline enabled)
+        # OR use manual combinations if manual mode is enabled
+        if manual_run_mode:
+            combinations_to_run = manual_combinations
             if kwargs.get("console"):
                 kwargs["console"].print(
-                    "[cyan]Missing tasks will run both main training and baseline[/cyan]"
+                    f"[yellow]Manual task ID mode: will run {len(manual_combinations)} specified tasks[/yellow]"
                 )
+        else:
+            combinations_to_run = (
+                missing_combinations + failed_combinations + cancelled_combinations
+            )
+
+            # For missing tasks with complete_baselines=True, we need to run both main training + baseline
+            # For completed tasks missing baselines, we only need to run baseline (with overrides)
+            if complete_baselines:
+                # Add baseline runs for missing tasks (these will run with default config:
+                # main training enabled, baseline enabled)
+                if kwargs.get("console"):
+                    kwargs["console"].print(
+                        "[cyan]Missing tasks will run both main training and baseline[/cyan]"
+                    )
 
         total_available_to_run = len(combinations_to_run) + len(baseline_combinations_to_run)
 
@@ -895,82 +956,120 @@ class SweepCompletor:
         tasks_to_run = []
         next_task_num = max_existing_task_num + 1
 
-        # First, assign failed and cancelled combinations to their existing task numbers
-        if retry_failed and (failed_combinations or cancelled_combinations):
-            retry_combinations = failed_combinations + cancelled_combinations
-            for combo in retry_combinations:
-                combo_key = self.analyzer._params_to_key(combo)
-                # Find if this combo was mapped to a failed/cancelled task
-                found_task_num = None
-                for task_num, mapped_combo_key in failed_task_map.items():
-                    if mapped_combo_key == combo_key:
-                        found_task_num = task_num
-                        break
+        # Handle manual task ID mode
+        if manual_run_mode:
+            # For manual mode, use the specified task numbers directly
+            for combo, task_num in zip(manual_combinations, manual_task_numbers):
+                # SAFETY CHECK: Warn if overwriting a COMPLETED task
+                task_dir = self.analyzer.sweep_dir / "tasks" / f"task_{task_num:03d}"
+                if task_dir.exists():
+                    task_info_file = task_dir / "task_info.txt"
+                    is_completed = False
+                    if task_info_file.exists():
+                        try:
+                            with open(task_info_file) as f:
+                                content = f.read()
+                                if "Status: SUCCESS" in content or "Status: COMPLETED" in content:
+                                    is_completed = True
+                                    if kwargs.get("logger"):
+                                        kwargs["logger"].warning(
+                                            f"Task {task_num:03d} is already COMPLETED and will be OVERWRITTEN"
+                                        )
+                        except Exception:
+                            pass
 
-                if found_task_num:
-                    # Re-use existing task number for failed/cancelled combination
-                    tasks_to_run.append(
-                        {
-                            "task_index": found_task_num - 1,
-                            "task_number": found_task_num,
-                            "params": combo,
-                        }
-                    )
-                else:
-                    # Assign new task number for failed/cancelled combination not found in mapping
-                    tasks_to_run.append(
-                        {
-                            "task_index": next_task_num - 1,
-                            "task_number": next_task_num,
-                            "params": combo,
-                        }
-                    )
-                    next_task_num += 1
+                tasks_to_run.append(
+                    {
+                        "task_index": task_num - 1,
+                        "task_number": task_num,
+                        "params": combo,
+                        "is_manual": True,
+                    }
+                )
+        else:
+            # First, assign failed and cancelled combinations to their existing task numbers
+            if retry_failed and (failed_combinations or cancelled_combinations):
+                retry_combinations = failed_combinations + cancelled_combinations
+                for combo in retry_combinations:
+                    combo_key = self.analyzer._params_to_key(combo)
+                    # Find if this combo was mapped to a failed/cancelled task
+                    found_task_num = None
+                    for task_num, mapped_combo_key in failed_task_map.items():
+                        if mapped_combo_key == combo_key:
+                            found_task_num = task_num
+                            break
 
-        # Then, assign missing combinations to their proper task numbers
-        # If we have missing_task_numbers from task directory scanning, use those
-        # This ensures we fill the gaps rather than creating new task numbers
-        if missing_task_numbers:
-            for i, combo in enumerate(missing_combinations):
-                if i < len(missing_task_numbers):
-                    task_num = missing_task_numbers[i]
-                    # SAFETY CHECK: Only prevent overwriting COMPLETED tasks
-                    # Failed/running tasks can be safely retried
-                    task_dir = self.analyzer.sweep_dir / "tasks" / f"task_{task_num:03d}"
-                    if task_dir.exists():
-                        # Check if this is a completed task
-                        task_info_file = task_dir / "task_info.txt"
-                        is_completed = False
-                        if task_info_file.exists():
-                            try:
-                                with open(task_info_file) as f:
-                                    content = f.read()
-                                    # Check for SUCCESS or COMPLETED status
-                                    if (
-                                        "Status: SUCCESS" in content
-                                        or "Status: COMPLETED" in content
-                                    ):
-                                        is_completed = True
-                            except Exception:
-                                pass
+                    if found_task_num:
+                        # Re-use existing task number for failed/cancelled combination
+                        tasks_to_run.append(
+                            {
+                                "task_index": found_task_num - 1,
+                                "task_number": found_task_num,
+                                "params": combo,
+                            }
+                        )
+                    else:
+                        # Assign new task number for failed/cancelled combination not found in mapping
+                        tasks_to_run.append(
+                            {
+                                "task_index": next_task_num - 1,
+                                "task_number": next_task_num,
+                                "params": combo,
+                            }
+                        )
+                        next_task_num += 1
 
-                        if is_completed:
-                            # Don't overwrite completed tasks
-                            if logger := kwargs.get("logger"):
-                                logger.warning(
-                                    f"Task {task_num:03d} is already COMPLETED, "
-                                    f"using new task number to avoid overwriting"
+                # Then, assign missing combinations to their proper task numbers
+                # If we have missing_task_numbers from task directory scanning, use those
+                # This ensures we fill the gaps rather than creating new task numbers
+                for i, combo in enumerate(missing_combinations):
+                    if i < len(missing_task_numbers):
+                        task_num = missing_task_numbers[i]
+                        # SAFETY CHECK: Only prevent overwriting COMPLETED tasks
+                        # Failed/running tasks can be safely retried
+                        task_dir = self.analyzer.sweep_dir / "tasks" / f"task_{task_num:03d}"
+                        if task_dir.exists():
+                            # Check if this is a completed task
+                            task_info_file = task_dir / "task_info.txt"
+                            is_completed = False
+                            if task_info_file.exists():
+                                try:
+                                    with open(task_info_file) as f:
+                                        content = f.read()
+                                        # Check for SUCCESS or COMPLETED status
+                                        if (
+                                            "Status: SUCCESS" in content
+                                            or "Status: COMPLETED" in content
+                                        ):
+                                            is_completed = True
+                                except Exception:
+                                    pass
+
+                            if is_completed:
+                                # Don't overwrite completed tasks
+                                if logger := kwargs.get("logger"):
+                                    logger.warning(
+                                        f"Task {task_num:03d} is already COMPLETED, "
+                                        f"using new task number to avoid overwriting"
+                                    )
+                                tasks_to_run.append(
+                                    {
+                                        "task_index": next_task_num - 1,
+                                        "task_number": next_task_num,
+                                        "params": combo,
+                                    }
                                 )
-                            tasks_to_run.append(
-                                {
-                                    "task_index": next_task_num - 1,
-                                    "task_number": next_task_num,
-                                    "params": combo,
-                                }
-                            )
-                            next_task_num += 1
+                                next_task_num += 1
+                            else:
+                                # Allow overwriting failed/incomplete tasks
+                                tasks_to_run.append(
+                                    {
+                                        "task_index": task_num - 1,
+                                        "task_number": task_num,
+                                        "params": combo,
+                                    }
+                                )
                         else:
-                            # Allow overwriting failed/incomplete tasks
                             tasks_to_run.append(
                                 {
                                     "task_index": task_num - 1,
@@ -979,11 +1078,18 @@ class SweepCompletor:
                                 }
                             )
                     else:
+                        # Fallback to sequential numbering if we run out of missing numbers
                         tasks_to_run.append(
-                            {"task_index": task_num - 1, "task_number": task_num, "params": combo}
+                            {
+                                "task_index": next_task_num - 1,
+                                "task_number": next_task_num,
+                                "params": combo,
+                            }
                         )
-                else:
-                    # Fallback to sequential numbering if we run out of missing numbers
+                        next_task_num += 1
+            else:
+                # No missing_task_numbers available, use sequential numbering
+                for combo in missing_combinations:
                     tasks_to_run.append(
                         {
                             "task_index": next_task_num - 1,
@@ -992,13 +1098,6 @@ class SweepCompletor:
                         }
                     )
                     next_task_num += 1
-        else:
-            # No missing_task_numbers available, use sequential numbering
-            for combo in missing_combinations:
-                tasks_to_run.append(
-                    {"task_index": next_task_num - 1, "task_number": next_task_num, "params": combo}
-                )
-                next_task_num += 1
 
         # Add baseline combinations for completed tasks missing baseline results
         if complete_baselines and baseline_combinations_to_run:

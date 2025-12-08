@@ -427,6 +427,170 @@ def _filter_completed_combinations(
     return new_combinations
 
 
+def _parse_task_ids(
+    task_ids_str: str, console: Console, logger: logging.Logger
+) -> Optional[List[int]]:
+    """Parse task ID string or file into list of integers.
+
+    Supports:
+    - Comma-separated: "1,5,10"
+    - Ranges: "1-10"
+    - Mixed: "1,5-8,10"
+    - File path: "@path/to/file.txt" or "path/to/file.txt" (if file exists)
+
+    File format supports:
+    - One task ID per line
+    - Comments (lines starting with #)
+    - Blank lines (ignored)
+    - Ranges on a line (e.g., "1-10")
+    - Multiple IDs per line (comma-separated)
+
+    Args:
+        task_ids_str: String containing task IDs or file path
+        console: Rich console for output
+        logger: Logger for debugging
+
+    Returns:
+        List of task IDs as integers, or None if parsing failed
+    """
+    try:
+        # Check if input is a file path (starts with @ or is an existing file)
+        is_file = False
+        file_path = None
+
+        if task_ids_str.startswith("@"):
+            # Explicit file marker
+            file_path = Path(task_ids_str[1:])
+            is_file = True
+        else:
+            # Check if it's an existing file
+            potential_path = Path(task_ids_str)
+            if potential_path.exists() and potential_path.is_file():
+                file_path = potential_path
+                is_file = True
+
+        if is_file:
+            if not file_path.exists():
+                console.print(f"[red]Error: Task ID file not found: {file_path}[/red]")
+                return None
+
+            console.print(f"[cyan]Reading task IDs from file: {file_path}[/cyan]")
+            logger.info(f"Reading task IDs from file: {file_path}")
+
+            try:
+                with open(file_path, "r") as f:
+                    content = f.read()
+
+                # Parse file content line by line
+                task_ids = []
+                for line_num, line in enumerate(content.split("\n"), 1):
+                    line = line.strip()
+
+                    # Skip empty lines and comments
+                    if not line or line.startswith("#"):
+                        continue
+
+                    # Parse this line (could be single ID, range, or comma-separated)
+                    line_ids = _parse_task_ids_from_string(line, console, logger, line_num)
+                    if line_ids is None:
+                        return None  # Error already printed
+                    task_ids.extend(line_ids)
+
+                # Remove duplicates and sort
+                task_ids = sorted(set(task_ids))
+                console.print(
+                    f"[green]Successfully read {len(task_ids)} task IDs from file[/green]"
+                )
+                logger.info(f"Parsed {len(task_ids)} task IDs from file: {task_ids}")
+                return task_ids
+
+            except Exception as e:
+                console.print(f"[red]Error reading task ID file: {e}[/red]")
+                logger.error(f"Failed to read task ID file: {e}")
+                return None
+        else:
+            # Parse as direct string input
+            task_ids = _parse_task_ids_from_string(task_ids_str, console, logger)
+            if task_ids is not None:
+                logger.debug(f"Parsed task IDs: {task_ids}")
+            return task_ids
+
+    except Exception as e:
+        console.print(f"[red]Error parsing task IDs: {e}[/red]")
+        logger.error(f"Task ID parsing failed: {e}")
+        return None
+
+
+def _parse_task_ids_from_string(
+    task_ids_str: str, console: Console, logger: logging.Logger, line_num: int = None
+) -> Optional[List[int]]:
+    """Parse task IDs from a string (comma-separated, ranges, or single values).
+
+    Args:
+        task_ids_str: String containing task IDs
+        console: Rich console for output
+        logger: Logger for debugging
+        line_num: Optional line number (for file parsing error messages)
+
+    Returns:
+        List of task IDs as integers, or None if parsing failed
+    """
+    try:
+        task_ids = []
+        parts = task_ids_str.split(",")
+
+        line_prefix = f"Line {line_num}: " if line_num else ""
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            if "-" in part:
+                # Handle range like "1-10"
+                range_parts = part.split("-")
+                if len(range_parts) != 2:
+                    console.print(
+                        f"[red]Error: {line_prefix}Invalid range format '{part}'. "
+                        f"Expected 'start-end'[/red]"
+                    )
+                    return None
+                try:
+                    start = int(range_parts[0].strip())
+                    end = int(range_parts[1].strip())
+                    if start > end:
+                        console.print(
+                            f"[red]Error: {line_prefix}Invalid range '{part}'. "
+                            f"Start must be <= end[/red]"
+                        )
+                        return None
+                    task_ids.extend(range(start, end + 1))
+                except ValueError:
+                    console.print(
+                        f"[red]Error: {line_prefix}Invalid range '{part}'. "
+                        f"Must contain integers[/red]"
+                    )
+                    return None
+            else:
+                # Handle single number
+                try:
+                    task_ids.append(int(part))
+                except ValueError:
+                    console.print(
+                        f"[red]Error: {line_prefix}Invalid task ID '{part}'. "
+                        f"Must be an integer[/red]"
+                    )
+                    return None
+
+        # Remove duplicates and sort
+        return sorted(set(task_ids))
+
+    except Exception as e:
+        console.print(f"[red]Error parsing task IDs from string: {e}[/red]")
+        logger.error(f"Task ID string parsing failed: {e}")
+        return None
+
+
 def _detect_project_paths(
     hsm_config: Optional["HSMConfig"], sweep_config: Optional["SweepConfig"] = None
 ) -> tuple[str, str, str]:
@@ -1349,6 +1513,11 @@ def run_cmd(
     is_flag=True,
     help="Treat all RUNNING tasks as FAILED and retry them",
 )
+@click.option(
+    "--task-ids",
+    "-t",
+    help="Specific task IDs to run. Supports: '1,5,10', '1-10', or '@file.txt' / 'file.txt' for file input",
+)
 @common_options
 @click.pass_context
 def complete_cmd(
@@ -1375,6 +1544,7 @@ def complete_cmd(
     overwrite_source_mapping,
     no_verify_running,
     treat_running_as_failed,
+    task_ids,
 ):
     """Complete a partially finished sweep by running missing/failed combinations."""
     from rich.table import Table
@@ -1472,6 +1642,22 @@ def complete_cmd(
         complete_baselines = True
         console.print("[yellow]--baselines-only implies --complete-baselines[/yellow]")
 
+    # Parse task IDs if provided
+    parsed_task_ids = None
+    if task_ids:
+        parsed_task_ids = _parse_task_ids(task_ids, console, logger)
+        if parsed_task_ids is None:
+            console.print("[red]Error: Failed to parse task IDs[/red]")
+            return
+
+        console.print(f"\n[cyan]Manual task ID mode enabled:[/cyan]")
+        console.print(f"  Running {len(parsed_task_ids)} specific tasks: {sorted(parsed_task_ids)}")
+
+        # Validate task IDs are within range
+        if any(tid < 1 or tid > total_expected for tid in parsed_task_ids):
+            console.print(f"[red]Error: Task IDs must be between 1 and {total_expected}[/red]")
+            return
+
     # Execute completion
     result = completor.execute_completion(
         mode=mode,
@@ -1492,6 +1678,7 @@ def complete_cmd(
         baselines_only=baselines_only,
         verify_running=not no_verify_running,
         treat_running_as_failed=treat_running_as_failed,
+        task_ids=parsed_task_ids,
         console=console,
         logger=logger,
     )
