@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo
+from ..common.resource_spec import ResourceSpec
 from .local_manager import LocalJobManager
 
 logger = logging.getLogger(__name__)
@@ -66,8 +67,14 @@ class LocalComputeSource(ComputeSource):
         job_name: str,
         sweep_id: str,
         wandb_group: Optional[str] = None,
+        spec: Optional[ResourceSpec] = None,
     ) -> str:
-        """Submit a single job to the local compute source."""
+        """Submit a single job to the local compute source.
+
+        ``spec`` is accepted for interface compatibility with HPC backends but
+        is currently unused — local execution doesn't honor wall-time or
+        memory limits. GPU partitioning will be wired in via Phase 2.
+        """
         if not self.local_manager or not self.local_sweep_dir:
             raise RuntimeError(f"Local compute source {self.name} not properly setup")
 

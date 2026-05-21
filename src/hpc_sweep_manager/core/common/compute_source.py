@@ -1,13 +1,26 @@
 """Compute source abstraction for distributed job execution."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
+
+from .resource_spec import ResourceSpec
 
 logger = logging.getLogger(__name__)
+
+
+SubmissionMode = Literal["individual", "array"]
+ProgressCallback = Callable[[int, int], None]
+
+# Job states that mark a job as no longer active. Backends should normalize
+# their native state strings into these canonical values via update_job_status.
+TERMINAL_STATES: frozenset[str] = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 @dataclass
@@ -89,9 +102,55 @@ class ComputeSource(ABC):
         job_name: str,
         sweep_id: str,
         wandb_group: Optional[str] = None,
+        spec: Optional[ResourceSpec] = None,
     ) -> str:
-        """Submit a single job and return job ID."""
+        """Submit a single job and return job ID.
+
+        ``spec`` carries scheduler-relevant resource requirements; backends
+        that don't need them (e.g. local) may ignore it. Existing
+        implementations that don't yet accept ``spec`` will continue to work
+        because Python ignores extra keyword arguments only if explicitly
+        ``**kwargs``-captured — subclasses should add the parameter to their
+        signature as they're migrated.
+        """
         pass
+
+    async def submit_batch(
+        self,
+        params_list: List[Dict[str, Any]],
+        sweep_id: str,
+        mode: SubmissionMode = "individual",
+        spec: Optional[ResourceSpec] = None,
+        wandb_group: Optional[str] = None,
+        job_name_prefix: Optional[str] = None,
+    ) -> List[str]:
+        """Submit a batch of jobs and return their IDs.
+
+        Default implementation submits jobs one-by-one via
+        :meth:`submit_job` for ``mode="individual"``. Backends that support
+        true scheduler-side array submission should override this method for
+        ``mode="array"``; the default raises :class:`NotImplementedError` in
+        that case.
+        """
+        if mode == "individual":
+            prefix = job_name_prefix or sweep_id
+            job_ids: List[str] = []
+            for i, params in enumerate(params_list):
+                job_name = f"{prefix}_task_{i + 1:03d}"
+                job_id = await self.submit_job(
+                    params=params,
+                    job_name=job_name,
+                    sweep_id=sweep_id,
+                    wandb_group=wandb_group,
+                    spec=spec,
+                )
+                job_ids.append(job_id)
+            return job_ids
+        if mode == "array":
+            raise NotImplementedError(
+                f"{type(self).__name__} ({self.source_type}) does not support array submission"
+            )
+        raise ValueError(f"Unknown submission mode: {mode!r}")
 
     @abstractmethod
     async def get_job_status(self, job_id: str) -> str:
@@ -117,6 +176,40 @@ class ComputeSource(ABC):
     async def cleanup(self):
         """Cleanup resources."""
         pass
+
+    async def wait_for_all(
+        self,
+        poll_interval: float = 5.0,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> Dict[str, str]:
+        """Block until every active job reaches a terminal state.
+
+        Returns a mapping of ``job_id -> final_status``. Polls each active job
+        via :meth:`get_job_status` (which is expected to call
+        :meth:`update_job_status` internally so finished jobs leave
+        ``active_jobs``). Override for backends that can poll all jobs at once
+        more efficiently (e.g. a single Slurm ``squeue`` call).
+        """
+        final_statuses: Dict[str, str] = {}
+        # Seed with anything already moved to completed before we started waiting.
+        for job_id, info in list(self.completed_jobs.items()):
+            final_statuses[job_id] = info.status
+
+        total = len(self.active_jobs) + len(final_statuses)
+        if on_progress is not None:
+            on_progress(len(final_statuses), max(total, 1))
+
+        while self.active_jobs:
+            for job_id in list(self.active_jobs.keys()):
+                status = await self.get_job_status(job_id)
+                if status in TERMINAL_STATES and job_id not in final_statuses:
+                    final_statuses[job_id] = status
+            if on_progress is not None:
+                total = len(self.active_jobs) + len(final_statuses)
+                on_progress(len(final_statuses), max(total, 1))
+            if self.active_jobs:
+                await asyncio.sleep(poll_interval)
+        return final_statuses
 
     def update_job_status(self, job_id: str, new_status: str):
         """Update job status and move between active/completed as needed."""

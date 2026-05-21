@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo
+from ..common.resource_spec import ResourceSpec
 from .discovery import RemoteConfig
 from .remote_manager import RemoteJobManager
 
@@ -92,8 +93,14 @@ class SSHComputeSource(ComputeSource):
         job_name: str,
         sweep_id: str,
         wandb_group: Optional[str] = None,
+        spec: Optional[ResourceSpec] = None,
     ) -> str:
-        """Submit a single job to the SSH compute source."""
+        """Submit a single job to the SSH compute source.
+
+        ``spec`` is accepted for interface compatibility but is not yet
+        propagated to the underlying :class:`RemoteJobManager` — that wiring
+        lands in Phase 1.3 when ``remote_manager.py`` is split.
+        """
         if not self.remote_manager:
             raise RuntimeError(f"SSH compute source {self.name} not properly setup")
 

@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name={{ job_name }}
+#SBATCH --output={{ logs_dir }}/{{ job_name }}.out
+#SBATCH --error={{ logs_dir }}/{{ job_name }}.err
+{{ sbatch_directives }}
+
+{% for mod in modules %}
+module load {{ mod }}
+{% endfor %}
+{% for line in pre_script %}
+{{ line }}
+{% endfor %}
+
+set -e
+
+echo "Job started at: $(date)"
+echo "Running on node: $(hostname)"
+
+cd {{ project_dir }}
+echo "Working directory: $(pwd)"
+
+mkdir -p {{ task_dir }}
+echo "Job ID: ${SLURM_JOB_ID:-unknown}" > {{ task_dir }}/task_info.txt
+echo "Node: $(hostname)" >> {{ task_dir }}/task_info.txt
+echo "Parameters: {{ params_hydra }}" >> {{ task_dir }}/task_info.txt
+echo "Started: $(date)" >> {{ task_dir }}/task_info.txt
+
+COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group or sweep_id }} output.dir={{ task_dir }}"
+echo "Executing: $COMMAND"
+echo "$COMMAND" > {{ task_dir }}/command.txt
+
+if eval "$COMMAND"; then
+    echo "Completed: $(date)" >> {{ task_dir }}/task_info.txt
+    echo "Status: SUCCESS" >> {{ task_dir }}/task_info.txt
+else
+    exit_code=$?
+    echo "Failed: $(date)" >> {{ task_dir }}/task_info.txt
+    echo "Status: FAILED" >> {{ task_dir }}/task_info.txt
+    echo "Exit Code: $exit_code" >> {{ task_dir }}/task_info.txt
+    exit $exit_code
+fi

@@ -1,0 +1,118 @@
+#!/bin/bash
+#SBATCH --job-name={{ job_name }}
+#SBATCH --array=1-{{ num_jobs }}
+#SBATCH --output={{ logs_dir }}/{{ job_name }}_%A_%a.out
+#SBATCH --error={{ logs_dir }}/{{ job_name }}_%A_%a.err
+{{ sbatch_directives }}
+
+{% for mod in modules %}
+module load {{ mod }}
+{% endfor %}
+{% for line in pre_script %}
+{{ line }}
+{% endfor %}
+
+set -e
+
+echo "Array job task: $SLURM_ARRAY_TASK_ID"
+echo "Job started at: $(date)"
+echo "Running on node: $(hostname)"
+
+cd {{ project_dir }}
+echo "Working directory: $(pwd)"
+
+if [[ -z "$SLURM_ARRAY_TASK_ID" ]]; then
+    echo "Error: SLURM_ARRAY_TASK_ID not set. This script should only run as part of an array job."
+    exit 1
+fi
+
+PARAMS_FILE="{{ params_file }}"
+if [[ ! -f "$PARAMS_FILE" ]]; then
+    echo "Error: Parameter combinations file not found: $PARAMS_FILE"
+    exit 1
+fi
+
+PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
+import json
+import os
+import sys
+
+params_file = "{{ params_file }}"
+array_index = int(os.environ['SLURM_ARRAY_TASK_ID'])
+
+try:
+    with open(params_file, 'r') as f:
+        all_combinations = json.load(f)
+    matching_combo = next(
+        (c for c in all_combinations if c['index'] == array_index), None
+    )
+    if matching_combo is None:
+        print(f"Error: No parameter combination found for index {array_index}", file=sys.stderr)
+        sys.exit(1)
+    global_index = matching_combo.get('global_index', array_index)
+    params = matching_combo['params']
+    tokens = []
+    for k, v in params.items():
+        if isinstance(v, (list, tuple)):
+            tokens.append(f'"{k}={list(v)}"')
+        elif v is None:
+            tokens.append(f'"{k}=null"')
+        elif isinstance(v, bool):
+            tokens.append(f'"{k}={str(v).lower()}"')
+        elif isinstance(v, str) and (' ' in v or ',' in v):
+            tokens.append(f'"{k}={v}"')
+        else:
+            tokens.append(f'"{k}={v}"')
+    print(f"{' '.join(tokens)}|{global_index}")
+except Exception as e:
+    print(f"Error processing parameters: {e}", file=sys.stderr)
+    sys.exit(1)
+PYTHON_EOF
+)
+if [[ $? -ne 0 ]]; then
+    echo "Error extracting parameters for array index $SLURM_ARRAY_TASK_ID"
+    exit 1
+fi
+
+IFS='|' read -r PARAMS_JSON GLOBAL_INDEX <<< "$PARAMS_JSON"
+echo "Parameters: $PARAMS_JSON"
+echo "Global task index: $GLOBAL_INDEX"
+
+TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${GLOBAL_INDEX}"
+
+if [[ -f "$TASK_OUTPUT_DIR/task_info.txt" ]]; then
+    if grep -q "Status: SUCCESS" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null \
+        || grep -q "Status: COMPLETED" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null; then
+        echo "WARNING: Task $GLOBAL_INDEX is already COMPLETED. Skipping."
+        exit 0
+    fi
+fi
+
+mkdir -p "$TASK_OUTPUT_DIR"
+
+echo "Slurm Array Index: $SLURM_ARRAY_TASK_ID" > "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Global Task Index: $GLOBAL_INDEX" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Parameters: $PARAMS_JSON" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Started: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Node: $(hostname)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+
+{% if wandb_group %}
+WANDB_GROUP="{{ wandb_group }}"
+{% else %}
+WANDB_GROUP="{{ sweep_id }}"
+{% endif %}
+
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR"
+echo "Executing: $COMMAND"
+echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
+
+if eval "$COMMAND"; then
+    echo "Completed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
+else
+    exit_code=$?
+    echo "Failed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: FAILED" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Exit Code: $exit_code" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    exit $exit_code
+fi
