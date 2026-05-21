@@ -24,194 +24,9 @@ from ..core.common.sweep_orchestrator import (
 from ..core.common.sweep_tracker import SweepTaskTracker
 from ..core.common.templating import params_to_hydra_args
 from ..core.local.local_manager import LocalJobManager
-from ..core.remote.discovery import RemoteDiscovery
-from ..core.remote.remote_manager import RemoteJobManager
 from .common import common_options
 
 logger = logging.getLogger(__name__)
-
-
-class RemoteJobManagerWrapper:
-    """Wrapper to make RemoteJobManager compatible with sync JobManager interface."""
-
-    def __init__(
-        self,
-        remote_job_manager: RemoteJobManager,
-        verify_sync: bool = True,
-        auto_sync: bool = False,
-    ):
-        self.remote_manager = remote_job_manager
-        self.system_type = "remote"
-        self.verify_sync = verify_sync
-        self.auto_sync = auto_sync
-        self.task_tracker = None  # Will be initialized when sweep starts
-        self.is_completion_run = False
-
-    def submit_sweep(
-        self, param_combinations, mode, sweep_dir, sweep_id, wandb_group=None, **kwargs
-    ):
-        """Submit a complete sweep to remote machine."""
-        # Run async setup and job submission
-        return asyncio.run(
-            self._async_submit_sweep(param_combinations, mode, sweep_dir, sweep_id, wandb_group)
-        )
-
-    async def _async_submit_sweep(self, param_combinations, mode, sweep_dir, sweep_id, wandb_group):
-        """Async version of submit_sweep."""
-        # Initialize task tracker for unified sweep tracking (only if not already set)
-        if not hasattr(self, "task_tracker") or self.task_tracker is None:
-            self.task_tracker = SweepTaskTracker(sweep_dir, sweep_id)
-            logger.debug("Created new task tracker for RemoteJobManagerWrapper")
-        else:
-            logger.debug("Using injected task tracker for RemoteJobManagerWrapper")
-
-        self.task_tracker.initialize_sweep(
-            total_tasks=len(param_combinations), compute_source="remote", mode="remote"
-        )
-
-        # Setup remote environment first with sync verification
-        setup_success = await self.remote_manager.setup_remote_environment(
-            verify_sync=self.verify_sync, auto_sync=self.auto_sync
-        )
-        if not setup_success:
-            raise Exception("Failed to setup remote environment")
-
-        # Pass completion run flag to the remote manager
-        if hasattr(self, "is_completion_run"):
-            self.remote_manager.is_completion_run = self.is_completion_run
-
-        # Submit jobs with parallel control and wait for completion
-        job_ids = await self.remote_manager.submit_sweep(param_combinations, sweep_id, wandb_group)
-
-        # Register tasks in tracker
-        if self.is_completion_run:
-            # For completion, param_combinations are dicts with 'task_number' or 'task_index' and 'params'
-            task_names = []
-            for combo in param_combinations:
-                if isinstance(combo, dict) and "task_number" in combo:
-                    # Use task_number for proper naming in completion runs
-                    task_names.append(f"task_{combo['task_number']:03d}")
-                elif isinstance(combo, dict) and "task_index" in combo:
-                    # Fallback to task_index (old format)
-                    task_names.append(f"task_{combo['task_index'] + 1:03d}")
-                else:
-                    # Fallback for unexpected format
-                    task_names.append(f"task_{len(task_names) + 1:03d}")
-        else:
-            task_names = [f"task_{i + 1:03d}" for i in range(len(param_combinations))]
-
-        self.task_tracker.register_task_batch(
-            task_names=task_names, compute_source="remote", job_ids=job_ids
-        )
-        self.task_tracker.save_mapping()
-
-        # Wait for all jobs to complete before returning
-        await self.remote_manager.wait_for_all_jobs()
-
-        # Update final task statuses by syncing with actual task directories
-        self.task_tracker.sync_with_task_directories(force_update=True)
-        self.task_tracker.save_mapping()
-
-        return job_ids
-
-    def get_job_status(self, job_id):
-        """Get job status (sync wrapper)."""
-        return asyncio.run(self.remote_manager.get_job_status(job_id))
-
-    def collect_results(self):
-        """Collect results from remote machine."""
-        return asyncio.run(self.remote_manager.collect_results())
-
-    def _params_to_string(self, params):
-        """Convert parameters to string format (delegate to remote manager)."""
-        return self.remote_manager._params_to_string(params)
-
-
-def create_remote_job_manager_wrapper(
-    remote_name,
-    hsm_config,
-    console,
-    logger,
-    sweep_dir,
-    parallel_jobs=None,
-    verify_sync=True,
-    auto_sync=False,
-):
-    """Create a wrapper around RemoteJobManager that works with the existing sweep interface."""
-    try:
-        # Get remote configuration
-        distributed_config = hsm_config.config_data.get("distributed", {})
-        remotes = distributed_config.get("remotes", {})
-
-        if remote_name not in remotes:
-            console.print(f"[red]Error: Remote '{remote_name}' not found in hsm_config.yaml[/red]")
-            console.print("Available remotes:")
-            for name in remotes.keys():
-                console.print(f"  - {name}")
-            return None
-
-        # Discover remote configuration
-        logger.info(f"Discovering configuration for remote: {remote_name}")
-        console.print(f"[cyan]Discovering configuration for remote: {remote_name}[/cyan]")
-
-        # Run discovery
-        discovery = RemoteDiscovery(hsm_config.config_data)
-        remote_info = remotes[remote_name].copy()
-        remote_info["name"] = remote_name
-
-        # This is async, so we need to run it
-        remote_config = asyncio.run(discovery.discover_remote_config(remote_info))
-
-        if not remote_config:
-            console.print(
-                f"[red]Error: Failed to discover configuration for remote '{remote_name}'[/red]"
-            )
-            console.print("Make sure the remote machine is accessible and has hsm_config.yaml")
-            return None
-
-        console.print("[green]✓ Remote configuration discovered successfully[/green]")
-
-        # Use the provided sweep directory instead of creating a new one
-        # Just ensure it exists
-        sweep_dir.mkdir(parents=True, exist_ok=True)
-
-        # Determine max parallel jobs for remote execution
-        max_parallel_jobs = 4  # Default
-        if parallel_jobs is not None:
-            max_parallel_jobs = parallel_jobs
-        elif hsm_config:
-            # Get from remote config or fall back to local config
-            remote_max = remotes[remote_name].get("max_parallel_jobs")
-            if remote_max:
-                max_parallel_jobs = remote_max
-            else:
-                max_parallel_jobs = hsm_config.get_max_array_size() or 4
-
-        console.print(f"[cyan]Max parallel jobs on remote: {max_parallel_jobs}[/cyan]")
-        if not verify_sync:
-            console.print("[yellow]⚠ Project sync verification disabled[/yellow]")
-        if auto_sync:
-            console.print(
-                "[cyan]Auto-sync enabled: mismatched files will be automatically synced[/cyan]"
-            )
-
-        # Create RemoteJobManager with the provided sweep directory
-        remote_job_manager = RemoteJobManager(
-            remote_config,
-            sweep_dir,
-            max_parallel_jobs=max_parallel_jobs,
-            show_progress=True,
-        )
-
-        # Return wrapper with sync verification setting
-        return RemoteJobManagerWrapper(
-            remote_job_manager, verify_sync=verify_sync, auto_sync=auto_sync
-        )
-
-    except Exception as e:
-        console.print(f"[red]Error setting up remote job manager: {e}[/red]")
-        logger.error(f"Remote job manager setup failed: {e}")
-        return None
 
 
 def _load_and_validate_config(
@@ -647,7 +462,6 @@ def _create_job_manager(
     no_progress: bool,
     show_output: bool,
     hsm_config: Optional["HSMConfig"],
-    remote: Optional[str],
     console: Console,
 ) -> tuple[Optional[object], str]:
     """Create appropriate job manager based on execution mode.
@@ -677,23 +491,6 @@ def _create_job_manager(
             show_progress=not no_progress,  # Enable progress tracking unless disabled
             show_output=show_output,  # Show output if requested
         )
-
-    elif mode == "remote":
-        # Remote job execution on a single machine
-        if not hsm_config:
-            console.print("[red]Error: hsm_config.yaml required for remote mode[/red]")
-            return None, mode
-
-        if not remote:
-            console.print("[red]Error: --remote MACHINE_NAME required for remote mode[/red]")
-            console.print("Available remotes:")
-            remotes = hsm_config.config_data.get("distributed", {}).get("remotes", {})
-            for name in remotes.keys():
-                console.print(f"  - {name}")
-            return None, mode
-
-        # Remote job manager will be created later with proper sweep directory
-        job_manager = None  # Will be created after sweep directory is set up
 
     elif mode == "distributed":
         # Distributed job execution across multiple sources
@@ -758,7 +555,6 @@ def _create_job_manager(
 
 def _handle_dry_run(
     mode: str,
-    remote: Optional[str],
     job_manager: Optional[object],
     hsm_config: Optional["HSMConfig"],
     walltime: str,
@@ -777,11 +573,7 @@ def _handle_dry_run(
 
     # Show job configuration
     console.print("\n[bold]Job Configuration:[/bold]")
-    if mode == "remote":
-        console.print("  Execution System: REMOTE")
-        console.print(f"  Mode: {mode} (remote execution on {remote})")
-        console.print("  Note: Remote configuration will be discovered during actual execution")
-    elif mode == "distributed":
+    if mode == "distributed":
         console.print("  Execution System: DISTRIBUTED")
         console.print(f"  Mode: {mode} (distributed execution across multiple sources)")
         console.print("  Note: Compute sources will be discovered during actual execution")
@@ -814,21 +606,8 @@ def _handle_dry_run(
         if job_manager:
             params_str = job_manager._params_to_string(combo)
         else:
-            # For remote mode, use a basic parameter conversion
-            param_strs = []
-            for key, value in combo.items():
-                if isinstance(value, (list, tuple)):
-                    value_str = str(list(value))
-                    param_strs.append(f'"{key}={value_str}"')
-                elif value is None:
-                    param_strs.append(f'"{key}=null"')
-                elif isinstance(value, bool):
-                    param_strs.append(f'"{key}={str(value).lower()}"')
-                elif isinstance(value, str) and (" " in value or "," in value):
-                    param_strs.append(f'"{key}={value}"')
-                else:
-                    param_strs.append(f'"{key}={value}"')
-            params_str = " ".join(param_strs)
+            # Distributed mode — no job manager at dry-run time; use canonical conversion.
+            params_str = params_to_hydra_args(combo)
 
         # Add wandb.group only if not already in params (e.g., completion runs)
         if "wandb.group" not in combo:
@@ -846,18 +625,15 @@ def _handle_dry_run(
 
 def _setup_sweep_directories_and_managers(
     mode: str,
-    remote: Optional[str],
     job_manager: Optional[object],
     hsm_config: Optional["HSMConfig"],
-    no_verify_sync: bool,
-    auto_sync: bool,
     no_progress: bool,
     parallel_jobs: Optional[int],
     console: Console,
     logger: logging.Logger,
     completion_sweep_id: Optional[str] = None,
 ) -> tuple[str, Path, Path, Path, Optional[object]]:
-    """Set up sweep directories and create remote/distributed job managers if needed.
+    """Set up sweep directories and create the distributed job manager if needed.
 
     Returns:
         Tuple of (sweep_id, sweep_dir, scripts_dir, logs_dir, updated_job_manager)
@@ -877,23 +653,7 @@ def _setup_sweep_directories_and_managers(
     sweep_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"Sweep directory: {sweep_dir}")
 
-    # For remote mode, we need to update the job manager with the correct sweep directory
-    if mode == "remote":
-        # Create a RemoteJobManagerWrapper with the proper sweep directory
-        job_manager = create_remote_job_manager_wrapper(
-            remote_name=remote,
-            hsm_config=hsm_config,
-            console=console,
-            logger=logger,
-            sweep_dir=sweep_dir,  # Pass the actual sweep directory
-            parallel_jobs=parallel_jobs,
-            verify_sync=not no_verify_sync,
-            auto_sync=auto_sync,
-        )
-        if not job_manager:
-            return None, None, None, None, None  # Error already displayed
-
-    elif mode == "distributed":
+    if mode == "distributed":
         # Create a DistributedSweepWrapper with the proper sweep directory
         try:
             from ..core.distributed.wrapper import create_distributed_sweep_wrapper
@@ -913,9 +673,6 @@ def _setup_sweep_directories_and_managers(
     if mode == "local":
         scripts_dir = sweep_dir / "local_scripts"
         dir_name = "Local scripts"
-    elif mode == "remote":
-        scripts_dir = sweep_dir / "remote_scripts"
-        dir_name = "Remote scripts"
     elif mode == "distributed":
         scripts_dir = sweep_dir / "distributed_scripts"
         dir_name = "Distributed scripts"
@@ -1036,106 +793,8 @@ def _handle_results_collection(
     mode: str, job_manager: object, sweep_dir: Path, console: Console, logger: logging.Logger
 ):
     """Handle results collection and reporting after jobs are submitted."""
-    # For remote mode, collect results after job completion
-    if mode == "remote" and hasattr(job_manager, "collect_results"):
-        console.print("\n[cyan]Collecting results from remote machine...[/cyan]")
-        try:
-            success = job_manager.collect_results()
-            if success:
-                console.print(
-                    f"[green]✓ Results collected successfully to {sweep_dir}/tasks/[/green]"
-                )
-
-                # Check for and report on error information
-                error_dir = sweep_dir / "errors"
-                failed_tasks_dir = sweep_dir / "failed_tasks"
-
-                if error_dir.exists():
-                    error_files = list(error_dir.glob("*_error.txt"))
-                    if error_files:
-                        console.print(
-                            f"[yellow]📄 {len(error_files)} error summary(ies) found in: {error_dir}/[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]• Use 'hsm sweep errors <sweep_id>' to view error details[/yellow]"
-                        )
-
-                if failed_tasks_dir.exists():
-                    failed_tasks = [d for d in failed_tasks_dir.iterdir() if d.is_dir()]
-                    if failed_tasks:
-                        console.print(
-                            f"[yellow]📁 {len(failed_tasks)} failed task(s) immediately collected to: {failed_tasks_dir}/[/yellow]"
-                        )
-                        console.print(
-                            "[yellow]• Failed task directories contain full logs and error details[/yellow]"
-                        )
-
-                # Show comprehensive result summary
-                tasks_dir = sweep_dir / "tasks"
-                if tasks_dir.exists():
-                    remote_tasks = [d for d in tasks_dir.iterdir() if d.is_dir()]
-                    if remote_tasks:
-                        console.print(
-                            f"[green]📁 {len(remote_tasks)} task result(s) collected to: {tasks_dir}/[/green]"
-                        )
-
-                # Provide helpful next steps
-                console.print("\n[cyan]💡 Next steps:[/cyan]")
-                console.print("• Use 'hsm sweep status <sweep_id>' to check completion status")
-                if error_dir.exists() and list(error_dir.glob("*_error.txt")):
-                    console.print("• Use 'hsm sweep errors <sweep_id>' to analyze failures")
-                    console.print(
-                        "• Check specific error patterns with 'hsm sweep errors <sweep_id> --pattern <keyword>'"
-                    )
-            else:
-                console.print("[yellow]⚠ Result collection completed with warnings[/yellow]")
-                console.print(
-                    "[yellow]Some results may still be available on the remote machine[/yellow]"
-                )
-                console.print("[yellow]Check the remote directory manually if needed[/yellow]")
-
-        except Exception as e:
-            console.print(f"[red]Error collecting results: {e}[/red]")
-            logger.warning(f"Result collection failed: {e}")
-
-            # Even if collection failed, check for locally collected error info
-            error_dir = sweep_dir / "errors"
-            failed_tasks_dir = sweep_dir / "failed_tasks"
-
-            console.print(
-                "\n[yellow]📋 Checking for locally collected error information...[/yellow]"
-            )
-
-            local_errors_found = False
-            if error_dir.exists():
-                error_files = list(error_dir.glob("*_error.txt"))
-                if error_files:
-                    console.print(
-                        f"[green]✓ {len(error_files)} error summary(ies) available in: {error_dir}/[/green]"
-                    )
-                    local_errors_found = True
-
-            if failed_tasks_dir.exists():
-                failed_tasks = [d for d in failed_tasks_dir.iterdir() if d.is_dir()]
-                if failed_tasks:
-                    console.print(
-                        f"[green]✓ {len(failed_tasks)} failed task(s) with full logs in: {failed_tasks_dir}/[/green]"
-                    )
-                    local_errors_found = True
-
-            if local_errors_found:
-                console.print(
-                    "[cyan]💡 Error information was collected during job execution[/cyan]"
-                )
-                console.print("• Use 'hsm sweep errors <sweep_id>' to view details")
-            else:
-                console.print("[red]❌ No local error information found[/red]")
-                console.print(
-                    "[yellow]💡 You may need to check the remote machine manually[/yellow]"
-                )
-
-            # For distributed mode, results are normalized automatically during execution
-    elif mode == "distributed":
+    # For distributed mode, results are normalized automatically during execution
+    if mode == "distributed":
         tasks_dir = sweep_dir / "tasks"
         scripts_dir = sweep_dir / "distributed_scripts"
         logs_dir = sweep_dir / "logs"
@@ -1186,10 +845,10 @@ def _run_sweep_via_orchestrator(
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
-    Handles ``--mode local|auto|array|individual``. The legacy ``remote`` and
-    ``distributed`` paths still flow through the old job-manager code in
-    ``run_sweep``; completion runs likewise stay on the legacy path until
-    ComputeSource grows a starting-task-number knob.
+    Handles ``--mode local|auto|array|individual``. The ``distributed`` path
+    still flows through the old job-manager code in ``run_sweep``; completion
+    runs likewise stay on the legacy path until ComputeSource grows a
+    starting-task-number knob.
     """
     from datetime import datetime
     import shutil
@@ -1339,9 +998,6 @@ def run_sweep(
     parallel_jobs: Optional[int],
     show_output: bool,
     no_progress: bool,
-    remote: Optional[str],
-    no_verify_sync: bool,
-    auto_sync: bool,
     console: Console,
     logger: logging.Logger,
     hsm_config: Optional["HSMConfig"] = None,
@@ -1452,10 +1108,9 @@ def run_sweep(
             no_progress=no_progress,
             show_output=show_output,
             hsm_config=hsm_config,
-            remote=remote,
             console=console,
         )
-        if job_manager is None and mode not in ["remote", "distributed"]:
+        if job_manager is None and mode != "distributed":
             return
 
         if job_manager:
@@ -1469,7 +1124,6 @@ def run_sweep(
         if dry_run:
             _handle_dry_run(
                 mode=mode,
-                remote=remote,
                 job_manager=job_manager,
                 hsm_config=hsm_config,
                 walltime=walltime,
@@ -1483,14 +1137,11 @@ def run_sweep(
             )
             return
 
-        # Set up sweep directories and update job managers for remote/distributed modes
+        # Set up sweep directories and update job manager for distributed mode
         setup_result = _setup_sweep_directories_and_managers(
             mode=mode,
-            remote=remote,
             job_manager=job_manager,
             hsm_config=hsm_config,
-            no_verify_sync=no_verify_sync,
-            auto_sync=auto_sync,
             no_progress=no_progress,
             parallel_jobs=parallel_jobs,
             console=console,
@@ -1509,13 +1160,13 @@ def run_sweep(
             if hasattr(job_manager, "starting_task_number"):
                 job_manager.starting_task_number = starting_task_number
                 logger.info(f"Set job_manager.starting_task_number = {starting_task_number}")
-            # Only set is_completion_run for RemoteJobManagerWrapper (not LocalJobManager)
+            # Only set is_completion_run for distributed (not LocalJobManager)
             if (
                 hasattr(job_manager, "is_completion_run")
                 and type(job_manager).__name__ != "LocalJobManager"
             ):
                 job_manager.is_completion_run = True
-                logger.info("Set job_manager.is_completion_run = True (for remote/distributed)")
+                logger.info("Set job_manager.is_completion_run = True (for distributed)")
             else:
                 logger.info("Using starting_task_number for local completion run")
 
@@ -1577,7 +1228,7 @@ def sweep_cmd(ctx):
 )
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "individual", "array", "local", "remote", "distributed"]),
+    type=click.Choice(["auto", "individual", "array", "local", "distributed"]),
     default="auto",
     help="Job submission mode",
 )
@@ -1591,13 +1242,6 @@ def sweep_cmd(ctx):
 @click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
 @click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
 @click.option("--no-progress", is_flag=True, help="Disable progress tracking")
-@click.option("--remote", help="Remote machine name for remote mode")
-@click.option("--no-verify-sync", is_flag=True, help="Skip project synchronization verification")
-@click.option(
-    "--auto-sync",
-    is_flag=True,
-    help="Automatically sync mismatched files to remote without prompting",
-)
 @common_options
 @click.pass_context
 def run_cmd(
@@ -1614,9 +1258,6 @@ def run_cmd(
     parallel_jobs,
     show_output,
     no_progress,
-    remote,
-    no_verify_sync,
-    auto_sync,
     verbose,
     quiet,
 ):
@@ -1648,9 +1289,6 @@ def run_cmd(
         parallel_jobs=parallel_jobs,
         show_output=show_output,
         no_progress=no_progress,
-        remote=remote,
-        no_verify_sync=no_verify_sync,
-        auto_sync=auto_sync,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
         hsm_config=hsm_config,
@@ -1661,7 +1299,7 @@ def run_cmd(
 @click.argument("sweep_id")
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "local", "remote", "distributed", "array"]),
+    type=click.Choice(["auto", "local", "distributed", "array"]),
     default="auto",
     help="Job submission mode for completion (auto=detect from original sweep)",
 )
@@ -1676,13 +1314,6 @@ def run_cmd(
 @click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs for completion")
 @click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
 @click.option("--no-progress", is_flag=True, help="Disable progress tracking")
-@click.option("--remote", help="Remote machine name for remote completion")
-@click.option("--no-verify-sync", is_flag=True, help="Skip project synchronization verification")
-@click.option(
-    "--auto-sync",
-    is_flag=True,
-    help="Automatically sync mismatched files to remote without prompting",
-)
 @click.option("--complete-baselines", is_flag=True, help="Complete all baseline combinations")
 @click.option("--complete-main-training", is_flag=True, help="Complete main training combinations")
 @click.option(
@@ -1723,9 +1354,6 @@ def complete_cmd(
     parallel_jobs,
     show_output,
     no_progress,
-    remote,
-    no_verify_sync,
-    auto_sync,
     verbose,
     quiet,
     complete_baselines,
@@ -1860,9 +1488,6 @@ def complete_cmd(
         parallel_jobs=parallel_jobs,
         show_output=show_output,
         no_progress=no_progress,
-        remote=remote,
-        no_verify_sync=no_verify_sync,
-        auto_sync=auto_sync,
         complete_baselines=complete_baselines,
         complete_main_training=complete_main_training,
         baselines_only=baselines_only,
@@ -1887,8 +1512,6 @@ def complete_cmd(
             console.print("[green]✓ Will submit as PBS/Slurm array job (HPC cluster)[/green]")
         elif exec_mode == "distributed":
             console.print("[green]✓ Will distribute across multiple compute sources[/green]")
-        elif exec_mode == "remote":
-            console.print("[green]✓ Will execute on remote machine[/green]")
         elif exec_mode == "local":
             console.print("[yellow]⚠ Will execute locally (not recommended for HPC)[/yellow]")
 
@@ -1959,22 +1582,6 @@ def complete_cmd(
             f.write(f"Retry Failed: {not no_retry_failed}\n")
 
         console.print(f"\nCompletion summary saved to: {summary_file}")
-
-        # For remote mode, provide additional guidance about error monitoring
-        if mode == "remote":
-            console.print("\n[cyan]💡 Remote Mode Tips:[/cyan]")
-            console.print("• Error details are automatically collected when jobs fail")
-            console.print(
-                "• Check the errors/ directory in your sweep folder for detailed error logs"
-            )
-            console.print("• Use 'hsm monitor' to track job progress in real-time")
-            console.print("• Error summaries will be available after job completion")
-
-            error_dir = sweep_dir / "errors"
-            if error_dir.exists() and list(error_dir.glob("*_error.txt")):
-                console.print(
-                    f"\n[yellow]📁 Error summaries already available: {error_dir}/[/yellow]"
-                )
 
         # Show source mapping information for all modes
         source_mapping_file = sweep_dir / "source_mapping.yaml"
@@ -2327,7 +1934,6 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
         console.print(f"[yellow]No error directory found for sweep {sweep_id}[/yellow]")
         console.print("This means either:")
         console.print("• No jobs have failed yet")
-        console.print("• The sweep was not run in remote mode")
         console.print("• Error collection is not yet implemented for this execution mode")
         return
 

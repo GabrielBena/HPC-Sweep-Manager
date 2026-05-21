@@ -1153,8 +1153,6 @@ class SweepCompletor:
                     console.print("[cyan]• Will submit as PBS/Slurm array job[/cyan]")
                 elif mode == "distributed":
                     console.print("[cyan]• Will distribute across multiple compute sources[/cyan]")
-                elif mode == "remote":
-                    console.print("[cyan]• Will execute on remote machine[/cyan]")
                 elif mode == "local":
                     console.print("[cyan]• Will execute locally[/cyan]")
 
@@ -1413,7 +1411,6 @@ class SweepCompletor:
             original_sigterm_handler = signal.signal(signal.SIGTERM, completion_signal_handler)
 
             # Import here to avoid circular imports
-            from ...cli.sweep import create_remote_job_manager_wrapper
             from ..common.config import HSMConfig
             from ..common.path_detector import PathDetector
             from ..distributed.wrapper import create_distributed_sweep_wrapper
@@ -1482,22 +1479,10 @@ class SweepCompletor:
             parallel_jobs = kwargs.get("parallel_jobs")
             no_progress = kwargs.get("no_progress", False)
             show_output = kwargs.get("show_output", False)
-            remote_name = kwargs.get("remote")
-            no_verify_sync = kwargs.get("no_verify_sync", False)
-            auto_sync = kwargs.get("auto_sync", False)
-
-            # For completion runs, we MUST verify sync to ensure consistency
+            # For completion runs in distributed mode we always verify sync.
             if mode == "distributed":
                 logger.info("🔒 Completion run in distributed mode: enforcing strict project sync")
                 logger.info("   This ensures consistent results across all compute sources")
-                # Override sync settings for completion safety
-                no_verify_sync = False  # Always verify sync for distributed completion
-                # Keep auto_sync as provided by user, but warn if disabled
-                if not auto_sync:
-                    logger.warning(
-                        "⚠️  Auto-sync disabled - you will be prompted to confirm sync operations"
-                    )
-                    logger.warning("   Consider using --auto-sync for unattended completion runs")
 
             # Create job manager based on mode (similar to main sweep logic)
             job_manager = None
@@ -1521,32 +1506,6 @@ class SweepCompletor:
                     show_output=show_output,
                     setup_signal_handlers=False,
                 )
-
-            elif mode == "remote":
-                if not hsm_config:
-                    return {"error": "hsm_config.yaml required for remote mode"}
-
-                if not remote_name:
-                    return {"error": "Remote machine name required for remote mode"}
-
-                if not console or not logger:
-                    return {"error": "Console and logger required for remote mode"}
-
-                # Create remote job manager wrapper
-                job_manager = create_remote_job_manager_wrapper(
-                    remote_name=remote_name,
-                    hsm_config=hsm_config,
-                    console=console,
-                    logger=logger,
-                    sweep_dir=self.sweep_dir,
-                    parallel_jobs=parallel_jobs,
-                    verify_sync=not no_verify_sync,
-                    auto_sync=auto_sync,
-                    setup_signal_handlers=False,
-                )
-
-                if not job_manager:
-                    return {"error": f"Failed to create remote job manager for {remote_name}"}
 
             elif mode == "distributed":
                 if not hsm_config:
@@ -1661,8 +1620,6 @@ class SweepCompletor:
             # Create subdirectories for organization
             if mode == "local":
                 scripts_dir = self.sweep_dir / "local_scripts"
-            elif mode == "remote":
-                scripts_dir = self.sweep_dir / "remote_scripts"
             elif mode == "distributed":
                 scripts_dir = self.sweep_dir / "distributed_scripts"
             elif hasattr(job_manager, "system_type") and job_manager.system_type == "slurm":
@@ -1778,13 +1735,6 @@ class SweepCompletor:
                         logger.error(
                             f"Failed to restore original task assignments: {restore_error}"
                         )
-
-                # For remote mode, provide additional error reporting
-                if mode == "remote":
-                    console.print(
-                        "\n[cyan]Remote job execution completed. Checking for error summaries...[/cyan]"
-                    )
-                    self._show_error_summary_if_available(console)
 
                 # Final sync to ensure all task statuses are captured - only on success
                 try:
