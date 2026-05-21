@@ -1,0 +1,167 @@
+"""Unit tests for the sweep orchestrator factory + spec helpers."""
+
+from __future__ import annotations
+
+import pytest
+
+from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+from hpc_sweep_manager.core.common.sweep_orchestrator import (
+    SUPPORTED_MODES,
+    build_compute_source,
+    spec_from_cli,
+)
+from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
+from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
+
+
+class TestSpecFromCli:
+    def test_empty_inputs_returns_empty_spec(self):
+        spec = spec_from_cli(walltime=None, resources=None)
+        assert spec == ResourceSpec()
+
+    def test_walltime_only(self):
+        spec = spec_from_cli(walltime="01:00:00", resources=None)
+        assert spec.walltime == "01:00:00"
+        assert spec.cpus_per_task is None
+
+    def test_walltime_overrides_resources(self):
+        # walltime arg should win even if --resources also encodes one
+        spec = spec_from_cli(
+            walltime="02:00:00",
+            resources="--time=99:99:99 --cpus-per-task=4",
+            scheduler="slurm",
+        )
+        assert spec.walltime == "02:00:00"
+        assert spec.cpus_per_task == 4
+
+    def test_slurm_resources_parsed(self):
+        spec = spec_from_cli(
+            walltime=None,
+            resources="--cpus-per-task=8 --mem-per-cpu=4G --gpus=2",
+            scheduler="slurm",
+        )
+        assert spec.cpus_per_task == 8
+        assert spec.mem_per_cpu == "4G"
+        assert spec.gpus == 2
+
+    def test_pbs_resources_parsed(self):
+        spec = spec_from_cli(
+            walltime=None,
+            resources="select=1:ncpus=4:mem=16gb:ngpus=1",
+            scheduler="pbs",
+        )
+        assert spec.cpus_per_task == 4
+        assert spec.mem == "16gb"
+        assert spec.gpus == 1
+
+
+class TestBuildComputeSource:
+    BASE_KWARGS = dict(
+        python_path="python3",
+        script_path="/tmp/train.py",
+        project_dir="/tmp",
+    )
+
+    def test_unknown_mode_raises(self):
+        with pytest.raises(ValueError, match="unsupported mode"):
+            build_compute_source(mode="remote", **self.BASE_KWARGS)
+
+    def test_modes_list_matches_supported(self):
+        # Sanity: the supported set should match what the CLI documents.
+        assert SUPPORTED_MODES == {"local", "auto", "array", "individual"}
+
+    def test_local_mode_returns_local_source(self, no_gpus):
+        source, resolved, sub_mode = build_compute_source(
+            mode="local", parallel_jobs=4, **self.BASE_KWARGS
+        )
+        assert isinstance(source, LocalComputeSource)
+        assert resolved == "local"
+        assert sub_mode == "individual"
+        assert source.max_parallel_jobs == 4
+
+    def test_local_mode_parallel_jobs_from_hsm_config(self, no_gpus):
+        class FakeConfig:
+            def get_max_array_size(self):
+                return 4
+
+        source, _, _ = build_compute_source(
+            mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
+        )
+        assert source.max_parallel_jobs == 4
+
+    def test_local_mode_caps_parallel_jobs_at_eight(self, no_gpus):
+        class FakeConfig:
+            def get_max_array_size(self):
+                return 100
+
+        source, _, _ = build_compute_source(
+            mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
+        )
+        assert source.max_parallel_jobs == 8
+
+    def test_local_mode_explicit_parallel_jobs_overrides_config(self, no_gpus):
+        class FakeConfig:
+            def get_max_array_size(self):
+                return 100
+
+        source, _, _ = build_compute_source(
+            mode="local",
+            hsm_config=FakeConfig(),
+            parallel_jobs=2,
+            **self.BASE_KWARGS,
+        )
+        assert source.max_parallel_jobs == 2
+
+    def test_auto_mode_falls_back_to_local_without_slurm(self, no_gpus, monkeypatch):
+        monkeypatch.setattr(
+            "hpc_sweep_manager.core.common.sweep_orchestrator.shutil.which",
+            lambda _: None,
+        )
+        source, resolved, sub_mode = build_compute_source(mode="auto", **self.BASE_KWARGS)
+        assert isinstance(source, LocalComputeSource)
+        assert resolved == "local"
+        assert sub_mode == "individual"
+
+    def test_auto_mode_picks_slurm_when_sbatch_on_path(self, fake_slurm):
+        source, resolved, sub_mode = build_compute_source(mode="auto", **self.BASE_KWARGS)
+        assert isinstance(source, SlurmComputeSource)
+        assert resolved == "array"
+        assert sub_mode == "array"
+
+    def test_array_mode_requires_slurm(self, monkeypatch):
+        monkeypatch.setattr(
+            "hpc_sweep_manager.core.common.sweep_orchestrator.shutil.which",
+            lambda _: None,
+        )
+        with pytest.raises(RuntimeError, match="no Slurm tools"):
+            build_compute_source(mode="array", **self.BASE_KWARGS)
+
+    def test_individual_mode_with_slurm(self, fake_slurm):
+        source, resolved, sub_mode = build_compute_source(
+            mode="individual", **self.BASE_KWARGS
+        )
+        assert isinstance(source, SlurmComputeSource)
+        assert resolved == "individual"
+        assert sub_mode == "individual"
+
+    def test_array_mode_with_slurm(self, fake_slurm):
+        source, resolved, sub_mode = build_compute_source(
+            mode="array", **self.BASE_KWARGS
+        )
+        assert isinstance(source, SlurmComputeSource)
+        assert resolved == "array"
+        assert sub_mode == "array"
+
+    def test_default_spec_is_propagated(self, fake_slurm):
+        spec = ResourceSpec(walltime="03:00:00", cpus_per_task=2)
+        source, _, _ = build_compute_source(
+            mode="array", default_spec=spec, **self.BASE_KWARGS
+        )
+        assert source.default_spec is spec
+
+    def test_qos_whitelist_is_propagated_to_slurm(self, fake_slurm):
+        wl = frozenset({"normal", "long"})
+        source, _, _ = build_compute_source(
+            mode="array", qos_whitelist=wl, **self.BASE_KWARGS
+        )
+        assert source.qos_whitelist is wl

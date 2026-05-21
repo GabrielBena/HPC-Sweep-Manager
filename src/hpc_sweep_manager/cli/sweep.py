@@ -15,7 +15,14 @@ if TYPE_CHECKING:
 import asyncio
 
 from ..core.common.config import HSMConfig, SweepConfig
+from ..core.common.sweep_orchestrator import (
+    SUPPORTED_MODES as _ORCHESTRATOR_MODES,
+    build_compute_source,
+    run_sweep_async,
+    spec_from_cli,
+)
 from ..core.common.sweep_tracker import SweepTaskTracker
+from ..core.common.templating import params_to_hydra_args
 from ..core.local.local_manager import LocalJobManager
 from ..core.remote.discovery import RemoteDiscovery
 from ..core.remote.remote_manager import RemoteJobManager
@@ -1159,6 +1166,166 @@ def _handle_results_collection(
             console.print(f"[yellow]Results will be available in: {tasks_dir}/[/yellow]")
 
 
+def _run_sweep_via_orchestrator(
+    *,
+    config_path: Path,
+    hsm_config: Optional["HSMConfig"],
+    mode: str,
+    python_path: str,
+    script_path: str,
+    project_dir: str,
+    combinations: list,
+    dry_run: bool,
+    walltime: str,
+    resources: str,
+    group: Optional[str],
+    parallel_jobs: Optional[int],
+    no_progress: bool,
+    console: Console,
+    logger: logging.Logger,
+) -> None:
+    """Route a sweep through the unified ComputeSource orchestrator.
+
+    Handles ``--mode local|auto|array|individual``. The legacy ``remote`` and
+    ``distributed`` paths still flow through the old job-manager code in
+    ``run_sweep``; completion runs likewise stay on the legacy path until
+    ComputeSource grows a starting-task-number knob.
+    """
+    from datetime import datetime
+    import shutil
+
+    from ..core.common.utils import create_sweep_id
+
+    # Build the source first so dry-run can show the resolved mode + spec.
+    scheduler_hint = "slurm" if mode in ("array", "individual") else None
+    spec = spec_from_cli(walltime=walltime, resources=resources, scheduler=scheduler_hint)
+    try:
+        source, resolved_mode, sub_mode = build_compute_source(
+            mode=mode,
+            python_path=python_path,
+            script_path=script_path,
+            project_dir=project_dir,
+            default_spec=spec,
+            hsm_config=hsm_config,
+            parallel_jobs=parallel_jobs,
+        )
+    except (ValueError, RuntimeError) as e:
+        console.print(f"[red]Error building compute source: {e}[/red]")
+        return
+
+    console.print(
+        f"[green]Execution backend: {source.source_type} "
+        f"(mode={resolved_mode}, submission={sub_mode})[/green]"
+    )
+    if resolved_mode != mode:
+        console.print(f"[cyan](mode auto-resolved from {mode!r} → {resolved_mode!r})[/cyan]")
+
+    if dry_run:
+        console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
+        console.print("\n[bold]Effective ResourceSpec:[/bold]")
+        for k, v in spec.to_dict().items():
+            if v in (None, [], {}, ()):
+                continue
+            console.print(f"  {k:18s} = {v!r}")
+        console.print(f"\n[bold]Python:[/bold] {python_path}")
+        console.print(f"[bold]Script:[/bold] {script_path}")
+        console.print(f"[bold]Project dir:[/bold] {project_dir}")
+        if group:
+            console.print(f"[bold]W&B group:[/bold] {group}")
+        console.print("\n[bold]First 3 parameter combinations:[/bold]")
+        for i, combo in enumerate(combinations[:3], 1):
+            console.print(f"  {i}. {combo}")
+            console.print(f"     args: {params_to_hydra_args(combo)}")
+        console.print(f"\nTotal combinations: {len(combinations)}")
+        return
+
+    # Materialize the sweep directory; the source's setup() will create
+    # scripts/logs/tasks subdirs underneath.
+    sweep_id = create_sweep_id()
+    sweep_dir = Path("sweeps") / "outputs" / sweep_id
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
+    console.print(f"Sweep directory: {sweep_dir}")
+
+    # Backup the user's sweep config alongside the run for reproducibility.
+    shutil.copy2(config_path, sweep_dir / "sweep_config.yaml")
+
+    console.print(
+        f"\n[bold]Submitting {len(combinations)} job(s) via {source.source_type}...[/bold]"
+    )
+
+    progress_cb = None
+    if not no_progress:
+        def _progress(done: int, total: int) -> None:
+            console.print(f"  {done}/{total} done", end="\r")
+        progress_cb = _progress
+
+    try:
+        result = asyncio.run(
+            run_sweep_async(
+                source=source,
+                sweep_dir=sweep_dir,
+                sweep_id=sweep_id,
+                params_list=combinations,
+                submission_mode=sub_mode,
+                spec=spec,
+                wandb_group=group,
+                job_name_prefix=sweep_id,
+                wait=True,
+                poll_interval=10.0,
+                on_progress=progress_cb,
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]Sweep execution failed: {e}[/red]")
+        logger.exception("orchestrator run failed")
+        raise
+
+    console.print(
+        f"\n[green]Submitted {len(result.job_ids)} job(s) "
+        f"in {sub_mode} mode: {', '.join(result.job_ids)}[/green]"
+    )
+
+    # Tally final statuses.
+    if result.final_statuses:
+        completed = sum(1 for s in result.final_statuses.values() if s == "COMPLETED")
+        failed = sum(1 for s in result.final_statuses.values() if s == "FAILED")
+        cancelled = sum(1 for s in result.final_statuses.values() if s == "CANCELLED")
+        console.print(
+            f"[bold]Final: {completed} COMPLETED, "
+            f"{failed} FAILED, {cancelled} CANCELLED[/bold]"
+        )
+
+    # Write submission summary mirroring the legacy format so tooling that
+    # parses it keeps working.
+    summary_file = sweep_dir / "submission_summary.txt"
+    with open(summary_file, "w") as f:
+        f.write("Sweep Submission Summary\n")
+        f.write("========================\n")
+        f.write(f"Sweep ID: {sweep_id}\n")
+        f.write(f"Submission Time: {datetime.now()}\n")
+        f.write(f"Mode: {resolved_mode} (submission={sub_mode})\n")
+        f.write(f"Backend: {source.source_type}\n")
+        f.write(f"Total Combinations: {len(combinations)}\n")
+        f.write(f"Job IDs: {', '.join(result.job_ids)}\n")
+        if walltime:
+            f.write(f"Walltime: {walltime}\n")
+        if resources:
+            f.write(f"Resources: {resources}\n")
+        if group:
+            f.write(f"W&B Group: {group}\n")
+        if result.final_statuses:
+            f.write("\nFinal Statuses:\n")
+            for jid, status in result.final_statuses.items():
+                f.write(f"  {jid}: {status}\n")
+    console.print(f"Summary saved to: {summary_file}")
+
+    logger.info(
+        f"Sweep {sweep_id} via orchestrator ({source.source_type}) "
+        f"submitted {len(result.job_ids)} job(s) with {len(combinations)} combinations"
+    )
+
+
 def run_sweep(
     config_path: Path,
     mode: str,
@@ -1249,6 +1416,29 @@ def run_sweep(
 
         # Detect project paths for execution (with script from sweep config if specified)
         python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
+
+        # For modes the new ComputeSource orchestrator handles, route there.
+        # Completion runs still flow through the legacy code path because they
+        # need starting-task-number propagation that ComputeSource doesn't have yet.
+        if mode in _ORCHESTRATOR_MODES and not is_completion_run:
+            _run_sweep_via_orchestrator(
+                config_path=config_path,
+                hsm_config=hsm_config,
+                mode=mode,
+                python_path=python_path,
+                script_path=script_path,
+                project_dir=project_dir,
+                combinations=combinations,
+                dry_run=dry_run,
+                walltime=walltime,
+                resources=resources,
+                group=group,
+                parallel_jobs=parallel_jobs,
+                no_progress=no_progress,
+                console=console,
+                logger=logger,
+            )
+            return
 
         # Create appropriate job manager based on mode
         job_manager, mode = _create_job_manager(
