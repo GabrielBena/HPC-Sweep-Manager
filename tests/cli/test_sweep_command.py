@@ -146,7 +146,7 @@ class TestSweepCommand:
                 mock_instance.submit_sweep.assert_called_once()
 
     @pytest.mark.cli
-    def test_sweep_remote_mode(self, cli_runner, mock_project_dir, mock_ssh):
+    def test_sweep_remote_mode(self, cli_runner, mock_project_dir):
         """Test sweep command in remote mode."""
         with cli_runner.isolated_filesystem():
             import os

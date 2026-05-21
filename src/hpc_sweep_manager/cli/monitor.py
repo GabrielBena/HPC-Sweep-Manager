@@ -868,27 +868,6 @@ def _cancel_hpc_sweep(sweep_info: dict, console: Console, logger: logging.Logger
     )
 
 
-def collect_results(
-    sweep_id: str,
-    output_path: Optional[Path],
-    format: str,
-    console: Console,
-    logger: logging.Logger,
-):
-    """Collect and analyze sweep results."""
-    console.print(f"[green]Collecting results for sweep: {sweep_id}[/green]")
-    console.print(f"Output format: {format}")
-
-    if output_path:
-        console.print(f"Output directory: {output_path}")
-    else:
-        console.print("Output directory: current directory (default)")
-
-    # TODO: Implement result collection logic
-    logger.info(f"Result collection requested for sweep {sweep_id}")
-    console.print("[yellow]Note: Result collection not yet implemented[/yellow]")
-
-
 def show_recent_sweeps(
     days: int, watch: bool, refresh: int, console: Console, logger: logging.Logger
 ):
@@ -1760,33 +1739,6 @@ def cleanup_cmd(
         states=list(states) if states else None,
         dry_run=dry_run,
         force=force,
-        console=ctx.obj["console"],
-        logger=ctx.obj["logger"],
-    )
-
-
-@monitor.command("collect-results")
-@click.argument("sweep_id")
-@click.option("--output-dir", "-o", type=click.Path(), help="Output directory for results")
-@click.option(
-    "--format",
-    type=click.Choice(["csv", "json", "xlsx"]),
-    default="csv",
-    help="Output format",
-)
-@common_options
-@click.pass_context
-def collect_results_cmd(
-    ctx, sweep_id: str, output_dir: str, format: str, verbose: bool, quiet: bool
-):
-    """Collect and export sweep results."""
-    from pathlib import Path
-
-    output_path = Path(output_dir) if output_dir else None
-    collect_results(
-        sweep_id=sweep_id,
-        output_path=output_path,
-        format=format,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
     )

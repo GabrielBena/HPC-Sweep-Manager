@@ -93,16 +93,6 @@ def mock_hsm_config(mock_project_dir):
 
 
 @pytest.fixture
-def mock_subprocess():
-    """Mock subprocess for testing shell commands."""
-    mock = MagicMock()
-    mock.returncode = 0
-    mock.stdout = "mock output"
-    mock.stderr = ""
-    return mock
-
-
-@pytest.fixture
 def mock_hpc_commands(monkeypatch):
     """Mock HPC commands (qsub, qstat, sbatch, squeue)."""
 
@@ -136,36 +126,6 @@ def mock_hpc_commands(monkeypatch):
 
     monkeypatch.setattr("shutil.which", mock_which)
     monkeypatch.setattr("subprocess.run", mock_run)
-
-
-@pytest.fixture
-def mock_ssh(monkeypatch):
-    """Mock SSH connections for remote testing."""
-    mock_client = MagicMock()
-
-    def mock_exec_command(command):
-        stdout = MagicMock()
-        stderr = MagicMock()
-
-        if "python" in command and "--version" in command:
-            stdout.read.return_value = b"Python 3.8.5\n"
-        elif "which python" in command:
-            stdout.read.return_value = b"/usr/bin/python\n"
-        elif "ls" in command:
-            stdout.read.return_value = b"file1.txt\nfile2.txt\n"
-        else:
-            stdout.read.return_value = b"mock ssh output\n"
-
-        stderr.read.return_value = b""
-        return None, stdout, stderr
-
-    mock_client.exec_command = mock_exec_command
-
-    def mock_connect(*args, **kwargs):
-        return mock_client
-
-    monkeypatch.setattr("paramiko.SSHClient.connect", mock_connect)
-    monkeypatch.setattr("paramiko.SSHClient", lambda: mock_client)
 
 
 @pytest.fixture
@@ -256,27 +216,6 @@ def clean_environment():
     # Restore original values
     for var, value in original_env.items():
         os.environ[var] = value
-
-
-@pytest.fixture
-def mock_file_system(monkeypatch):
-    """Mock file system operations for testing."""
-
-    def mock_exists(path):
-        # Mock existence of common files
-        path_str = str(path)
-        return bool(any(x in path_str for x in ["train.py", "hsm_config.yaml", "sweep.yaml"]))
-
-    def mock_is_file(path):
-        return mock_exists(path)
-
-    def mock_is_dir(path):
-        path_str = str(path)
-        return any(x in path_str for x in ["sweeps", "outputs", "logs", "scripts"])
-
-    monkeypatch.setattr("pathlib.Path.exists", mock_exists)
-    monkeypatch.setattr("pathlib.Path.is_file", mock_is_file)
-    monkeypatch.setattr("pathlib.Path.is_dir", mock_is_dir)
 
 
 # Test markers
