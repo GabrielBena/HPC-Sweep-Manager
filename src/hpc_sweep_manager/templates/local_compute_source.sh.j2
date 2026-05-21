@@ -1,0 +1,44 @@
+#!/bin/bash
+# LocalComputeSource wrapper for {{ job_name }} (job_id={{ job_id }}).
+set -e
+
+{% if cuda_visible_devices is not none %}
+export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
+{% endif %}
+{% for mod in modules %}
+module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed (no module system?)" >&2
+{% endfor %}
+{% for line in pre_script %}
+{{ line }}
+{% endfor %}
+
+cd {{ project_dir }}
+
+mkdir -p {{ task_dir }}
+{
+    echo "Job ID: {{ job_id }}"
+    echo "Task: {{ job_name }}"
+    echo "Node: $(hostname)"
+    echo "Parameters: {{ params_hydra }}"
+    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
+    echo "Started: $(date)"
+} > {{ task_dir }}/task_info.txt
+
+COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group }} output.dir={{ task_dir }}"
+echo "$COMMAND" > {{ task_dir }}/command.txt
+echo "Executing: $COMMAND"
+
+if eval "$COMMAND"; then
+    {
+        echo "Completed: $(date)"
+        echo "Status: SUCCESS"
+    } >> {{ task_dir }}/task_info.txt
+else
+    exit_code=$?
+    {
+        echo "Failed: $(date)"
+        echo "Status: FAILED"
+        echo "Exit Code: $exit_code"
+    } >> {{ task_dir }}/task_info.txt
+    exit $exit_code
+fi

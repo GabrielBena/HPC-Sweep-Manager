@@ -307,3 +307,55 @@ def fake_slurm(tmp_path, monkeypatch) -> FakeSlurm:
     monkeypatch.setenv("HSM_FAKE_RUNNING_S", "0.3")
 
     return FakeSlurm(state_dir=state_dir, bin_dir=bin_dir)
+
+
+# -----------------------------------------------------------------------------
+# Fake nvidia-smi fixture (for LocalComputeSource GPU detection tests)
+# -----------------------------------------------------------------------------
+
+_FAKE_NVIDIA_SMI_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "fake_nvidia_smi" / "nvidia-smi"
+)
+
+
+@dataclass
+class FakeGPUs:
+    bin_dir: Path
+    _monkeypatch: object  # pytest's monkeypatch fixture; intentionally untyped to dodge import
+
+    def set_count(self, n: int) -> None:
+        """Configure how many GPUs the stub nvidia-smi will report."""
+        self._monkeypatch.setenv("HSM_FAKE_GPU_COUNT", str(n))
+
+    def disable(self) -> None:
+        """Make nvidia-smi behave as if there are no GPUs (exits non-zero)."""
+        self._monkeypatch.setenv("HSM_FAKE_GPU_COUNT", "0")
+
+
+@pytest.fixture
+def fake_gpus(tmp_path, monkeypatch) -> FakeGPUs:
+    """Provide a PATH-stubbed ``nvidia-smi`` returning a configurable GPU count.
+
+    Default: 4 GPUs visible. Call ``fake_gpus.set_count(n)`` to change, or
+    ``fake_gpus.disable()`` to simulate a no-GPU host.
+    """
+    bin_dir = tmp_path / "fake_nvidia_smi_bin"
+    bin_dir.mkdir()
+    dst = bin_dir / "nvidia-smi"
+    dst.write_text(_FAKE_NVIDIA_SMI_FIXTURE.read_text())
+    dst.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HSM_FAKE_GPU_COUNT", "4")
+    return FakeGPUs(bin_dir=bin_dir, _monkeypatch=monkeypatch)
+
+
+@pytest.fixture
+def no_gpus(monkeypatch, tmp_path) -> None:
+    """Force GPU detection to fail by shadowing nvidia-smi with a failing stub."""
+    bin_dir = tmp_path / "no_nvidia_smi_bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "nvidia-smi"
+    stub.write_text("#!/bin/sh\nexit 1\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")

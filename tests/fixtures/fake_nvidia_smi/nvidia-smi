@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Fake nvidia-smi for HSM tests.
+
+Honors ``HSM_FAKE_GPU_COUNT`` (env var) to decide how many GPUs to report.
+- ``HSM_FAKE_GPU_COUNT`` unset or "0" -> exits non-zero (mimics no-GPU host)
+- ``HSM_FAKE_GPU_COUNT=N``           -> prints N "GPU i: ..." lines on -L
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("-L", action="store_true", dest="list_gpus")
+    args, _ = parser.parse_known_args()
+
+    count = int(os.environ.get("HSM_FAKE_GPU_COUNT", "0"))
+    if count <= 0:
+        print("No CUDA capable devices found", file=sys.stderr)
+        return 1
+
+    if args.list_gpus:
+        for i in range(count):
+            print(f"GPU {i}: NVIDIA Fake GPU {i} (UUID: GPU-fake-{i:08d})")
+        return 0
+
+    # Other flags: not relevant for our tests.
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
