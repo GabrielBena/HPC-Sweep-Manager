@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Fake sinfo: enough to satisfy SlurmComputeSource.setup() and health_check()."""
+
+from __future__ import annotations
+
+import sys
+
+
+def main() -> int:
+    if "--version" in sys.argv:
+        print("slurm 23.02.0")
+        return 0
+    if "-h" in sys.argv:
+        # Headerless rows: PARTITION AVAIL NODES
+        print("normal up 1")
+        print("gpu up 1")
+        return 0
+    print("PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST")
+    print("normal*      up   infinite      1   idle node1")
+    print("gpu          up   infinite      1   idle node2")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

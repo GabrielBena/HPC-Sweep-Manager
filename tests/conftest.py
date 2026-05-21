@@ -1,5 +1,7 @@
 """Pytest configuration and fixtures for HSM testing."""
 
+from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import shutil
@@ -230,3 +232,78 @@ pytest.mark.slow = pytest.mark.slow
 def anyio_backend():
     """Force tests to use asyncio backend only."""
     return "asyncio"
+
+
+# -----------------------------------------------------------------------------
+# Fake Slurm cluster fixture (PATH-stub scheduler)
+# -----------------------------------------------------------------------------
+# Pre-prepares a temp ``bin/`` directory containing executable Python shims for
+# ``sbatch``, ``squeue``, ``scancel`` and ``sinfo``, then prepends it to PATH
+# for the duration of a test. Tests that exercise any code path which shells
+# out to Slurm should request the ``fake_slurm`` fixture.
+#
+# Each call yields a fresh, isolated cluster — state files live under
+# ``tmp_path / "fake_slurm_state"`` so concurrent tests cannot collide.
+
+
+_FAKE_SLURM_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "fake_slurm"
+_FAKE_SLURM_STUBS = ("sbatch", "squeue", "scancel", "sinfo")
+
+
+@dataclass
+class FakeSlurm:
+    """Handle into the running fake-Slurm fixture.
+
+    Attributes
+    ----------
+    state_dir
+        Directory where the fake stubs read/write their jobs.jsonl + counter
+        files.
+    bin_dir
+        Directory containing the stub executables that's prepended to PATH.
+    """
+
+    state_dir: Path
+    bin_dir: Path
+
+    def jobs(self) -> list[dict]:
+        """Read every recorded submission (regardless of current state)."""
+        path = self.state_dir / "jobs.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    def set_pending_seconds(self, seconds: float) -> None:
+        """Tune the PENDING duration for state transitions in this test."""
+        os.environ["HSM_FAKE_PENDING_S"] = str(seconds)
+
+    def set_running_seconds(self, seconds: float) -> None:
+        """Tune the RUNNING duration for state transitions in this test."""
+        os.environ["HSM_FAKE_RUNNING_S"] = str(seconds)
+
+
+@pytest.fixture
+def fake_slurm(tmp_path, monkeypatch) -> FakeSlurm:
+    """Provide a PATH-stubbed Slurm cluster for the duration of a test.
+
+    Defaults: jobs transition PENDING -> RUNNING after 0.2 s, then
+    RUNNING -> COMPLETED after another 0.3 s. Tune via
+    ``fake_slurm.set_pending_seconds`` / ``set_running_seconds``.
+    """
+    bin_dir = tmp_path / "fake_slurm_bin"
+    bin_dir.mkdir()
+    state_dir = tmp_path / "fake_slurm_state"
+    state_dir.mkdir()
+
+    for tool in _FAKE_SLURM_STUBS:
+        src_path = _FAKE_SLURM_FIXTURES_DIR / tool
+        dst_path = bin_dir / tool
+        dst_path.write_text(src_path.read_text())
+        dst_path.chmod(0o755)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("HSM_FAKE_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("HSM_FAKE_PENDING_S", "0.2")
+    monkeypatch.setenv("HSM_FAKE_RUNNING_S", "0.3")
+
+    return FakeSlurm(state_dir=state_dir, bin_dir=bin_dir)

@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Fake sbatch: records the submission and prints 'Submitted batch job <id>'.
+
+State for the in-flight jobs lives under ``$HSM_FAKE_STATE_DIR``:
+- ``jobs.jsonl`` — one JSON record per submission.
+- ``counter`` — monotonic job ID counter.
+
+Parses ``#SBATCH`` directives from the submitted script to pick up the job
+name and (for arrays) the array size. The script body is never executed —
+this fixture is only here to validate that the right things were submitted.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+
+
+def main() -> int:
+    state_dir = os.environ.get("HSM_FAKE_STATE_DIR")
+    if not state_dir:
+        print("HSM_FAKE_STATE_DIR not set", file=sys.stderr)
+        return 1
+
+    os.makedirs(state_dir, exist_ok=True)
+    state_path = os.path.join(state_dir, "jobs.jsonl")
+    counter_path = os.path.join(state_dir, "counter")
+
+    if os.path.exists(counter_path):
+        with open(counter_path) as f:
+            next_id = int(f.read().strip())
+    else:
+        next_id = 1001
+    with open(counter_path, "w") as f:
+        f.write(str(next_id + 1))
+
+    # Script path is the last positional arg.
+    if len(sys.argv) < 2:
+        print("sbatch: missing script path", file=sys.stderr)
+        return 1
+    script_path = sys.argv[-1]
+
+    job_name = f"job_{next_id}"
+    is_array = False
+    array_size = 1
+
+    try:
+        with open(script_path) as f:
+            for line in f:
+                if not line.startswith("#SBATCH"):
+                    continue
+                m = re.search(r"--job-name=(\S+)", line)
+                if m:
+                    job_name = m.group(1)
+                m = re.search(r"--array=(\d+)-(\d+)", line)
+                if m:
+                    is_array = True
+                    array_size = int(m.group(2)) - int(m.group(1)) + 1
+    except FileNotFoundError:
+        print(f"sbatch: cannot read script {script_path}", file=sys.stderr)
+        return 1
+
+    record = {
+        "id": str(next_id),
+        "name": job_name,
+        "state": "PENDING",
+        "submit_time": time.time(),
+        "is_array": is_array,
+        "array_size": array_size,
+        "script_path": script_path,
+    }
+    with open(state_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+    print(f"Submitted batch job {next_id}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

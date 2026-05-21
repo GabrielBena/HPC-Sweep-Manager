@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Fake squeue: looks up job state from $HSM_FAKE_STATE_DIR/jobs.jsonl.
+
+State transitions are driven by wall-clock relative to submit_time:
+- elapsed < HSM_FAKE_PENDING_S  -> PENDING
+- elapsed < HSM_FAKE_PENDING_S + HSM_FAKE_RUNNING_S -> RUNNING
+- otherwise -> COMPLETED (and the job 'leaves the queue' by being filtered out)
+
+CANCELLED and FAILED states are sticky once set.
+
+Supports a tiny subset of squeue flags:
+- -j JOB_ID  (may be repeated or comma-separated)
+- -h         (header suppressed; we never print one anyway)
+- -o FORMAT  (recognizes %i = job id, %T = state, %j = job name)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+_DEFAULTS = {
+    "pending_s": 0.5,
+    "running_s": 1.0,
+}
+
+
+def _read_jobs(state_path: str) -> list[dict]:
+    if not os.path.exists(state_path):
+        return []
+    out: list[dict] = []
+    with open(state_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            out.append(json.loads(line))
+    return out
+
+
+def _current_state(job: dict, now: float, pending_s: float, running_s: float) -> str:
+    if job["state"] in ("CANCELLED", "FAILED"):
+        return job["state"]
+    elapsed = now - job["submit_time"]
+    if elapsed < pending_s:
+        return "PENDING"
+    if elapsed < pending_s + running_s:
+        return "RUNNING"
+    return "COMPLETED"
+
+
+def main() -> int:
+    state_dir = os.environ.get("HSM_FAKE_STATE_DIR")
+    if not state_dir:
+        print("HSM_FAKE_STATE_DIR not set", file=sys.stderr)
+        return 1
+
+    pending_s = float(os.environ.get("HSM_FAKE_PENDING_S", _DEFAULTS["pending_s"]))
+    running_s = float(os.environ.get("HSM_FAKE_RUNNING_S", _DEFAULTS["running_s"]))
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("-j", "--job", action="append", default=[])
+    parser.add_argument("-h", action="store_true", dest="suppress_header")
+    parser.add_argument("-o", "--format", default="%i %T %j")
+    args, _ = parser.parse_known_args()
+
+    state_path = os.path.join(state_dir, "jobs.jsonl")
+    jobs = _read_jobs(state_path)
+
+    requested_ids: set[str] = set()
+    for j_arg in args.job:
+        for piece in j_arg.split(","):
+            piece = piece.strip()
+            if piece:
+                requested_ids.add(piece)
+
+    now = time.time()
+    if requested_ids:
+        jobs = [j for j in jobs if j["id"] in requested_ids]
+        # Real squeue: completed/cancelled jobs drop out of the queue. Caller code
+        # interprets empty stdout + nonzero rc as "job finished".
+        jobs = [
+            j for j in jobs
+            if _current_state(j, now, pending_s, running_s) in ("PENDING", "RUNNING")
+        ]
+        if not jobs:
+            return 1
+
+    fmt = args.format
+    for j in jobs:
+        state = _current_state(j, now, pending_s, running_s)
+        line = fmt
+        line = line.replace("%i", j["id"])
+        line = line.replace("%T", state)
+        line = line.replace("%j", j["name"])
+        print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
