@@ -25,6 +25,61 @@ def remote():
     pass
 
 
+def _config_write_path() -> Path:
+    """Pick where to persist remote config edits.
+
+    Prefers an existing config file in the standard search order; otherwise
+    bootstraps a new ``.hsm/config.yaml`` (the primary location).
+    """
+    candidates = [
+        Path.cwd() / ".hsm" / "config.yaml",
+        Path.cwd() / "sweeps" / "hsm_config.yaml",
+        Path.cwd() / "hsm_config.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]  # bootstrap a fresh .hsm/config.yaml
+
+
+def _resolve_remotes_for_action(names: tuple, all_flag: bool, console: Console):
+    """Resolve which remotes to act on, supporting bare ~/.ssh/config aliases.
+
+    Registered remotes come from hsm_config's ``distributed.remotes``; a name
+    that isn't registered is treated as a bare ssh-config alias (empty config →
+    host defaults to the alias name). ``--all`` only spans registered remotes.
+
+    Returns ``(remotes_dict, config_data)`` or ``(None, None)`` on error/empty.
+    """
+    hsm_config = HSMConfig.load()
+    config_data = hsm_config.config_data if hsm_config else {}
+    registered = config_data.get("distributed", {}).get("remotes", {})
+
+    if all_flag:
+        if not registered:
+            console.print(
+                "[yellow]No remotes registered. Add one with 'hsm remote add', "
+                "or name a ~/.ssh/config alias directly.[/yellow]"
+            )
+            return None, None
+        return {name: dict(cfg) for name, cfg in registered.items()}, config_data
+
+    if not names:
+        console.print("[red]Specify remote name(s) or use --all.[/red]")
+        return None, None
+
+    selected: dict = {}
+    for name in names:
+        if name in registered:
+            selected[name] = dict(registered[name])
+        else:
+            console.print(
+                f"[dim]{name}: not in hsm_config — treating as a ~/.ssh/config alias[/dim]"
+            )
+            selected[name] = {}
+    return selected, config_data
+
+
 @remote.command()
 @click.argument("name")
 @click.argument("host", required=False)
@@ -41,29 +96,19 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool)
     """
     console = Console()
 
-    # Load existing HSM config
+    # Load existing config, or bootstrap a fresh one — adding a remote is
+    # exactly the moment to create the file, so don't demand 'hsm init' first.
     hsm_config = HSMConfig.load()
-    if not hsm_config:
-        console.print("[red]No hsm_config.yaml found. Run 'hsm init' first.[/red]")
-        return
+    config_data = hsm_config.config_data if hsm_config else {}
 
-    # Add remote to configuration
-    config_data = hsm_config.config_data
+    distributed = config_data.setdefault(
+        "distributed",
+        {"enabled": False, "strategy": "round_robin", "sync_method": "rsync"},
+    )
+    distributed.setdefault("remotes", {})
 
-    # Initialize distributed config if it doesn't exist
-    if "distributed" not in config_data:
-        config_data["distributed"] = {
-            "enabled": False,
-            "remotes": {},
-            "strategy": "round_robin",
-            "sync_method": "rsync",
-        }
-
-    if "remotes" not in config_data["distributed"]:
-        config_data["distributed"]["remotes"] = {}
-
-    # Add the new remote. Only persist connection fields that were explicitly
-    # given — a bare entry resolves entirely from ~/.ssh/config via the alias.
+    # Only persist connection fields that were explicitly given — a bare entry
+    # resolves entirely from ~/.ssh/config via the alias.
     remote_config = {"enabled": enabled}
     if host:
         remote_config["host"] = host
@@ -74,18 +119,16 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool)
     if max_jobs:
         remote_config["max_parallel_jobs"] = max_jobs
 
-    config_data["distributed"]["remotes"][name] = remote_config
+    distributed["remotes"][name] = remote_config
 
-    # Save updated configuration
-    config_path = Path.cwd() / "sweeps" / "hsm_config.yaml"
-    if not config_path.exists():
-        config_path = Path.cwd() / "hsm_config.yaml"
-
+    config_path = _config_write_path()
     try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w") as f:
             yaml.dump(config_data, f, default_flow_style=False, indent=2)
 
-        console.print(f"[green]✓ Added remote '{name}' ({host})[/green]")
+        where = host or f"{name} (via ~/.ssh/config)"
+        console.print(f"[green]✓ Added remote '{name}' ({where})[/green]")
         console.print(f"Configuration saved to: {config_path}")
         console.print(f"Run 'hsm remote test {name}' to verify the connection.")
 
@@ -99,16 +142,18 @@ def list():
     console = Console()
 
     hsm_config = HSMConfig.load()
-    if not hsm_config:
-        console.print("[red]No hsm_config.yaml found. Run 'hsm init' first.[/red]")
-        return
-
-    distributed_config = hsm_config.config_data.get("distributed", {})
-    remotes = distributed_config.get("remotes", {})
+    remotes = (
+        hsm_config.config_data.get("distributed", {}).get("remotes", {})
+        if hsm_config
+        else {}
+    )
 
     if not remotes:
-        console.print("[yellow]No remote machines configured.[/yellow]")
-        console.print("Use 'hsm remote add <name> <host>' to add a remote machine.")
+        console.print("[yellow]No remotes registered yet.[/yellow]")
+        console.print(
+            "Register one with 'hsm remote add <name>' (uses your ~/.ssh/config alias), "
+            "or ping an alias directly with 'hsm remote test <alias>'."
+        )
         return
 
     table = Table(title="Configured Remote Machines")
@@ -142,39 +187,15 @@ def test(names: tuple, all: bool):
     """Test connection and configuration discovery for remote machines."""
     console = Console()
 
-    hsm_config = HSMConfig.load()
-    if not hsm_config:
-        console.print("[red]No hsm_config.yaml found. Run 'hsm init' first.[/red]")
-        return
-
-    distributed_config = hsm_config.config_data.get("distributed", {})
-    remotes = distributed_config.get("remotes", {})
-
-    if not remotes:
-        console.print("[yellow]No remote machines configured.[/yellow]")
-        return
-
-    # Determine which remotes to test
-    if all:
-        test_remotes = remotes
-    elif names:
-        test_remotes = {name: remotes[name] for name in names if name in remotes}
-        missing = [name for name in names if name not in remotes]
-        if missing:
-            console.print(f"[red]Unknown remotes: {', '.join(missing)}[/red]")
-    else:
-        console.print("[red]Specify remote names or use --all[/red]")
-        return
-
+    test_remotes, config_data = _resolve_remotes_for_action(names, all, console)
     if not test_remotes:
-        console.print("[yellow]No remotes to test.[/yellow]")
         return
 
     console.print(f"[bold]Testing {len(test_remotes)} remote machine(s)...[/bold]")
 
     # Run async test
     async def run_tests():
-        discovery = RemoteDiscovery(hsm_config.config_data)
+        discovery = RemoteDiscovery(config_data)
 
         results = {}
         for name, config in test_remotes.items():
@@ -246,30 +267,13 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
     """Check health status of remote machines."""
     console = Console()
 
-    hsm_config = HSMConfig.load()
-    if not hsm_config:
-        console.print("[red]No hsm_config.yaml found.[/red]")
-        return
-
-    distributed_config = hsm_config.config_data.get("distributed", {})
-    remotes = distributed_config.get("remotes", {})
-
-    if not remotes:
-        console.print("[yellow]No remote machines configured.[/yellow]")
-        return
-
-    # Determine which remotes to check
-    if all:
-        check_remotes = remotes
-    elif names:
-        check_remotes = {name: remotes[name] for name in names if name in remotes}
-    else:
-        console.print("[red]Specify remote names or use --all[/red]")
+    check_remotes, config_data = _resolve_remotes_for_action(names, all, console)
+    if not check_remotes:
         return
 
     async def run_health_check():
         # First discover configurations
-        discovery = RemoteDiscovery(hsm_config.config_data)
+        discovery = RemoteDiscovery(config_data)
         discovered = {}
 
         for name, config in check_remotes.items():
@@ -367,23 +371,21 @@ def remove(name: str):
 
     hsm_config = HSMConfig.load()
     if not hsm_config:
-        console.print("[red]No hsm_config.yaml found.[/red]")
+        console.print("[yellow]No remotes registered (no hsm_config found).[/yellow]")
         return
 
     config_data = hsm_config.config_data
     remotes = config_data.get("distributed", {}).get("remotes", {})
 
     if name not in remotes:
-        console.print(f"[red]Remote '{name}' not found.[/red]")
+        console.print(f"[red]Remote '{name}' not found in hsm_config.[/red]")
         return
 
     # Remove the remote
     del remotes[name]
 
     # Save updated configuration
-    config_path = Path.cwd() / "sweeps" / "hsm_config.yaml"
-    if not config_path.exists():
-        config_path = Path.cwd() / "hsm_config.yaml"
+    config_path = _config_write_path()
 
     try:
         with open(config_path, "w") as f:
