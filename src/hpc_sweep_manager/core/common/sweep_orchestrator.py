@@ -29,9 +29,9 @@ from .resource_spec import ResourceSpec, spec_from_legacy_resources
 logger = logging.getLogger(__name__)
 
 
-# Mode strings the orchestrator accepts (subset of the CLI's --mode choices —
-# remote and distributed remain on the legacy code path for now).
-SUPPORTED_MODES = frozenset({"local", "auto", "array", "individual"})
+# Mode strings the orchestrator accepts. Completion runs still route through
+# the legacy path (they need starting-task-number propagation); see cli/sweep.py.
+SUPPORTED_MODES = frozenset({"local", "auto", "array", "individual", "distributed"})
 
 
 @dataclass
@@ -115,6 +115,24 @@ def build_compute_source(
     if mode == "auto":
         mode = "array" if _slurm_on_path() else "local"
         logger.info(f"Auto-detected execution mode: {mode}")
+
+    if mode == "distributed":
+        from ..distributed.distributed_compute_source import DistributedComputeSource
+
+        if hsm_config is None:
+            raise RuntimeError("--mode distributed requires hsm_config.yaml")
+        distributed_cfg = hsm_config.config_data.get("distributed", {})
+        if not distributed_cfg.get("enabled", False):
+            raise RuntimeError(
+                "Distributed computing is not enabled in hsm_config.yaml "
+                "(set distributed.enabled: true)"
+            )
+        if not distributed_cfg.get("remotes") and not distributed_cfg.get("local_max_jobs"):
+            raise RuntimeError("No compute sources configured under distributed: in hsm_config.yaml")
+
+        source = DistributedComputeSource(hsm_config=hsm_config, show_progress=False)
+        # Distributed always fans out individual jobs across child sources.
+        return source, "distributed", "individual"
 
     if mode == "local":
         from ..local.local_compute_source import LocalComputeSource

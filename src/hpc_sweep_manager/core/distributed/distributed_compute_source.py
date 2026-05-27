@@ -25,9 +25,79 @@ from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode, TERMINAL_STATES
 from ..common.resource_spec import ResourceSpec
-from .distributed_manager import DistributedJobManager, DistributedSweepConfig
+from .distributed_manager import (
+    DistributedJobManager,
+    DistributedSweepConfig,
+    DistributionStrategy,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _config_from_hsm(distributed_cfg: dict) -> DistributedSweepConfig:
+    """Build a DistributedSweepConfig from the hsm_config ``distributed:`` block."""
+    strategy_str = distributed_cfg.get("strategy", "round_robin")
+    try:
+        strategy = DistributionStrategy(strategy_str)
+    except ValueError:
+        logger.warning(f"Unknown distribution strategy {strategy_str!r}, using round_robin")
+        strategy = DistributionStrategy.ROUND_ROBIN
+    return DistributedSweepConfig(
+        strategy=strategy,
+        collect_interval=distributed_cfg.get("collect_interval", 30),
+        health_check_interval=distributed_cfg.get("health_check_interval", 60),
+        max_retries=distributed_cfg.get("max_retries", 3),
+        enable_auto_sync=distributed_cfg.get("enable_auto_sync", False),
+        enable_interactive_sync=distributed_cfg.get("enable_interactive_sync", True),
+    )
+
+
+def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSource]:
+    """Construct the local child source from config, or None on failure."""
+    from ..common.path_detector import PathDetector
+    from ..local.local_compute_source import LocalComputeSource
+
+    try:
+        detector = PathDetector()
+        python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
+        script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
+        project_dir = hsm_config.get_project_root() or str(Path.cwd())
+
+        local_max_jobs = distributed_cfg.get("local_max_jobs", 1)
+        local_max_jobs = min(local_max_jobs, hsm_config.get_max_array_size() or local_max_jobs)
+
+        return LocalComputeSource(
+            name="local",
+            max_parallel_jobs=local_max_jobs,
+            python_path=python_path,
+            script_path=script_path,
+            project_dir=project_dir,
+        )
+    except Exception as e:  # noqa: BLE001 - local source is optional
+        logger.warning(f"Could not build local compute source: {e}")
+        return None
+
+
+async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
+    """Discover and construct SSH child sources from the configured remotes."""
+    from ..remote.discovery import RemoteDiscovery
+    from ..remote.ssh_compute_source import SSHComputeSource
+
+    discovery = RemoteDiscovery(hsm_config.config_data)
+    sources: List[ComputeSource] = []
+    for remote_name, remote_config in remotes.items():
+        try:
+            remote_info = dict(remote_config)
+            remote_info["name"] = remote_name
+            discovered = await discovery.discover_remote_config(remote_info)
+            if discovered:
+                sources.append(SSHComputeSource(name=remote_name, remote_config=discovered))
+                logger.info(f"Remote source ready: {remote_name}")
+            else:
+                logger.warning(f"Failed to discover configuration for remote {remote_name!r}")
+        except Exception as e:  # noqa: BLE001 - a bad remote shouldn't kill the run
+            logger.warning(f"Failed to add SSH source {remote_name!r}: {e}")
+    return sources
 
 
 class DistributedComputeSource(ComputeSource):
@@ -46,6 +116,7 @@ class DistributedComputeSource(ComputeSource):
         child_sources: Optional[List[ComputeSource]] = None,
         config: Optional[DistributedSweepConfig] = None,
         show_progress: bool = False,
+        hsm_config: Any = None,
     ):
         self._child_sources: List[ComputeSource] = list(child_sources or [])
         # Aggregate capacity across children; 0 children -> 1 placeholder slot.
@@ -53,6 +124,9 @@ class DistributedComputeSource(ComputeSource):
         super().__init__(name, "distributed", total_slots)
         self._config = config
         self._show_progress = show_progress
+        # When no explicit children are given, they're discovered from this
+        # hsm_config in setup() (production path). Tests pass child_sources directly.
+        self._hsm_config = hsm_config
         self._manager: Optional[DistributedJobManager] = None
         self.sweep_dir: Optional[Path] = None
         self.sweep_id: Optional[str] = None
@@ -62,9 +136,37 @@ class DistributedComputeSource(ComputeSource):
         self._child_sources.append(source)
         self.max_parallel_jobs += source.max_parallel_jobs
 
+    async def _build_children_from_config(self) -> None:
+        """Populate child sources (local + SSH remotes) from hsm_config."""
+        distributed_cfg = self._hsm_config.config_data.get("distributed", {})
+        if self._config is None:
+            self._config = _config_from_hsm(distributed_cfg)
+
+        if distributed_cfg.get("local_max_jobs", 1) > 0:
+            local = _build_local_child(self._hsm_config, distributed_cfg)
+            if local is not None:
+                self._child_sources.append(local)
+
+        remotes = {
+            name: cfg
+            for name, cfg in distributed_cfg.get("remotes", {}).items()
+            if cfg.get("enabled", True)
+        }
+        if remotes:
+            self._child_sources.extend(
+                await _build_ssh_children(self._hsm_config, remotes)
+            )
+
+        self.max_parallel_jobs = (
+            sum(s.max_parallel_jobs for s in self._child_sources) or 1
+        )
+
     # ------------------------------------------------------------------ setup
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
+        if not self._child_sources and self._hsm_config is not None:
+            await self._build_children_from_config()
+
         if not self._child_sources:
             logger.error("DistributedComputeSource has no child sources to set up")
             self.stats.health_status = "unhealthy"

@@ -68,7 +68,55 @@ class TestBuildComputeSource:
 
     def test_modes_list_matches_supported(self):
         # Sanity: the supported set should match what the CLI documents.
-        assert SUPPORTED_MODES == {"local", "auto", "array", "individual"}
+        assert SUPPORTED_MODES == {"local", "auto", "array", "individual", "distributed"}
+
+    def test_distributed_requires_hsm_config(self):
+        with pytest.raises(RuntimeError, match="requires hsm_config"):
+            build_compute_source(mode="distributed", hsm_config=None, **self.BASE_KWARGS)
+
+    def test_distributed_requires_enabled_flag(self):
+        class FakeConfig:
+            config_data = {"distributed": {"enabled": False}}
+
+            def get_max_array_size(self):
+                return None
+
+        with pytest.raises(RuntimeError, match="not enabled"):
+            build_compute_source(
+                mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS
+            )
+
+    def test_distributed_requires_sources(self):
+        class FakeConfig:
+            config_data = {"distributed": {"enabled": True}}
+
+            def get_max_array_size(self):
+                return None
+
+        with pytest.raises(RuntimeError, match="No compute sources"):
+            build_compute_source(
+                mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS
+            )
+
+    def test_distributed_builds_source(self):
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            DistributedComputeSource,
+        )
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {"enabled": True, "local_max_jobs": 2, "remotes": {}}
+            }
+
+            def get_max_array_size(self):
+                return None
+
+        source, resolved, sub_mode = build_compute_source(
+            mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS
+        )
+        assert isinstance(source, DistributedComputeSource)
+        assert resolved == "distributed"
+        assert sub_mode == "individual"
 
     def test_local_mode_returns_local_source(self, no_gpus):
         source, resolved, sub_mode = build_compute_source(
