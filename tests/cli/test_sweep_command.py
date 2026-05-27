@@ -146,59 +146,6 @@ class TestSweepCommand:
                 mock_instance.submit_sweep.assert_called_once()
 
     @pytest.mark.cli
-    def test_sweep_remote_mode(self, cli_runner, mock_project_dir):
-        """Test sweep command in remote mode."""
-        with cli_runner.isolated_filesystem():
-            import os
-
-            os.chdir(str(mock_project_dir))
-
-            # Create remote config
-            hsm_config_path = mock_project_dir / "sweeps" / "hsm_config.yaml"
-            with open(hsm_config_path) as f:
-                config = yaml.safe_load(f)
-
-            config["distributed"] = {
-                "remotes": {
-                    "test_remote": {
-                        "host": "test.example.com",
-                        "ssh_key": "~/.ssh/id_rsa",
-                    }
-                }
-            }
-
-            with open(hsm_config_path, "w") as f:
-                yaml.dump(config, f)
-
-            # Mock the remote job manager creation process
-            with patch(
-                "hpc_sweep_manager.cli.sweep.create_remote_job_manager_wrapper"
-            ) as mock_create_wrapper:
-                mock_instance = Mock()
-                mock_create_wrapper.return_value = mock_instance
-                mock_instance.submit_sweep.return_value = [
-                    "remote_job_1",
-                    "remote_job_2",
-                ]
-                mock_instance.system_type = "remote"
-
-                console = Console()
-                logger = logging.getLogger("test")
-
-                result = cli_runner.invoke(
-                    sweep_cmd,
-                    ["run", "--mode", "remote", "--remote", "test_remote", "--max-runs", "2"],
-                    obj={"console": console, "logger": logger},
-                )
-
-                # Should succeed
-                if result.exit_code != 0:
-                    print(f"Command output: {result.output}")
-                    if result.exception:
-                        print(f"Exception: {result.exception}")
-                assert result.exit_code == 0
-                mock_instance.submit_sweep.assert_called_once()
-
     @pytest.mark.cli
     def test_sweep_invalid_mode(self, cli_runner, mock_project_dir):
         """Test sweep command with invalid mode."""

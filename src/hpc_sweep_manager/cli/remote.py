@@ -27,13 +27,18 @@ def remote():
 
 @remote.command()
 @click.argument("name")
-@click.argument("host")
-@click.option("--key", help="SSH key path")
-@click.option("--port", default=22, help="SSH port")
+@click.argument("host", required=False)
+@click.option("--key", help="SSH key path (overrides ~/.ssh/config)")
+@click.option("--port", type=int, default=None, help="SSH port (overrides ~/.ssh/config)")
 @click.option("--max-jobs", type=int, help="Max parallel jobs (overrides remote default)")
 @click.option("--enabled/--disabled", default=True, help="Enable/disable this remote")
 def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool):
-    """Add a new remote machine configuration."""
+    """Add a new remote machine configuration.
+
+    HOST is optional: if omitted, NAME is treated as a ~/.ssh/config alias and
+    all connection details (hostname, user, port, key, proxy) come from there.
+    Provide HOST / --key / --port only to override the ssh-config entry.
+    """
     console = Console()
 
     # Load existing HSM config
@@ -57,9 +62,13 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool)
     if "remotes" not in config_data["distributed"]:
         config_data["distributed"]["remotes"] = {}
 
-    # Add the new remote
-    remote_config = {"host": host, "ssh_port": port, "enabled": enabled}
-
+    # Add the new remote. Only persist connection fields that were explicitly
+    # given — a bare entry resolves entirely from ~/.ssh/config via the alias.
+    remote_config = {"enabled": enabled}
+    if host:
+        remote_config["host"] = host
+    if port:
+        remote_config["ssh_port"] = port
     if key:
         remote_config["ssh_key"] = key
     if max_jobs:
@@ -113,11 +122,12 @@ def list():
     for name, config in remotes.items():
         status = "✓ Enabled" if config.get("enabled", True) else "✗ Disabled"
 
+        # A bare entry resolves from ~/.ssh/config; show the alias + that hint.
         table.add_row(
             name,
-            config.get("host", "N/A"),
-            str(config.get("ssh_port", 22)),
-            config.get("ssh_key", "default") or "default",
+            config.get("host", f"{name} (ssh config)"),
+            str(config.get("ssh_port", "ssh config")),
+            config.get("ssh_key", "ssh config") or "ssh config",
             str(config.get("max_parallel_jobs", "auto")),
             status,
         )
@@ -168,7 +178,7 @@ def test(names: tuple, all: bool):
 
         results = {}
         for name, config in test_remotes.items():
-            console.print(f"\n[cyan]Testing {name} ({config['host']})...[/cyan]")
+            console.print(f"\n[cyan]Testing {name} ({config.get('host', name)})...[/cyan]")
 
             config["name"] = name
             remote_config = await discovery.discover_remote_config(config)

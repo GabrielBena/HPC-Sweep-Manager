@@ -26,7 +26,9 @@ class RemoteConfig:
     name: str
     host: str
     ssh_key: Optional[str] = None
-    ssh_port: int = 22
+    # None → let ~/.ssh/config (or asyncssh's default 22) decide. An explicit
+    # value here overrides the ssh-config Port directive.
+    ssh_port: Optional[int] = None
     max_parallel_jobs: Optional[int] = None
     enabled: bool = True
 
@@ -92,63 +94,58 @@ def get_ssh_client_keys(ssh_key_path: Optional[str]) -> List[str]:
     return keys
 
 
-async def create_ssh_connection(host: str, ssh_key: Optional[str] = None, ssh_port: int = 22):
-    """Create SSH connection with proper key handling."""
-    logger.debug(f"Attempting SSH connection to {host}:{ssh_port}")
+async def create_ssh_connection(
+    host: str, ssh_key: Optional[str] = None, ssh_port: Optional[int] = None
+):
+    """Open an SSH connection, reusing the user's ``~/.ssh/config`` when present.
 
-    # Build connection arguments
-    connection_kwargs = {
-        "host": host,
-        "port": ssh_port,
-        "known_hosts": None,  # Accept any host key for now (like -o StrictHostKeyChecking=no)
-    }
+    ``host`` may be a plain hostname, a ``user@host`` string, or an alias
+    defined in ``~/.ssh/config`` — asyncssh resolves the alias's ``HostName``,
+    ``User``, ``Port``, ``IdentityFile``, ``ProxyJump`` etc. Explicit
+    ``ssh_key`` / ``ssh_port`` arguments (from ``hsm_config.yaml``) override the
+    corresponding ssh-config directives. Host keys are verified against
+    ``~/.ssh/known_hosts`` (and any ``UserKnownHostsFile`` /
+    ``StrictHostKeyChecking`` the config specifies).
+    """
+    logger.debug(f"Attempting SSH connection to {host}")
 
-    # If user specified an SSH key, try to use it
+    connection_kwargs: Dict[str, Any] = {"host": host}
+
+    # Hand asyncssh the user's ssh config so aliases resolve like `ssh <alias>`.
+    ssh_config_path = os.path.expanduser("~/.ssh/config")
+    if os.path.exists(ssh_config_path):
+        connection_kwargs["config"] = [ssh_config_path]
+        logger.debug(f"Using SSH config: {ssh_config_path}")
+
+    # Explicit overrides win over the ssh-config entry. Leaving these unset lets
+    # the config (or asyncssh defaults / SSH agent) supply them.
+    if ssh_port:
+        connection_kwargs["port"] = ssh_port
     if ssh_key:
         expanded_key = expand_ssh_key_path(ssh_key)
         if expanded_key:
-            logger.debug(f"Using specified SSH key: {expanded_key}")
             connection_kwargs["client_keys"] = [expanded_key]
         else:
-            logger.warning(f"Specified SSH key not found: {ssh_key}, using default SSH behavior")
-    else:
-        logger.debug("No SSH key specified, using default SSH behavior")
+            logger.warning(
+                f"Specified SSH key not found: {ssh_key}; falling back to ssh config / agent"
+            )
 
-    # Let asyncssh auto-detect username from host string or use current user
-    if "@" not in host:
-        connection_kwargs["username"] = os.getenv("USER") or os.getenv("USERNAME")
-        logger.debug(f"No username in host, using: {connection_kwargs['username']}")
-    else:
-        logger.debug("Username included in host string")
-
-    logger.debug(f"Connection arguments: {connection_kwargs}")
-
+    # known_hosts is intentionally NOT set to None → asyncssh verifies against
+    # ~/.ssh/known_hosts and honors the config's host-key directives.
     try:
         conn = await asyncssh.connect(**connection_kwargs)
         logger.debug(f"✓ SSH connection established to {host}")
         return conn
     except asyncssh.PermissionDenied as e:
         logger.error(f"SSH permission denied to {host}: {e}")
-        logger.error("Try running: ssh-copy-id {host}")
+        logger.error(f"Check your key / ~/.ssh/config entry, or run: ssh-copy-id {host}")
         raise
-    except asyncssh.ConnectionLost as e:
-        logger.error(f"SSH connection lost to {host}: {e}")
+    except asyncssh.HostKeyNotVerifiable as e:
+        logger.error(f"Host key for {host} is not in known_hosts: {e}")
+        logger.error(f"Connect once interactively to record it: ssh {host}")
         raise
     except Exception as e:
-        logger.error(f"SSH connection failed to {host}: {e}")
-        logger.error(f"Full error details: {type(e).__name__}: {e}")
-
-        # Try a simpler connection without client_keys
-        if "client_keys" in connection_kwargs:
-            logger.info("Retrying connection without explicit client keys...")
-            simple_kwargs = {k: v for k, v in connection_kwargs.items() if k != "client_keys"}
-            try:
-                conn = await asyncssh.connect(**simple_kwargs)
-                logger.debug(f"✓ SSH connection established to {host} (fallback mode)")
-                return conn
-            except Exception as e2:
-                logger.error(f"Fallback connection also failed: {e2}")
-
+        logger.error(f"SSH connection to {host} failed: {type(e).__name__}: {e}")
         raise
 
 
@@ -179,12 +176,14 @@ class RemoteDiscovery:
         logger.debug(f"Discovering HSM configuration on remote: {remote_name}")
 
         try:
-            # Create RemoteConfig with basic info
+            # Create RemoteConfig with basic info. The host defaults to the
+            # remote's name, which doubles as a ~/.ssh/config alias unless an
+            # explicit host is given.
             remote_config = RemoteConfig(
                 name=remote_name,
-                host=remote_info["host"],
+                host=remote_info.get("host") or remote_name,
                 ssh_key=remote_info.get("ssh_key"),
-                ssh_port=remote_info.get("ssh_port", 22),
+                ssh_port=remote_info.get("ssh_port"),
                 max_parallel_jobs=remote_info.get("max_parallel_jobs"),
                 enabled=remote_info.get("enabled", True),
             )
