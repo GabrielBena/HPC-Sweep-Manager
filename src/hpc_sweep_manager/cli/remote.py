@@ -13,6 +13,7 @@ import yaml
 
 from ..core.common.config import HSMConfig
 from ..core.remote.discovery import RemoteDiscovery, RemoteValidator
+from ..core.remote.gpu_probe import probe_gpus
 
 # Set up more detailed logging for debugging
 # logging.basicConfig(level=logging.DEBUG)
@@ -178,6 +179,79 @@ def list():
         )
 
     console.print(table)
+
+
+@remote.command()
+@click.argument("names", nargs=-1)
+@click.option("--all", is_flag=True, help="Probe all registered remotes")
+def gpus(names: tuple, all: bool):
+    """Show GPU availability on remote machines (via nvidia-smi).
+
+    NAMES may be registered remotes or bare ~/.ssh/config aliases. Needs
+    nothing on the remote except nvidia-smi — handy for deciding where to send
+    a sweep. Example: ``hsm remote gpus anahita`` or ``hsm remote gpus --all``.
+    """
+    console = Console()
+
+    targets, _ = _resolve_remotes_for_action(names, all, console)
+    if not targets:
+        return
+
+    async def probe_all():
+        results = {}
+        for name, config in targets.items():
+            host = config.get("host", name)
+            try:
+                results[name] = await probe_gpus(
+                    host, config.get("ssh_key"), config.get("ssh_port")
+                )
+            except Exception as e:  # noqa: BLE001 - report unreachable per host
+                results[name] = e
+        return results
+
+    try:
+        results = asyncio.run(probe_all())
+    except Exception as e:
+        console.print(f"[red]Error probing GPUs: {e}[/red]")
+        return
+
+    table = Table(title="Remote GPU Availability")
+    table.add_column("Machine", style="cyan")
+    table.add_column("GPU", style="magenta", justify="right")
+    table.add_column("Name", style="green")
+    table.add_column("Memory", style="blue")
+    table.add_column("Util", style="yellow", justify="right")
+    table.add_column("State")
+
+    for name, result in results.items():
+        if isinstance(result, Exception):
+            table.add_row(name, "-", f"[red]unreachable: {result}[/red]", "-", "-", "")
+            continue
+        if not result:
+            table.add_row(name, "-", "[dim]no GPUs / nvidia-smi not found[/dim]", "-", "-", "")
+            continue
+        for i, gpu in enumerate(result):
+            state = "[green]○ free[/green]" if gpu.is_free else "[red]● busy[/red]"
+            table.add_row(
+                name if i == 0 else "",
+                str(gpu.index),
+                gpu.name,
+                f"{gpu.mem_used_gb:.1f}/{gpu.mem_total_gb:.0f} GB",
+                f"{gpu.util_pct:.0f}%",
+                state,
+            )
+
+    console.print(table)
+
+    # Quick summary of free capacity to aid targeting decisions.
+    free_by_host = {
+        name: sum(1 for g in res if g.is_free)
+        for name, res in results.items()
+        if not isinstance(res, Exception) and res
+    }
+    if free_by_host:
+        summary = ", ".join(f"{name}: {n} free" for name, n in free_by_host.items())
+        console.print(f"\n[bold]Free GPUs[/bold] — {summary}")
 
 
 @remote.command()
