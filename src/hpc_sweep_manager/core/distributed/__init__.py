@@ -1,29 +1,21 @@
 # Distributed execution components
 
-# Main refactored distributed manager
-# Base classes and configuration
-from .base_distributed_manager import (
-    BaseDistributedManager,
+from .distributed_compute_source import DistributedComputeSource
+from .distributed_manager import (
+    DistributedJobManager,
     DistributedSweepConfig,
     DistributionStrategy,
 )
 
-# Component classes
-from .job_distributor import JobDistributor
-from .job_monitor import JobMonitor
-from .result_collector import ResultCollector
-
-# Wrapper for integration
+# Legacy sync wrapper — still used by the completion path; removed once
+# completion runs migrate to the orchestrator.
 from .wrapper import DistributedSweepWrapper, create_distributed_sweep_wrapper
 
-# Keep
 __all__ = [
-    "BaseDistributedManager",
+    "DistributedComputeSource",
+    "DistributedJobManager",
     "DistributedSweepConfig",
     "DistributionStrategy",
-    "JobDistributor",
-    "JobMonitor",
-    "ResultCollector",
     "DistributedSweepWrapper",
     "create_distributed_sweep_wrapper",
 ]
