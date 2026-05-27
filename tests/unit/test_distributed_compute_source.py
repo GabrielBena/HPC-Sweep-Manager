@@ -172,3 +172,56 @@ class TestWaitAndHealth:
     async def test_cleanup_without_setup_is_noop(self):
         src = DistributedComputeSource(child_sources=[MockChild("a")])
         await src.cleanup()  # should not raise
+
+
+class TestBuildSshChildren:
+    """B2-part-2: the child builder pulls straight from local config — no discovery I/O."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_builds_push_source_from_local_config(self, tmp_path, monkeypatch):
+        # Sanity guard: if anything tries to call discover_remote_config now,
+        # this raises and the test fails loudly.
+        def _no_discovery(*args, **kwargs):
+            raise AssertionError(
+                "_build_ssh_children must not invoke RemoteDiscovery"
+            )
+
+        monkeypatch.setattr(
+            "hpc_sweep_manager.core.remote.discovery.RemoteDiscovery.discover_remote_config",
+            _no_discovery,
+        )
+
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "conda_env": "lab",
+                    "remote_root": "~/.hsm/runs",
+                    "remotes": {
+                        "anahita": {"max_parallel_jobs": 4, "gpus": [0, 1]},
+                        "box2": {"max_parallel_jobs": 2, "conda_env": "lab-cpu"},
+                    },
+                }
+            }
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        sources = await _build_ssh_children(
+            FakeConfig(), FakeConfig.config_data["distributed"]["remotes"]
+        )
+        assert len(sources) == 2
+        by_name = {s.name: s for s in sources}
+        assert isinstance(by_name["anahita"], SSHComputeSource)
+        assert by_name["anahita"].max_parallel_jobs == 4
+        assert by_name["anahita"]._gpus_config == [0, 1]
+        assert by_name["anahita"].conda_env == "lab"  # falls back to global
+        assert by_name["box2"].conda_env == "lab-cpu"  # per-remote override

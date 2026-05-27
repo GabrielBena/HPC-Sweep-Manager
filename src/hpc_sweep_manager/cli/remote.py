@@ -438,6 +438,80 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
 
 @remote.command()
 @click.argument("name")
+@click.option(
+    "--all-projects",
+    is_flag=True,
+    help="Remove the whole HSM root on the remote (every project's code + sweeps).",
+)
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompt.")
+def clean(name: str, all_projects: bool, yes: bool):
+    """Delete the HSM scratch directory for this project on a remote.
+
+    By default removes ``{remote_root}/{local-project-name}/`` — i.e. the
+    rsync'd code cache + any per-sweep dirs that survived a failed run. Use
+    ``--all-projects`` to wipe ``{remote_root}/`` itself.
+
+    Resolves the remote_root via, in order: the registered remote's
+    ``remote_root`` override, ``distributed.remote_root``, then
+    ``~/.hsm/runs``. NAME may be a registered remote or a bare ssh-config
+    alias.
+    """
+    from ..core.remote.discovery import create_ssh_connection
+
+    console = Console()
+
+    hsm_config = HSMConfig.load()
+    config_data = hsm_config.config_data if hsm_config else {}
+    distributed_cfg = config_data.get("distributed", {})
+    registered = distributed_cfg.get("remotes", {})
+    remote_cfg = dict(registered.get(name, {}))
+    if name not in registered:
+        console.print(
+            f"[dim]{name}: not in hsm_config — treating as a ~/.ssh/config alias[/dim]"
+        )
+
+    host = remote_cfg.get("host") or name
+    ssh_key = remote_cfg.get("ssh_key")
+    ssh_port = remote_cfg.get("ssh_port")
+    remote_root = remote_cfg.get(
+        "remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs")
+    )
+    remote_root = remote_root.rstrip("/")
+
+    if all_projects:
+        target = remote_root
+        scope_msg = f"the entire HSM root ({target}) on {host}"
+    else:
+        project_name = Path.cwd().name or "project"
+        target = f"{remote_root}/{project_name}"
+        scope_msg = f"project '{project_name}' at {target} on {host}"
+
+    if not yes:
+        console.print(f"[yellow]About to remove {scope_msg}.[/yellow]")
+        if not click.confirm("Proceed?", default=False):
+            console.print("Cancelled.")
+            return
+
+    async def do_clean():
+        async with await create_ssh_connection(host, ssh_key, ssh_port) as conn:
+            # `rm -rf` of a non-existent path is a no-op success → idempotent.
+            result = await conn.run(f"rm -rf {target}", check=False)
+            return result.returncode or 0
+
+    try:
+        rc = asyncio.run(do_clean())
+    except Exception as e:
+        console.print(f"[red]Failed to connect to {host}: {e}[/red]")
+        return
+
+    if rc == 0:
+        console.print(f"[green]✓ Cleaned {target} on {host}[/green]")
+    else:
+        console.print(f"[red]rm exited with rc={rc} on {host}[/red]")
+
+
+@remote.command()
+@click.argument("name")
 @click.confirmation_option(prompt="Are you sure you want to remove this remote?")
 def remove(name: str):
     """Remove a remote machine configuration."""

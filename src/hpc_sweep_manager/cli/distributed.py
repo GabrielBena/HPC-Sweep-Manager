@@ -397,7 +397,9 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
 
                     remote_config = await discovery.discover_remote_config(remote_info)
                     if remote_config:
-                        ssh_source = SSHComputeSource(source_name, remote_config)
+                        ssh_source = SSHComputeSource.from_remote_config(
+                            name=source_name, remote_config=remote_config
+                        )
                         sources.append(ssh_source)
 
         # Run health checks

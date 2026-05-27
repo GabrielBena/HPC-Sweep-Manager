@@ -64,11 +64,18 @@ class TestBuildComputeSource:
 
     def test_unknown_mode_raises(self):
         with pytest.raises(ValueError, match="unsupported mode"):
-            build_compute_source(mode="remote", **self.BASE_KWARGS)
+            build_compute_source(mode="quantum", **self.BASE_KWARGS)
 
     def test_modes_list_matches_supported(self):
         # Sanity: the supported set should match what the CLI documents.
-        assert SUPPORTED_MODES == {"local", "auto", "array", "individual", "distributed"}
+        assert SUPPORTED_MODES == {
+            "local",
+            "auto",
+            "array",
+            "individual",
+            "distributed",
+            "remote",
+        }
 
     def test_distributed_requires_hsm_config(self):
         with pytest.raises(RuntimeError, match="requires hsm_config"):
@@ -213,3 +220,88 @@ class TestBuildComputeSource:
             mode="array", qos_whitelist=wl, **self.BASE_KWARGS
         )
         assert source.qos_whitelist is wl
+
+
+class TestRemoteMode:
+    """`mode='remote'` builds a single push SSHComputeSource."""
+
+    BASE_KWARGS = dict(
+        python_path="python3",
+        script_path="train.py",
+        project_dir="/local/proj",
+    )
+
+    def test_requires_alias(self):
+        with pytest.raises(RuntimeError, match="--remote <alias>"):
+            build_compute_source(mode="remote", **self.BASE_KWARGS)
+
+    def test_bare_alias_works_without_hsm_config(self):
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+
+        source, resolved, sub_mode = build_compute_source(
+            mode="remote",
+            remote_alias="anahita",
+            hsm_config=None,
+            **self.BASE_KWARGS,
+        )
+        assert isinstance(source, SSHComputeSource)
+        assert source.host == "anahita"
+        assert source.name == "anahita"
+        assert resolved == "remote"
+        assert sub_mode == "individual"
+
+    def test_registered_remote_supplies_fields(self):
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "conda_env": "lab",
+                    "remote_root": "/scratch/hsm",
+                    "remotes": {
+                        "anahita": {
+                            "max_parallel_jobs": 4,
+                            "gpus": [0, 1],
+                            "conda_env": "lab-cpu",
+                        }
+                    },
+                }
+            }
+
+            def get_max_array_size(self):
+                return None
+
+        source, _, _ = build_compute_source(
+            mode="remote",
+            remote_alias="anahita",
+            hsm_config=FakeConfig(),
+            **self.BASE_KWARGS,
+        )
+        assert isinstance(source, SSHComputeSource)
+        assert source.max_parallel_jobs == 4
+        assert source.conda_env == "lab-cpu"  # per-remote wins over global
+        assert source.remote_root == "/scratch/hsm"
+        assert source._gpus_config == [0, 1]
+
+    def test_cli_overrides_beat_config(self):
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "conda_env": "config-env",
+                    "remotes": {"anahita": {"conda_env": "per-remote", "gpus": [0]}},
+                }
+            }
+
+            def get_max_array_size(self):
+                return None
+
+        source, _, _ = build_compute_source(
+            mode="remote",
+            remote_alias="anahita",
+            hsm_config=FakeConfig(),
+            gpus_override=[2, 3],
+            conda_env_override="cli-env",
+            **self.BASE_KWARGS,
+        )
+        assert source.conda_env == "cli-env"
+        assert source._gpus_config == [2, 3]

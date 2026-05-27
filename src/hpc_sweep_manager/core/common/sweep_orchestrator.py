@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import logging
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence, Union
 
 from .compute_source import ComputeSource, SubmissionMode
 from .resource_spec import ResourceSpec, spec_from_legacy_resources
@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Mode strings the orchestrator accepts. Completion runs still route through
 # the legacy path (they need starting-task-number propagation); see cli/sweep.py.
-SUPPORTED_MODES = frozenset({"local", "auto", "array", "individual", "distributed"})
+SUPPORTED_MODES = frozenset(
+    {"local", "auto", "array", "individual", "distributed", "remote"}
+)
 
 
 @dataclass
@@ -93,6 +95,9 @@ def build_compute_source(
     hsm_config: Any = None,
     parallel_jobs: int | None = None,
     qos_whitelist: frozenset[str] | None = None,
+    remote_alias: str | None = None,
+    gpus_override: Union[None, int, Sequence[int]] = None,
+    conda_env_override: str | None = None,
 ) -> tuple[ComputeSource, str, SubmissionMode]:
     """Build a :class:`ComputeSource` for the requested mode.
 
@@ -133,6 +138,34 @@ def build_compute_source(
         source = DistributedComputeSource(hsm_config=hsm_config, show_progress=False)
         # Distributed always fans out individual jobs across child sources.
         return source, "distributed", "individual"
+
+    if mode == "remote":
+        from ..remote.ssh_compute_source import build_ssh_source
+
+        if not remote_alias:
+            raise RuntimeError("--mode remote requires --remote <alias>")
+        # Lookup precedence: registered remote → bare ssh-config alias (empty cfg).
+        distributed_cfg = (
+            hsm_config.config_data.get("distributed", {}) if hsm_config else {}
+        )
+        registered = distributed_cfg.get("remotes", {})
+        remote_cfg = registered.get(remote_alias, {})
+        if remote_alias not in registered:
+            logger.info(
+                f"Remote {remote_alias!r} not in hsm_config — using bare "
+                f"~/.ssh/config alias"
+            )
+        source = build_ssh_source(
+            name=remote_alias,
+            remote_cfg=remote_cfg,
+            distributed_cfg=distributed_cfg,
+            project_dir=project_dir,
+            script_path=script_path,
+            default_spec=default_spec,
+            gpus_override=gpus_override,
+            conda_env_override=conda_env_override,
+        )
+        return source, "remote", "individual"
 
     if mode == "local":
         from ..local.local_compute_source import LocalComputeSource
@@ -208,6 +241,23 @@ async def run_sweep_async(
             poll_interval=poll_interval,
             on_progress=on_progress,
         )
+        # Pull results back (rsync for SSH; no-op for Local/Slurm) and release
+        # backend resources (closes the asyncssh conn, etc.). Failures are
+        # warnings — don't lose final_statuses for a flaky cleanup.
+        try:
+            ok = await source.collect_results()
+            if not ok:
+                logger.warning(
+                    f"collect_results returned False for source {source.name!r}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"collect_results raised for source {source.name!r}: {e}"
+            )
+        try:
+            await source.cleanup()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"cleanup raised for source {source.name!r}: {e}")
 
     return SweepResult(
         sweep_id=sweep_id,

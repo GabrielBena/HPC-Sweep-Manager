@@ -207,7 +207,9 @@ class DistributedSweepWrapper:
                 discovered_config = await discovery.discover_remote_config(remote_info)
 
                 if discovered_config:
-                    ssh_source = SSHComputeSource(name=remote_name, remote_config=discovered_config)
+                    ssh_source = SSHComputeSource.from_remote_config(
+                        name=remote_name, remote_config=discovered_config
+                    )
 
                     self.distributed_manager.add_compute_source(ssh_source)
                     successful_remotes.append(

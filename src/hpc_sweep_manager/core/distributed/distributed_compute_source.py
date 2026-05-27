@@ -79,22 +79,33 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSou
 
 
 async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
-    """Discover and construct SSH child sources from the configured remotes."""
-    from ..remote.discovery import RemoteDiscovery
-    from ..remote.ssh_compute_source import SSHComputeSource
+    """Construct push-model SSH child sources from local hsm_config.
 
-    discovery = RemoteDiscovery(hsm_config.config_data)
+    No discovery step — every field comes from ``distributed.remotes[name]``
+    (per-remote) or ``distributed:`` (global). Bare ssh-config aliases work
+    because ``host`` defaults to ``name``.
+    """
+    from ..common.path_detector import PathDetector
+    from ..remote.ssh_compute_source import build_ssh_source
+
+    detector = PathDetector()
+    project_dir = hsm_config.get_project_root() or str(Path.cwd())
+    script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
+    distributed_cfg = hsm_config.config_data.get("distributed", {})
+
     sources: List[ComputeSource] = []
     for remote_name, remote_config in remotes.items():
         try:
-            remote_info = dict(remote_config)
-            remote_info["name"] = remote_name
-            discovered = await discovery.discover_remote_config(remote_info)
-            if discovered:
-                sources.append(SSHComputeSource(name=remote_name, remote_config=discovered))
-                logger.info(f"Remote source ready: {remote_name}")
-            else:
-                logger.warning(f"Failed to discover configuration for remote {remote_name!r}")
+            sources.append(
+                build_ssh_source(
+                    name=remote_name,
+                    remote_cfg=remote_config,
+                    distributed_cfg=distributed_cfg,
+                    project_dir=project_dir,
+                    script_path=script_path,
+                )
+            )
+            logger.info(f"Remote source ready: {remote_name}")
         except Exception as e:  # noqa: BLE001 - a bad remote shouldn't kill the run
             logger.warning(f"Failed to add SSH source {remote_name!r}: {e}")
     return sources

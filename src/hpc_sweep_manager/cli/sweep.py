@@ -842,22 +842,29 @@ def _run_sweep_via_orchestrator(
     no_progress: bool,
     console: Console,
     logger: logging.Logger,
+    remote_alias: Optional[str] = None,
+    gpus_arg: Optional[str] = None,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
-    Handles ``--mode local|auto|array|individual``. The ``distributed`` path
-    still flows through the old job-manager code in ``run_sweep``; completion
-    runs likewise stay on the legacy path until ComputeSource grows a
+    Handles ``--mode local|auto|array|individual|distributed|remote``.
+    Completion runs stay on the legacy path until ComputeSource grows a
     starting-task-number knob.
     """
     from datetime import datetime
     import shutil
 
     from ..core.common.utils import create_sweep_id
+    from ..core.remote.ssh_compute_source import parse_gpus_arg
 
     # Build the source first so dry-run can show the resolved mode + spec.
     scheduler_hint = "slurm" if mode in ("array", "individual") else None
     spec = spec_from_cli(walltime=walltime, resources=resources, scheduler=scheduler_hint)
+    try:
+        gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return
     try:
         source, resolved_mode, sub_mode = build_compute_source(
             mode=mode,
@@ -867,6 +874,8 @@ def _run_sweep_via_orchestrator(
             default_spec=spec,
             hsm_config=hsm_config,
             parallel_jobs=parallel_jobs,
+            remote_alias=remote_alias,
+            gpus_override=gpus_override,
         )
     except (ValueError, RuntimeError) as e:
         console.print(f"[red]Error building compute source: {e}[/red]")
@@ -1001,6 +1010,8 @@ def run_sweep(
     console: Console,
     logger: logging.Logger,
     hsm_config: Optional["HSMConfig"] = None,
+    remote_alias: Optional[str] = None,
+    gpus_arg: Optional[str] = None,
 ):
     """Run parameter sweep."""
 
@@ -1093,6 +1104,8 @@ def run_sweep(
                 no_progress=no_progress,
                 console=console,
                 logger=logger,
+                remote_alias=remote_alias,
+                gpus_arg=gpus_arg,
             )
             return
 
@@ -1228,9 +1241,24 @@ def sweep_cmd(ctx):
 )
 @click.option(
     "--mode",
-    type=click.Choice(["auto", "individual", "array", "local", "distributed"]),
-    default="auto",
-    help="Job submission mode",
+    type=click.Choice(
+        ["auto", "individual", "array", "local", "distributed", "remote"]
+    ),
+    default=None,
+    help="Job submission mode (default: 'remote' if --remote given, else 'auto')",
+)
+@click.option(
+    "--remote",
+    "remote_alias",
+    help="Single remote alias (ssh-config name) to push the sweep to. Implies --mode remote.",
+)
+@click.option(
+    "--gpus",
+    "gpus_arg",
+    help=(
+        "GPU selection on the remote: 'all' (default), 'cpu', an int N (first N), "
+        "or a comma-separated allowlist like '0,1,3'. Used with --mode remote."
+    ),
 )
 @click.option("--dry-run", "-d", is_flag=True, help="Show what would be executed without running")
 @click.option("--count-only", is_flag=True, help="Count combinations and exit")
@@ -1248,6 +1276,8 @@ def run_cmd(
     ctx,
     config,
     mode,
+    remote_alias,
+    gpus_arg,
     dry_run,
     count_only,
     max_runs,
@@ -1262,6 +1292,21 @@ def run_cmd(
     quiet,
 ):
     """Run parameter sweep."""
+    # Resolve --mode: if the user passed --remote without --mode, infer remote;
+    # otherwise default to auto.
+    if mode is None:
+        mode = "remote" if remote_alias else "auto"
+    elif mode == "remote" and not remote_alias:
+        ctx.obj["console"].print(
+            "[red]--mode remote requires --remote <alias>[/red]"
+        )
+        return
+    elif remote_alias and mode not in ("remote", "auto"):
+        ctx.obj["console"].print(
+            f"[red]--remote is only valid with --mode remote (got --mode {mode!r}).[/red]"
+        )
+        return
+
     # Load HSM config for defaults
     hsm_config = HSMConfig.load()
 
@@ -1292,6 +1337,8 @@ def run_cmd(
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
         hsm_config=hsm_config,
+        remote_alias=remote_alias,
+        gpus_arg=gpus_arg,
     )
 
 
