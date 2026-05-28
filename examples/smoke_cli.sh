@@ -27,7 +27,12 @@ set -euo pipefail
 DRY_ONLY=0
 KEEP=0
 NO_GPU=0
-GPU_TYPE="h100"
+# Slurm GRES names are CASE-SENSITIVE and per-cluster. On S3IT (u24) `sinfo -o "%P %G"`
+# reports `gpu:H100:N` / `gpu:L4:N` (uppercase). Module names on the same cluster
+# are lowercase (`module load h100`) — yes, the case differs. If your cluster's
+# GRES uses lowercase, override with `--gpu-type=h100` (and the script lowercases
+# it for the modules: line either way).
+GPU_TYPE="H100"
 for arg in "$@"; do
   case "$arg" in
     --dry-only) DRY_ONLY=1 ;;
@@ -166,6 +171,11 @@ echo "[GPU smoke] --mode array with typed slurm: block (gpu_type=$GPU_TYPE)"
 echo "================================================================"
 
 mkdir -p .hsm
+# S3IT-style case asymmetry: GRES name uppercase (-> --gres=gpu:H100:1),
+# module name lowercase (-> module load h100). If your cluster uses the
+# same casing for both, that's fine — `module load H100` just resolves
+# to whatever's in modulefiles regardless.
+GPU_TYPE_LOWER="${GPU_TYPE,,}"
 cat > .hsm/config.yaml <<YAMLEOF
 project:
   name: hsm-cli-smoke
@@ -179,7 +189,7 @@ slurm:
   mem: "4gb"
   gpus: 1
   gpu_type: $GPU_TYPE
-  modules: [$GPU_TYPE]
+  modules: [$GPU_TYPE_LOWER]
   qos: normal
 YAMLEOF
 
