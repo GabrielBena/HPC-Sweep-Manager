@@ -12,7 +12,7 @@ from rich.tree import Tree
 import yaml
 
 from ..core.common.config import HSMConfig
-from ..core.remote.discovery import RemoteDiscovery, RemoteValidator
+from ..core.remote.discovery import create_ssh_connection
 from ..core.remote.gpu_probe import probe_gpus
 
 # Set up more detailed logging for debugging
@@ -254,82 +254,73 @@ def gpus(names: tuple, all: bool):
         console.print(f"\n[bold]Free GPUs[/bold] — {summary}")
 
 
+async def _ping_remote(name: str, cfg: dict) -> dict:
+    """Open ssh, run a few quick read-only commands, return what we learned.
+
+    Per-field success is reported independently so a remote with `python`
+    missing still reports ssh OK / uptime OK.
+    """
+    info: dict = {"name": name, "host": cfg.get("host", name)}
+    try:
+        async with await create_ssh_connection(
+            cfg.get("host", name), cfg.get("ssh_key"), cfg.get("ssh_port")
+        ) as conn:
+            info["connection"] = "✓"
+            for label, cmd in (
+                ("date", "date"),
+                ("uptime", "uptime"),
+                ("disk", "df -h ~ | tail -1"),
+                ("python", "python --version 2>&1 || python3 --version"),
+            ):
+                try:
+                    r = await conn.run(cmd, check=False)
+                    info[label] = (r.stdout or "").strip()
+                except Exception as e:  # noqa: BLE001
+                    info[label] = f"<error: {e}>"
+        info["status"] = "healthy"
+    except Exception as e:  # noqa: BLE001
+        info["status"] = "unhealthy"
+        info["connection"] = "✗"
+        info["error"] = str(e)
+    return info
+
+
 @remote.command()
 @click.argument("names", nargs=-1)
 @click.option("--all", is_flag=True, help="Test all remotes")
 def test(names: tuple, all: bool):
-    """Test connection and configuration discovery for remote machines."""
+    """Quick SSH ping — open a connection and run a couple of read-only commands."""
     console = Console()
 
-    test_remotes, config_data = _resolve_remotes_for_action(names, all, console)
+    test_remotes, _ = _resolve_remotes_for_action(names, all, console)
     if not test_remotes:
         return
 
-    console.print(f"[bold]Testing {len(test_remotes)} remote machine(s)...[/bold]")
+    console.print(f"[bold]Testing {len(test_remotes)} remote(s)...[/bold]")
 
-    # Run async test
-    async def run_tests():
-        discovery = RemoteDiscovery(config_data)
+    async def run_all():
+        return [await _ping_remote(name, cfg) for name, cfg in test_remotes.items()]
 
-        results = {}
-        for name, config in test_remotes.items():
-            console.print(f"\n[cyan]Testing {name} ({config.get('host', name)})...[/cyan]")
-
-            config["name"] = name
-            remote_config = await discovery.discover_remote_config(config)
-
-            if remote_config:
-                results[name] = {"status": "success", "config": remote_config}
-                console.print(f"[green]✓ {name}: Configuration discovered successfully[/green]")
-            else:
-                results[name] = {"status": "failed", "config": None}
-                console.print(f"[red]✗ {name}: Failed to discover configuration[/red]")
-
-        return results
-
-    # Execute async tests
     try:
-        results = asyncio.run(run_tests())
+        results = asyncio.run(run_all())
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        return
 
-        # Display detailed results
-        console.print("\n[bold]Test Results Summary:[/bold]")
-
-        for name, result in results.items():
-            if result["status"] == "success":
-                config = result["config"]
-
-                # Create a tree for the configuration
-                tree = Tree(f"[green]✓ {name}[/green]")
-                tree.add(f"Host: {config.host}")
-                tree.add(f"Python: {config.python_interpreter}")
-                tree.add(f"Project Root: {config.project_root}")
-                tree.add(f"Train Script: {config.train_script}")
-                tree.add(f"Max Jobs: {config.max_parallel_jobs}")
-
-                if config.wandb_config:
-                    wandb_branch = tree.add("W&B Config")
-                    wandb_branch.add(f"Project: {config.wandb_config.get('project', 'N/A')}")
-                    wandb_branch.add(f"Entity: {config.wandb_config.get('entity', 'N/A')}")
-
-                console.print(tree)
-            else:
-                console.print(f"[red]✗ {name}: Test failed[/red]")
-
-        # Summary
-        success_count = sum(1 for r in results.values() if r["status"] == "success")
-        total_count = len(results)
-
-        if success_count == total_count:
-            console.print(
-                f"\n[green]All {total_count} remote(s) configured successfully! 🎉[/green]"
-            )
+    for info in results:
+        if info["status"] == "healthy":
+            tree = Tree(f"[green]✓ {info['name']}[/green] ({info['host']})")
+            tree.add(f"Date: {info.get('date', 'N/A')}")
+            tree.add(f"Python: {info.get('python', 'N/A')}")
+            tree.add(f"Uptime: {info.get('uptime', 'N/A')}")
+            console.print(tree)
         else:
             console.print(
-                f"\n[yellow]{success_count}/{total_count} remote(s) configured successfully[/yellow]"
+                f"[red]✗ {info['name']} ({info['host']}): {info.get('error', 'unknown')}[/red]"
             )
 
-    except Exception as e:
-        console.print(f"[red]Error during testing: {e}[/red]")
+    healthy = sum(1 for i in results if i["status"] == "healthy")
+    console.print(f"\n[bold]{healthy}/{len(results)} remote(s) reachable.[/bold]")
 
 
 @remote.command()
@@ -338,102 +329,62 @@ def test(names: tuple, all: bool):
 @click.option("--watch", is_flag=True, help="Continuous monitoring mode")
 @click.option("--refresh", default=30, help="Refresh interval in seconds for watch mode")
 def health(names: tuple, all: bool, watch: bool, refresh: int):
-    """Check health status of remote machines."""
+    """Health check — ssh ping with load + disk + python info."""
     console = Console()
 
-    check_remotes, config_data = _resolve_remotes_for_action(names, all, console)
+    check_remotes, _ = _resolve_remotes_for_action(names, all, console)
     if not check_remotes:
         return
 
-    async def run_health_check():
-        # First discover configurations
-        discovery = RemoteDiscovery(config_data)
-        discovered = {}
+    async def run_all():
+        return [await _ping_remote(name, cfg) for name, cfg in check_remotes.items()]
 
-        for name, config in check_remotes.items():
-            config["name"] = name
-            remote_config = await discovery.discover_remote_config(config)
-            if remote_config:
-                discovered[name] = remote_config
-
-        if not discovered:
-            console.print("[red]No healthy remotes found for health check.[/red]")
-            return
-
-        # Run health checks
-        validator = RemoteValidator(discovered)
-        health_report = await validator.health_check_all()
-
-        return health_report
-
-    def display_health_report(health_report):
-        table = Table(title="Remote Machine Health Status")
+    def show(results):
+        table = Table(title="Remote Machine Health")
         table.add_column("Machine", style="cyan")
         table.add_column("Status", style="green")
-        table.add_column("Connection", style="blue")
-        table.add_column("Load", style="yellow")
+        table.add_column("Uptime", style="yellow")
+        table.add_column("Disk (home)", style="blue")
         table.add_column("Python", style="magenta")
-        table.add_column("Timestamp", style="dim")
-
-        for name, health in health_report.items():
-            status_style = "green" if health.get("status") == "healthy" else "red"
-            status = f"[{status_style}]{health.get('status', 'unknown')}[/{status_style}]"
-
+        for info in results:
+            status_color = "green" if info["status"] == "healthy" else "red"
+            uptime = info.get("uptime", "N/A")
+            if len(uptime) > 40:
+                uptime = uptime[:37] + "..."
             table.add_row(
-                name,
-                status,
-                health.get("connection", "?"),
-                health.get("load", "N/A")[:30] + "..."
-                if health.get("load") and len(health.get("load", "")) > 30
-                else health.get("load", "N/A"),
-                health.get("python_version", "N/A"),
-                health.get("timestamp", "N/A"),
+                info["name"],
+                f"[{status_color}]{info['status']}[/{status_color}]",
+                uptime,
+                info.get("disk", "N/A"),
+                info.get("python", "N/A"),
             )
-
         console.print(table)
-
-        # Show any errors
-        for name, health in health_report.items():
-            if "error" in health:
-                console.print(f"[red]✗ {name}: {health['error']}[/red]")
+        for info in results:
+            if info["status"] != "healthy":
+                console.print(f"[red]✗ {info['name']}: {info.get('error', 'unknown')}[/red]")
 
     if watch:
-        console.print(
-            f"[bold]Monitoring remote health every {refresh} seconds (Ctrl+C to stop)...[/bold]"
-        )
-
+        console.print(f"[bold]Monitoring every {refresh}s (Ctrl+C to stop)...[/bold]")
         try:
             while True:
                 console.clear()
                 console.print(
-                    f"[bold]Remote Health Monitor - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold]\n"
+                    f"[bold]Remote Health Monitor — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold]\n"
                 )
-
                 try:
-                    health_report = asyncio.run(run_health_check())
-                    if health_report:
-                        display_health_report(health_report)
-                    else:
-                        console.print("[red]Failed to get health report[/red]")
+                    show(asyncio.run(run_all()))
                 except Exception as e:
-                    console.print(f"[red]Error during health check: {e}[/red]")
-
+                    console.print(f"[red]Error: {e}[/red]")
                 import time
 
                 time.sleep(refresh)
-
         except KeyboardInterrupt:
             console.print("\n[yellow]Health monitoring stopped.[/yellow]")
     else:
-        # Single health check
         try:
-            health_report = asyncio.run(run_health_check())
-            if health_report:
-                display_health_report(health_report)
-            else:
-                console.print("[red]Failed to get health report[/red]")
+            show(asyncio.run(run_all()))
         except Exception as e:
-            console.print(f"[red]Error during health check: {e}[/red]")
+            console.print(f"[red]Error: {e}[/red]")
 
 
 @remote.command()

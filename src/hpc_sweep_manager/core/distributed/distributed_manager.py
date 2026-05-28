@@ -281,7 +281,6 @@ class DistributedJobManager:
 
         successful_sources = []
         failed_sources = []
-        sync_failed_sources = []
 
         for i, result in enumerate(results):
             source = self.sources[i]
@@ -292,33 +291,8 @@ class DistributedJobManager:
                 logger.debug(f"✓ Setup successful for {source.name}")
                 successful_sources.append(source.name)
             else:
-                logger.error(f"Setup failed for {source.name} (likely sync enforcement failure)")
-                # Check if this was a sync failure by examining the source type
-                if hasattr(source, "remote_manager"):
-                    sync_failed_sources.append(source.name)
-                else:
-                    failed_sources.append(source.name)
-
-        # For distributed execution, we need ALL sources to be properly synced
-        # We cannot proceed if any remote source failed sync verification
-        if sync_failed_sources:
-            logger.error("🚨 CRITICAL: Distributed execution cannot proceed!")
-            logger.error(f"   Project sync enforcement failed for: {sync_failed_sources}")
-            logger.error(
-                "   Distributed sweeps require identical configs across ALL compute sources"
-            )
-            logger.error("   This prevents inconsistent results and ensures reproducibility")
-            logger.error("")
-            logger.error("📋 TO FIX THIS:")
-            logger.error("   1. Review the sync differences shown above")
-            logger.error("   2. Confirm that local changes should take priority")
-            logger.error("   3. Re-run the command and accept the sync operation when prompted")
-            logger.error("   4. Only hsm_config.yaml is allowed to differ between sources")
-
-            # Clear all sources since we cannot proceed
-            self.sources = []
-            self.source_by_name = {}
-            return False
+                logger.error(f"Setup failed for {source.name}")
+                failed_sources.append(source.name)
 
         if not successful_sources:
             logger.error("No compute sources successfully set up")
@@ -1646,91 +1620,13 @@ class DistributedJobManager:
             logger.error(f"Error collecting local scripts and logs: {e}")
 
     async def _collect_remote_scripts_and_logs(self, source, scripts_dir: Path, logs_dir: Path):
-        """Collect scripts and logs from remote compute source."""
-        try:
-            from ..remote.ssh_compute_source import SSHComputeSource
+        """Collect scripts and logs from an SSH compute source — no-op for push-SSH.
 
-            if not isinstance(source, SSHComputeSource) or not source.remote_manager:
-                logger.debug(f"Source {source.name} is not an SSH source or has no remote manager")
-                return
-
-            # Get remote manager to access connection details
-            remote_manager = source.remote_manager
-            remote_config = source.remote_config
-
-            # Only collect if remote environment is set up
-            if not remote_manager.remote_sweep_dir:
-                logger.debug(
-                    f"No remote sweep directory for {source.name}, skipping script/log collection"
-                )
-                return
-
-            # Use rsync to collect scripts and logs from remote
-            import subprocess
-
-            # Collect scripts
-            remote_scripts_dir = f"{remote_manager.remote_sweep_dir}/scripts"
-            try:
-                rsync_scripts_cmd = (
-                    f"rsync -avz --compress-level=6 --ignore-missing-args "
-                    f"{remote_config.host}:{remote_scripts_dir}/ "
-                    f"{scripts_dir}/"
-                )
-
-                result = subprocess.run(
-                    rsync_scripts_cmd, shell=True, capture_output=True, text=True
-                )
-
-                if result.returncode == 0:
-                    logger.debug(f"Successfully collected scripts from {source.name}")
-
-                    # Rename collected scripts to include source name
-                    for script_file in scripts_dir.glob("*.sh"):
-                        if not script_file.name.startswith(f"{source.name}_"):
-                            new_name = f"{source.name}_{script_file.name}"
-                            new_path = scripts_dir / new_name
-                            if not new_path.exists():
-                                script_file.rename(new_path)
-                                logger.debug(f"Renamed script: {script_file.name} -> {new_name}")
-                else:
-                    logger.debug(
-                        f"No scripts to collect from {source.name} (rsync exit {result.returncode})"
-                    )
-
-            except Exception as e:
-                logger.debug(f"Error collecting scripts from {source.name}: {e}")
-
-            # Collect logs
-            remote_logs_dir = f"{remote_manager.remote_sweep_dir}/logs"
-            try:
-                rsync_logs_cmd = (
-                    f"rsync -avz --compress-level=6 --ignore-missing-args "
-                    f"{remote_config.host}:{remote_logs_dir}/ "
-                    f"{logs_dir}/"
-                )
-
-                result = subprocess.run(rsync_logs_cmd, shell=True, capture_output=True, text=True)
-
-                if result.returncode == 0:
-                    logger.debug(f"Successfully collected logs from {source.name}")
-
-                    # Rename collected logs to include source name
-                    for log_file in logs_dir.glob("*"):
-                        if log_file.is_file() and not log_file.name.startswith(f"{source.name}_"):
-                            # Check file extensions we want to rename
-                            if log_file.suffix in [".log", ".err", ".out"]:
-                                new_name = f"{source.name}_{log_file.name}"
-                                new_path = logs_dir / new_name
-                                if not new_path.exists():
-                                    log_file.rename(new_path)
-                                    logger.debug(f"Renamed log: {log_file.name} -> {new_name}")
-                else:
-                    logger.debug(
-                        f"No logs to collect from {source.name} (rsync exit {result.returncode})"
-                    )
-
-            except Exception as e:
-                logger.debug(f"Error collecting logs from {source.name}: {e}")
-
-        except Exception as e:
-            logger.error(f"Error collecting remote scripts and logs from {source.name}: {e}")
+        The push-model :class:`SSHComputeSource` already rsyncs tasks/ back via
+        ``collect_results()``. Wrapper scripts + per-task logs live under
+        ``{remote_sweep_dir}/scripts/`` and ``…/logs/`` on the remote and are
+        left there for debugging on failure (and cleaned by
+        ``hsm remote clean`` or auto-cleanup on success). Mirroring them locally
+        is a future enhancement; this method is a deliberate no-op.
+        """
+        return

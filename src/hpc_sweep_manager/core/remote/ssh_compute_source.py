@@ -54,11 +54,6 @@ class SSHComputeSource(ComputeSource):
     rsync'd mirror under ``remote_root``.
     """
 
-    # Sentinel for legacy callsites that still `isinstance + .remote_manager`.
-    # Keeping it as a class attribute means `not source.remote_manager`
-    # short-circuits without AttributeError on the dead paths.
-    remote_manager = None
-
     def __init__(
         self,
         name: str,
@@ -125,47 +120,6 @@ class SSHComputeSource(ComputeSource):
         self._monitors: Dict[str, asyncio.Task] = {}
         self._job_counter: int = 0
         self._counter_lock: Optional[asyncio.Lock] = None
-
-    # ------------------------------------------------- transitional adapter
-    @classmethod
-    def from_remote_config(
-        cls,
-        name: str,
-        remote_config: Any,
-        *,
-        project_dir: str = ".",
-        script_path: str = "",
-        conda_env: Optional[str] = None,
-        default_spec: Optional[ResourceSpec] = None,
-        remote_root: str = "~/.hsm/runs",
-        rsync_excludes: Optional[Sequence[str]] = None,
-        keep_remote_on_success: bool = False,
-        gpus: Union[None, int, Sequence[int]] = None,
-    ) -> "SSHComputeSource":
-        """Build a push source from the legacy ``RemoteConfig`` shape.
-
-        Used by callsites that still go through ``discover_remote_config``
-        until B2-part-2 rewires them. Host / ssh creds / parallel_jobs come
-        from the (discovered) ``RemoteConfig``; ``project_dir`` and
-        ``script_path`` are LOCAL — discovery does not influence what gets
-        pushed.
-        """
-        return cls(
-            name=name,
-            host=remote_config.host,
-            ssh_key=remote_config.ssh_key,
-            ssh_port=remote_config.ssh_port,
-            python_path=remote_config.python_interpreter,
-            max_parallel_jobs=remote_config.max_parallel_jobs or 1,
-            conda_env=conda_env,
-            project_dir=project_dir,
-            script_path=script_path,
-            default_spec=default_spec,
-            remote_root=remote_root,
-            rsync_excludes=rsync_excludes,
-            keep_remote_on_success=keep_remote_on_success,
-            gpus=gpus,
-        )
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:

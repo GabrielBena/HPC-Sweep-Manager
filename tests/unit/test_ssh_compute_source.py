@@ -190,12 +190,6 @@ class TestConstruction:
         src = _make_src(tmp_path, host="actual-host.example.com")
         assert src.host == "actual-host.example.com"
 
-    def test_remote_manager_sentinel(self, tmp_path):
-        # Legacy distributed_manager.py paths read `source.remote_manager`;
-        # the sentinel keeps them short-circuiting cleanly.
-        src = _make_src(tmp_path)
-        assert src.remote_manager is None
-
     def test_minimum_parallel_jobs_is_one(self, tmp_path):
         src = _make_src(tmp_path, max_parallel_jobs=0)
         assert src.max_parallel_jobs == 1
@@ -203,41 +197,6 @@ class TestConstruction:
     def test_remote_root_trailing_slash_stripped(self, tmp_path):
         src = _make_src(tmp_path, remote_root="~/.hsm/runs/")
         assert src.remote_root == "~/.hsm/runs"
-
-
-class TestFromRemoteConfig:
-    """Bridge from the legacy RemoteConfig shape (used by distributed _build_ssh_children)."""
-
-    def test_pulls_ssh_fields(self, tmp_path):
-        class RC:
-            host = "h.example.com"
-            ssh_key = "~/.ssh/id_ed25519"
-            ssh_port = 2222
-            python_interpreter = "/opt/py/bin/python"
-            max_parallel_jobs = 8
-
-        src = SSHComputeSource.from_remote_config(
-            name="alpha",
-            remote_config=RC(),
-            project_dir=str(tmp_path),
-            script_path="train.py",
-        )
-        assert src.host == "h.example.com"
-        assert src.ssh_key == "~/.ssh/id_ed25519"
-        assert src.ssh_port == 2222
-        assert src.python_path == "/opt/py/bin/python"
-        assert src.max_parallel_jobs == 8
-
-    def test_max_parallel_jobs_defaults_to_one(self, tmp_path):
-        class RC:
-            host = "h"
-            ssh_key = None
-            ssh_port = None
-            python_interpreter = None
-            max_parallel_jobs = None
-
-        src = SSHComputeSource.from_remote_config(name="alpha", remote_config=RC())
-        assert src.max_parallel_jobs == 1
 
 
 # ------------------------------------------------------------------------ setup

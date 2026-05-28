@@ -179,19 +179,10 @@ class TestBuildSshChildren:
 
     pytestmark = pytest.mark.asyncio
 
-    async def test_builds_push_source_from_local_config(self, tmp_path, monkeypatch):
-        # Sanity guard: if anything tries to call discover_remote_config now,
-        # this raises and the test fails loudly.
-        def _no_discovery(*args, **kwargs):
-            raise AssertionError(
-                "_build_ssh_children must not invoke RemoteDiscovery"
-            )
-
-        monkeypatch.setattr(
-            "hpc_sweep_manager.core.remote.discovery.RemoteDiscovery.discover_remote_config",
-            _no_discovery,
-        )
-
+    async def test_builds_push_source_from_local_config(self, tmp_path):
+        # Implicit guard: RemoteDiscovery no longer exists in discovery.py
+        # (removed in the Pass B cleanup). If _build_ssh_children ever tried
+        # to import it again the test would fail at import time.
         from hpc_sweep_manager.core.distributed.distributed_compute_source import (
             _build_ssh_children,
         )

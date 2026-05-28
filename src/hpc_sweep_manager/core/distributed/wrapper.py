@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from ..common.path_detector import PathDetector
 from ..local.local_compute_source import LocalComputeSource
-from ..remote.discovery import RemoteDiscovery
-from ..remote.ssh_compute_source import SSHComputeSource
+from ..remote.ssh_compute_source import build_ssh_source
 from .distributed_manager import (
     DistributedJobManager,
     DistributedSweepConfig,
@@ -191,35 +190,30 @@ class DistributedSweepWrapper:
             # Don't raise - this isn't critical if we have remote sources
 
     async def _add_ssh_compute_sources(self, remotes: Dict[str, Any]):
-        """Add SSH remote compute sources."""
-        discovery = RemoteDiscovery(self.hsm_config.config_data)
+        """Add SSH remote compute sources via the push-model factory."""
+        detector = PathDetector()
+        project_dir = self.hsm_config.get_project_root() or str(Path.cwd())
+        script_path = (
+            self.hsm_config.get_default_script_path() or detector.detect_train_script()
+        )
+        distributed_cfg = self.hsm_config.config_data.get("distributed", {})
 
         successful_remotes = []
         failed_remotes = []
 
         for remote_name, remote_config in remotes.items():
             try:
-                # Prepare remote info for discovery
-                remote_info = remote_config.copy()
-                remote_info["name"] = remote_name
-
-                # Discover remote configuration
-                discovered_config = await discovery.discover_remote_config(remote_info)
-
-                if discovered_config:
-                    ssh_source = SSHComputeSource.from_remote_config(
-                        name=remote_name, remote_config=discovered_config
-                    )
-
-                    self.distributed_manager.add_compute_source(ssh_source)
-                    successful_remotes.append(
-                        f"{remote_name} ({discovered_config.max_parallel_jobs} jobs)"
-                    )
-
-                else:
-                    self.logger.warning(f"Failed to discover configuration for {remote_name}")
-                    failed_remotes.append(remote_name)
-
+                ssh_source = build_ssh_source(
+                    name=remote_name,
+                    remote_cfg=remote_config,
+                    distributed_cfg=distributed_cfg,
+                    project_dir=project_dir,
+                    script_path=script_path,
+                )
+                self.distributed_manager.add_compute_source(ssh_source)
+                successful_remotes.append(
+                    f"{remote_name} ({ssh_source.max_parallel_jobs} jobs)"
+                )
             except Exception as e:
                 self.logger.warning(f"Failed to add SSH source {remote_name}: {e}")
                 failed_remotes.append(remote_name)
