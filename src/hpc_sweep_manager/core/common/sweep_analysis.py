@@ -26,7 +26,6 @@ import yaml
 
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
-from .sweep_tracker import SweepTaskTracker
 
 logger = logging.getLogger(__name__)
 

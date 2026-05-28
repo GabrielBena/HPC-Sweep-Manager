@@ -14,7 +14,6 @@ hsm setup    init configure                       # bootstrap
 hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
 hsm queue    mine | position | gpus | reservations
-hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
 Global options (apply to every command):
@@ -124,19 +123,6 @@ All subcommands degrade gracefully on machines without `squeue` on PATH
 (prints a one-line "no scheduler detected" message). PBS isn't covered
 yet. See [../user_guide/QUEUE.md](../user_guide/QUEUE.md) for output
 samples and the underlying API.
-
-## `hsm analyze`
-
-Codebase analysis tooling — for HSM developers, not sweep users.
-
-| Subcommand | What it does |
-|---|---|
-| `hsm analyze enable-tracking` | Turn on usage tracking. |
-| `hsm analyze report` | Generate a usage-analysis report. |
-| `hsm analyze dead-code` | Detect unused code. |
-| `hsm analyze complexity` | Code complexity report. |
-| `hsm analyze dependencies` | Module-dependency graph. |
-| `hsm analyze coverage-gaps` | Identify test coverage gaps. |
 
 ## Environment variables
 

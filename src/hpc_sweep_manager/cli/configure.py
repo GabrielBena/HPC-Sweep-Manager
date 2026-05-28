@@ -482,8 +482,8 @@ def _show_configuration_summary(sweep_config: Dict[str, Any], output_file: Path,
     """Show configuration summary and next steps."""
 
     # Count total combinations
-    from ..core.config_parser import SweepConfig
-    from ..core.param_generator import ParameterGenerator
+    from ..core.common.config import SweepConfig
+    from ..core.common.param_generator import ParameterGenerator
 
     try:
         config = SweepConfig.from_dict(sweep_config)
