@@ -582,6 +582,13 @@ def build_ssh_source(
     defaults (``remote_root``, ``conda_env``, ``rsync_excludes``,
     ``keep_remote_on_success``).
 
+    ``remote_cfg["spec"]`` (optional) holds a typed default :class:`ResourceSpec`
+    for this remote (``walltime``/``cpus_per_task``/``mem``/``gpus``/
+    ``pre_script``/``modules``/...). It's the no-bleed home for per-remote
+    defaults — the global ``slurm:`` / ``local:`` blocks are deliberately
+    *not* read for remote/distributed modes. CLI flags (``--walltime``,
+    ``--resources``) still override per-remote fields.
+
     Used by both single-remote (``--mode remote``) and distributed (the
     multi-remote child builder).
     """
@@ -592,6 +599,25 @@ def build_ssh_source(
     ssh_key = remote_cfg.get("ssh_key")
     ssh_port = remote_cfg.get("ssh_port")
     max_parallel_jobs = remote_cfg.get("max_parallel_jobs") or 1
+
+    # Per-remote `spec:` sub-block — the no-bleed home for this remote's
+    # default ResourceSpec fields (walltime / cpus / mem / gpus / pre_script /
+    # modules / ...). Layered UNDER the caller-supplied `default_spec` so CLI
+    # flags (--walltime, --resources) still override.
+    remote_spec_dict = remote_cfg.get("spec")
+    if isinstance(remote_spec_dict, dict) and remote_spec_dict:
+        try:
+            per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
+        except (TypeError, ValueError) as e:
+            logger.warning(
+                f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring."
+            )
+            per_remote_spec = None
+    else:
+        per_remote_spec = None
+
+    if per_remote_spec is not None:
+        default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
     conda_env = (
         conda_env_override

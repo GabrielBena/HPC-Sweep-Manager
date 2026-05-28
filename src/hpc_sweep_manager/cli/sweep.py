@@ -20,6 +20,7 @@ from ..core.common.sweep_orchestrator import (
 )
 from ..core.common.sweep_orchestrator import (
     build_compute_source,
+    resolve_auto_mode,
     run_sweep_async,
     spec_from_cli,
 )
@@ -152,12 +153,16 @@ def _run_sweep_via_orchestrator(
     from ..core.common.utils import create_sweep_id
     from ..core.remote.ssh_compute_source import parse_gpus_arg
 
-    scheduler_hint = "slurm" if mode in ("array", "individual") else None
+    # Resolve auto BEFORE asking spec_from_cli which config block to read —
+    # otherwise mode='auto' would silently read the slurm: block on every machine.
+    resolved_mode_for_spec = resolve_auto_mode(mode)
+    scheduler_hint = "slurm" if resolved_mode_for_spec in ("array", "individual") else None
     spec = spec_from_cli(
         walltime=walltime,
         resources=resources,
         scheduler=scheduler_hint,
         hsm_config=hsm_config,
+        mode=resolved_mode_for_spec,
     )
     try:
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None

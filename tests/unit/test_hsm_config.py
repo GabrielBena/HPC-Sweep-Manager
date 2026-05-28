@@ -92,6 +92,61 @@ class TestSlurmSpec:
         assert result is None
 
 
+# ----------------------------------------------------------------- get_local_spec
+
+
+class TestLocalSpec:
+    def test_no_block_returns_none(self):
+        assert HSMConfig({}).get_local_spec() is None
+
+    def test_empty_block_returns_none(self):
+        assert HSMConfig({"local": {}}).get_local_spec() is None
+
+    def test_non_dict_block_returns_none(self):
+        assert HSMConfig({"local": "oops"}).get_local_spec() is None
+        assert HSMConfig({"local": ["a", "b"]}).get_local_spec() is None
+
+    def test_allowed_fields_round_trip(self):
+        spec = HSMConfig(
+            {
+                "local": {
+                    "walltime": "02:00:00",
+                    "cpus_per_task": 4,
+                    "mem": "16gb",
+                    "gpus": 1,
+                    "pre_script": ["conda activate my-env"],
+                }
+            }
+        ).get_local_spec()
+        assert spec is not None
+        assert spec.walltime == "02:00:00"
+        assert spec.cpus_per_task == 4
+        assert spec.gpus == 1
+        assert spec.pre_script == ("conda activate my-env",)
+
+    def test_slurm_only_fields_dropped_with_warning(self, caplog):
+        # Slurm reach fields should NOT silently leak into local mode.
+        with caplog.at_level("WARNING"):
+            spec = HSMConfig(
+                {
+                    "local": {
+                        "gpus": 1,
+                        "gpu_type": "h100",     # should be ignored + warn
+                        "modules": ["h100"],     # should be ignored + warn
+                        "qos": "normal",         # should be ignored + warn
+                        "account": "my-project", # should be ignored + warn
+                    }
+                }
+            ).get_local_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+        assert spec.gpu_type is None
+        assert spec.modules == ()
+        assert spec.qos is None
+        assert spec.account is None
+        assert any("Slurm-only" in r.message for r in caplog.records)
+
+
 # ----------------------------------------------------------- get_slurm_qos_whitelist
 
 

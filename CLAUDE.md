@@ -145,8 +145,24 @@ it's trying to reintroduce them, push back.
 
 5. **Two-level GPU semantics:** `--gpus` (CLI) = which GPUs are *visible*
    on the box (allowlist). `spec.gpus` (from `--resources --gpus=N`
-   slurm-style) = how many GPUs *per task*. Both must be set for GPU mode;
+   slurm-style, OR from the typed `local:` / `slurm:` / per-remote `spec:`
+   blocks) = how many GPUs *per task*. Both must be set for GPU mode;
    the slot queue falls back to CPU slots if either is missing.
+
+5b. **Mode-scoped config blocks — no cross-mode bleed.** As of the post-
+   sync-deletion refactor, `spec_from_cli(mode=...)` reads:
+   - `local:` block → only for `--mode local`
+   - `slurm:` block → only for `--mode array|individual`
+   - **neither** for `--mode remote` / `--mode distributed` — per-remote
+     spec lives at `distributed.remotes.<alias>.spec` and is layered in
+     `build_ssh_source`.
+
+   Before this refactor, every backend silently read the `slurm:` block
+   for its default ResourceSpec. Do NOT restore that bleed; the user-
+   surprise factor was high (a `slurm: { gpus: 4 }` block secretly
+   changed local-mode behavior). `mode='auto'` is resolved by
+   `resolve_auto_mode()` *before* spec lookup so the block matches the
+   backend that will actually run.
 
 6. **S3IT-style Slurm needs BOTH `gpu_type` AND `modules`.** Setting
    `--gpus=1` alone produces `#SBATCH --gpus=1` which does NOT allocate a

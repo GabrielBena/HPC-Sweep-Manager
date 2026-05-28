@@ -51,29 +51,60 @@ class SweepResult:
     source_type: str = ""
 
 
+def resolve_auto_mode(mode: str) -> str:
+    """Resolve ``mode='auto'`` to ``'array'`` (if ``sbatch`` on PATH) or ``'local'``.
+
+    Pure helper so the CLI can resolve mode *before* asking :func:`spec_from_cli`
+    which config block to read. Non-``auto`` modes pass through unchanged.
+    """
+    if mode != "auto":
+        return mode
+    resolved = "array" if _slurm_on_path() else "local"
+    logger.info(f"Auto-detected execution mode: {resolved}")
+    return resolved
+
+
 def spec_from_cli(
     walltime: str | None,
     resources: str | None,
     scheduler: str | None = None,
     hsm_config: Any = None,
+    mode: str | None = None,
 ) -> ResourceSpec:
-    """Build the effective :class:`ResourceSpec` from CLI flags + config.
+    """Build the effective :class:`ResourceSpec` from CLI flags + the *mode-matching* config block.
 
     Precedence (highest wins):
 
     1. ``--walltime`` CLI flag.
     2. Fields parsed out of ``--resources`` (legacy opaque string).
-    3. ``slurm:`` block in ``.hsm/config.yaml`` (typed; reaches ``gpu_type``,
-       ``modules``, ``pre_script``, ``account``, ``extra_directives`` —
-       fields the opaque CLI string can't express).
-    4. Hardcoded defaults (i.e. all-``None`` ``ResourceSpec``).
+    3. The config block matching ``mode``:
+
+       - ``mode='local'`` → ``local:`` block (``walltime``/``cpus_per_task``/``mem``/``gpus``/``pre_script`` only).
+       - ``mode='array'`` or ``'individual'`` → ``slurm:`` block (full ResourceSpec including ``gpu_type``/``modules``/``qos``/``account``).
+       - ``mode='remote'`` or ``'distributed'`` → *neither*. Per-remote spec
+         lives under ``distributed.remotes.<alias>.spec`` and is layered in
+         :func:`build_ssh_source`. CLI flags still apply on top.
+       - ``mode is None`` (legacy callers) → behaves as before this refactor
+         (reads ``slurm:`` block). Avoid in new code.
+
+    4. Hardcoded defaults (all-``None`` ``ResourceSpec``).
+
+    Pass the *resolved* mode (call :func:`resolve_auto_mode` first if you have
+    ``'auto'``) so the block lookup matches the backend that will actually run.
     """
-    # Start from the typed slurm: block, if present.
     base = ResourceSpec()
     if hsm_config is not None:
-        slurm_spec = hsm_config.get_slurm_spec()
-        if slurm_spec is not None:
-            base = slurm_spec
+        if mode == "local":
+            block_spec = hsm_config.get_local_spec()
+        elif mode in ("array", "individual"):
+            block_spec = hsm_config.get_slurm_spec()
+        elif mode in ("remote", "distributed"):
+            block_spec = None  # per-remote spec layered in build_ssh_source
+        else:
+            # Legacy/unknown: preserve historical behavior (read slurm:).
+            block_spec = hsm_config.get_slurm_spec()
+        if block_spec is not None:
+            base = block_spec
 
     # Layer the legacy --resources string on top.
     spec = base.merge(spec_from_legacy_resources(resources, scheduler)) if resources else base
@@ -132,9 +163,7 @@ def build_compute_source(
             f"expected one of {sorted(SUPPORTED_MODES)}"
         )
 
-    if mode == "auto":
-        mode = "array" if _slurm_on_path() else "local"
-        logger.info(f"Auto-detected execution mode: {mode}")
+    mode = resolve_auto_mode(mode)
 
     if mode == "distributed":
         from ..distributed.distributed_compute_source import DistributedComputeSource

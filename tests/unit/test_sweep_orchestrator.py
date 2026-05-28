@@ -124,6 +124,86 @@ class TestSpecFromCliSlurmConfigBlock:
         assert spec_from_cli(walltime=None, resources=None, hsm_config=cfg) == ResourceSpec()
 
 
+class TestSpecFromCliModeAware:
+    """No-bleed semantics: each mode reads only its own config block.
+
+    Regression guard for the bug where every backend silently read the
+    ``slurm:`` block as its default ResourceSpec, so e.g. ``slurm: { gpus: 4 }``
+    secretly changed ``--mode local`` behavior. See CLAUDE.md gotcha #5b.
+    """
+
+    def _both_blocks_cfg(self):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        # local: says gpus=1; slurm: says gpus=4. The mode picks the winner.
+        return HSMConfig(
+            {
+                "local": {"walltime": "02:00:00", "gpus": 1},
+                "slurm": {"walltime": "08:00:00", "gpus": 4, "gpu_type": "h100"},
+            }
+        )
+
+    def test_local_mode_reads_only_local_block(self):
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="local"
+        )
+        assert spec.gpus == 1            # from local: block
+        assert spec.walltime == "02:00:00"
+        assert spec.gpu_type is None     # slurm: block must not leak
+
+    def test_array_mode_reads_only_slurm_block(self):
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="array"
+        )
+        assert spec.gpus == 4            # from slurm: block
+        assert spec.walltime == "08:00:00"
+        assert spec.gpu_type == "h100"
+
+    def test_individual_mode_reads_only_slurm_block(self):
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="individual"
+        )
+        assert spec.gpus == 4
+        assert spec.gpu_type == "h100"
+
+    def test_remote_mode_reads_neither_block(self):
+        # Per-remote spec lives at distributed.remotes.<alias>.spec, not in
+        # the global blocks — for --mode remote / --mode distributed both
+        # local: and slurm: must be ignored.
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="remote"
+        )
+        assert spec == ResourceSpec()
+
+    def test_distributed_mode_reads_neither_block(self):
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="distributed"
+        )
+        assert spec == ResourceSpec()
+
+    def test_cli_flags_still_layer_on_remote_mode(self):
+        # CLI overrides MUST still propagate for remote/distributed — only
+        # the global blocks are skipped.
+        spec = spec_from_cli(
+            walltime="04:00:00",
+            resources="--gpus=2",
+            scheduler="slurm",
+            hsm_config=self._both_blocks_cfg(),
+            mode="remote",
+        )
+        assert spec.walltime == "04:00:00"
+        assert spec.gpus == 2
+
+    def test_legacy_mode_none_preserves_slurm_bleed(self):
+        # Back-compat: callers that don't pass mode= keep the old behavior
+        # (slurm: block is read). This lets the pre-refactor tests pass.
+        spec = spec_from_cli(
+            walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode=None
+        )
+        assert spec.gpus == 4
+        assert spec.gpu_type == "h100"
+
+
 class TestBuildComputeSource:
     BASE_KWARGS = dict(
         python_path="python3",

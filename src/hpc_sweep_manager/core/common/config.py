@@ -274,6 +274,46 @@ class HSMConfig:
             logger.warning(f"Invalid `slurm:` block in HSM config: {e}")
             return None
 
+    def get_local_spec(self):
+        """Read the typed ``local:`` block as a :class:`ResourceSpec`, or ``None``.
+
+        Applies *only* to ``--mode local`` — never to Slurm or remote/distributed.
+        Restricted to fields that make sense outside a batch scheduler:
+        ``walltime``, ``cpus_per_task``, ``mem``, ``gpus``, ``pre_script``.
+        Slurm-only fields (``gpu_type``, ``modules``, ``qos``, ``account``,
+        ``extra_directives``) belong in the ``slurm:`` block; if they appear here
+        they are silently dropped with a warning.
+
+        Example::
+
+            local:
+              walltime: "04:00:00"
+              cpus_per_task: 4
+              mem: "16gb"
+              gpus: 1               # per-task GPU count; LocalComputeSource partitions
+                                    # nvidia-smi -L into slots of this size
+              pre_script:
+                - "conda activate my-env"
+        """
+        from .resource_spec import ResourceSpec
+
+        block = self.config_data.get("local")
+        if not isinstance(block, dict) or not block:
+            return None
+        _LOCAL_ALLOWED = {"walltime", "cpus_per_task", "mem", "gpus", "pre_script"}
+        rejected = set(block) - _LOCAL_ALLOWED
+        if rejected:
+            logger.warning(
+                f"`local:` block has Slurm-only or unknown fields {sorted(rejected)!r}; "
+                f"move them to the `slurm:` block. Ignoring."
+            )
+        filtered = {k: v for k, v in block.items() if k in _LOCAL_ALLOWED}
+        try:
+            return ResourceSpec.from_dict(filtered)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Invalid `local:` block in HSM config: {e}")
+            return None
+
     def get_slurm_qos_whitelist(self) -> Optional[frozenset]:
         """Read ``slurm.qos_whitelist`` as a frozenset, or ``None`` if unset.
 

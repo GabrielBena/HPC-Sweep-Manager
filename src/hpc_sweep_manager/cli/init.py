@@ -2,8 +2,10 @@
 
 from datetime import datetime
 import logging
+import re
+import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import click
 from rich.console import Console
@@ -16,12 +18,77 @@ from ..core.common.path_detector import PathDetector
 from .common import common_options
 
 
-# Appended verbatim after `yaml.dump` writes the live `.hsm/config.yaml`.
-# Surfaces the typed reach fields (slurm: + distributed:) so users can
-# discover them without grepping the docs — see CLAUDE.md gotcha #6.
-_TYPED_CONFIG_SCAFFOLD = """
-# --- Optional: typed Slurm reach fields (gpu_type, modules, qos, account, ...) ---
-# Uncomment to use. See docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block
+def _detect_local_gpus() -> List[int]:
+    """Return GPU indices reported by ``nvidia-smi -L``, or [] if unavailable.
+
+    Sync wrapper used at init time to seed the ``local:`` block — keeps init
+    free of asyncio bootstrap. See :func:`core.local.local_compute_source._detect_gpus`
+    for the runtime async sibling.
+    """
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=5
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [int(m.group(1)) for m in re.finditer(r"^GPU\s+(\d+):", proc.stdout, re.M)]
+
+
+def _render_typed_config_scaffold(gpu_count: int) -> str:
+    """Render the appended-to-config.yaml scaffold.
+
+    Three independent, mode-scoped blocks (no field bleed between them):
+
+    - ``local:`` — read only by ``--mode local``. If GPUs are detected on the
+      init machine, the block is emitted **active** with ``gpus: 1`` so
+      ``hsm sweep run --mode local`` uses them immediately (one task per GPU).
+      Toggle off by editing ``gpus: 0`` or commenting the block. With no GPUs
+      detected, the whole block stays commented as a discoverable scaffold.
+    - ``slurm:`` — read only by ``--mode array|individual``.
+    - ``distributed:`` — populated by ``hsm remote add``. Per-remote ``spec:``
+      sub-block is the no-bleed home for that remote's ResourceSpec defaults.
+    """
+    if gpu_count > 0:
+        local_block = (
+            "# Auto-detected {n} GPU(s) on this box via `nvidia-smi -L` at init time.\n"
+            "# To toggle off: set `gpus: 0` or comment the block out.\n"
+            "# Other fields (walltime/cpus_per_task/mem/pre_script) are optional — see\n"
+            "# docs/user_guide/HPC_EXECUTION.md for the full schema.\n"
+            "local:\n"
+            "  gpus: 1                  # per-task GPU count; LocalComputeSource partitions\n"
+            "                           #   the {n} detected GPU(s) into slots of this size\n"
+            "# Optional reach fields (commented — uncomment to use):\n"
+            "#   walltime: \"04:00:00\"\n"
+            "#   cpus_per_task: 4\n"
+            "#   mem: \"16gb\"\n"
+            "#   pre_script:\n"
+            "#     - \"conda activate my-env\"\n"
+        ).format(n=gpu_count)
+    else:
+        local_block = (
+            "# No GPUs detected at init time. Uncomment + edit to use --mode local\n"
+            "# with explicit per-task resources.\n"
+            "# local:\n"
+            "#   gpus: 1                # per-task GPU count (needs nvidia-smi on this box)\n"
+            "#   walltime: \"04:00:00\"\n"
+            "#   cpus_per_task: 4\n"
+            "#   mem: \"16gb\"\n"
+            "#   pre_script:\n"
+            "#     - \"conda activate my-env\"\n"
+        )
+
+    return f"""
+# --- Defaults for `--mode local` (LocalComputeSource) -------------------------
+# Read ONLY when --mode is local. Slurm-only fields (gpu_type / modules /
+# qos / account / extra_directives) belong in `slurm:` below, not here.
+{local_block}
+
+# --- Optional: defaults for `--mode array|individual` (Slurm) -----------------
+# Read ONLY when --mode is array or individual. Reaches fields the opaque
+# --resources CLI string can't express (gpu_type / modules / qos / account).
+# See docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block
 # slurm:
 #   walltime: "01:00:00"
 #   cpus_per_task: 4
@@ -34,12 +101,24 @@ _TYPED_CONFIG_SCAFFOLD = """
 #   pre_script:
 #     - "conda activate my-env"
 
-# --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ---
+# --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ------------
+# Per-remote `spec:` sub-block is the no-bleed home for that remote's
+# default ResourceSpec — the `local:` / `slurm:` blocks above are deliberately
+# NOT read for --mode remote or --mode distributed.
 # distributed:
 #   enabled: false
 #   strategy: round_robin
 #   sync_method: rsync
-#   remotes: {}
+#   remotes:
+#     my-box:                      # ~/.ssh/config alias (host defaults to alias)
+#       max_parallel_jobs: 4
+#       gpus: all                  # CLI --gpus default for this remote
+#       conda_env: my-env          # remote conda env to activate
+#       spec:                      # default ResourceSpec for this remote
+#         walltime: "04:00:00"
+#         cpus_per_task: 4
+#         mem: "16gb"
+#         gpus: 1                  # per-task GPU count
 """
 
 
@@ -343,13 +422,18 @@ def _create_sweep_infrastructure(
                 "entity": config.get("wandb_entity", ""),
             }
 
+        gpu_indices = _detect_local_gpus()
         with open(hsm_config_path, "w") as f:
             yaml.dump(hsm_config, f, default_flow_style=False, indent=2)
-            f.write(_TYPED_CONFIG_SCAFFOLD)
+            f.write(_render_typed_config_scaffold(len(gpu_indices)))
 
         console.print(
             f"  ✅ Created HSM configuration file: {hsm_config_path.relative_to(project_path)}"
         )
+        if gpu_indices:
+            console.print(
+                f"  🎯 Detected {len(gpu_indices)} GPU(s) — `local:` scaffold pre-seeded with `gpus: 1`"
+            )
 
         # Create example sweep configuration
         example_sweep_path = sweeps_dir / "example_sweep.yaml"

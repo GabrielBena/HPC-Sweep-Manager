@@ -75,6 +75,22 @@ select=1:ncpus=4:mem=16gb:ngpus=1
 Unknown tokens land in `ResourceSpec.extra_directives` and are emitted
 verbatim into the rendered submit script.
 
+## Mode-scoped config blocks — no cross-mode bleed
+
+`.hsm/config.yaml` accepts three independent typed blocks for resource
+defaults. Each is read **only** when its matching `--mode` runs; there
+is no cross-pollination:
+
+| Block | Read by | Use for |
+|---|---|---|
+| `local:` | `--mode local` | local GPU/CPU/walltime defaults (no Slurm-only fields) |
+| `slurm:` | `--mode array` / `--mode individual` | full Slurm spec including `gpu_type` / `modules` / `qos` / `account` |
+| `distributed.remotes.<alias>.spec:` | `--remote <alias>` / `--mode distributed` | per-remote defaults; `local:` and `slurm:` are NOT read for these modes |
+
+This means a `slurm:` block with `gpus: 4` will **not** apply to
+`--mode local` (or vice versa). If you want the same defaults across
+modes, repeat the fields in each block — it's noisier but unambiguous.
+
 ## The typed `slurm:` block — reach fields `--resources` can't
 
 The CLI's opaque `--resources` string covers the common fields above
@@ -118,6 +134,63 @@ hsm sweep run --mode array --config sweeps/sweep.yaml
 **Precedence** (highest wins): CLI `--walltime` > CLI `--resources`
 parsed fields > `slurm:` block > defaults. So you can set base
 resources in the config and override `--walltime` per-run from the CLI.
+
+## The typed `local:` block — defaults for `--mode local`
+
+Mirror of the `slurm:` block above, but for `--mode local`. Restricted
+to fields that make sense outside a batch scheduler:
+
+```yaml
+# .hsm/config.yaml
+local:
+  walltime: "04:00:00"
+  cpus_per_task: 4
+  mem: "16gb"
+  gpus: 1                  # per-task GPU count; LocalComputeSource probes
+                           # nvidia-smi -L and partitions GPUs into slots of this size
+  pre_script:
+    - "conda activate my-env"
+```
+
+Slurm-only fields (`gpu_type`, `modules`, `qos`, `account`,
+`extra_directives`) are silently dropped with a warning if they appear
+here — they belong in `slurm:`.
+
+`hsm setup init` auto-detects local GPUs via `nvidia-smi -L` and pre-seeds
+this block with `gpus: 1` *active* when GPUs are found, so `hsm sweep run
+--mode local` uses them by default. Toggle off with `gpus: 0` or by
+commenting the block.
+
+**Precedence** (highest wins): CLI `--walltime` > CLI `--resources`
+parsed fields > `local:` block > defaults.
+
+## Per-remote `spec:` — defaults for `--remote` and `--mode distributed`
+
+`--mode remote` / `--mode distributed` deliberately read **neither**
+the `local:` nor the `slurm:` block — remote boxes are heterogeneous,
+so their defaults live per-remote under `distributed.remotes.<alias>`:
+
+```yaml
+# .hsm/config.yaml
+distributed:
+  enabled: true
+  remotes:
+    anahita:
+      max_parallel_jobs: 4
+      gpus: all                  # CLI --gpus default for this remote
+      conda_env: my-env
+      spec:                      # default ResourceSpec for this remote
+        walltime: "04:00:00"
+        cpus_per_task: 4
+        mem: "16gb"
+        gpus: 1                  # per-task GPU count (≠ allowlist above)
+        pre_script:
+          - "module load cuda/12"
+```
+
+**Precedence** (highest wins): CLI `--gpus`/`--walltime`/`--resources` >
+per-remote `spec:` > hardcoded defaults. `hsm remote add` writes the
+connection fields only — add `spec:` and `gpus:` by hand-editing.
 
 ### Direct Python (still supported)
 
