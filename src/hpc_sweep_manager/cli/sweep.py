@@ -1105,8 +1105,12 @@ def queue_cmd(ctx):
     output = (result.stdout or "").rstrip()
     if not output:
         console.print(f"[green]No jobs currently in the queue ({cmd[0]}).[/green]")
-        return
-    console.print(output)
+    else:
+        console.print(output)
+    console.print(
+        "[dim]Tip: `hsm queue mine` shows the same info with sweep ID linkage; "
+        "`hsm queue position` reports your spot in the cluster-wide GPU queue.[/dim]"
+    )
 
 
 @sweep_cmd.command("cancel")

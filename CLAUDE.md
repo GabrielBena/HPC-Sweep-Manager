@@ -71,6 +71,9 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
+- [`core/hpc/scheduler_queue.py`](src/hpc_sweep_manager/core/hpc/scheduler_queue.py) —
+  `SlurmQueue` (+ `QueueJob` / `Reservation` dataclasses). Read-only wrappers
+  around `squeue` / `sprio` / `scontrol`. Backs `hsm queue mine|position|gpus|reservations`.
 
 ## Do NOT reintroduce
 

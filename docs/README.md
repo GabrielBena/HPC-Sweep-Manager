@@ -9,6 +9,7 @@ The rest of the docs live here.
 - **[Getting started](user_guide/getting_started.md)** — install, `hsm setup init`, sweep config, first run. The broad tutorial.
 - **[SSH (push-model) execution](user_guide/SSH_EXECUTION.md)** — `hsm sweep run --remote <alias>` in depth: GPU pinning, conda env handling, rsync excludes, `hsm remote clean`.
 - **[HPC (Slurm / PBS) execution](user_guide/HPC_EXECUTION.md)** — `--mode array|individual|auto` recipe, the `--resources` string format, and the typed `slurm:` block in `.hsm/config.yaml` for advanced fields.
+- **[Cluster queue inspection](user_guide/QUEUE.md)** — `hsm queue mine|position|gpus|reservations`: where am I in the GPU queue, per-type depth, upcoming maintenance windows.
 
 ## Reference
 

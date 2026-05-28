@@ -91,6 +91,7 @@ the full lifecycle.
 hsm setup    init configure         # project bootstrap
 hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
+hsm queue    mine | position | gpus | reservations   # cluster queue inspection (Slurm)
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 

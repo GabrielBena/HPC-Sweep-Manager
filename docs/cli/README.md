@@ -13,6 +13,7 @@ pinning, etc.) see the [user guides](../user_guide/).
 hsm setup    init configure                       # bootstrap
 hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
+hsm queue    mine | position | gpus | reservations
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
@@ -105,6 +106,24 @@ Manage SSH remote registrations. Many of these work with a bare
 | `hsm remote remove <name>` | Unregister from config. |
 
 See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the full SSH workflow.
+
+## `hsm queue`
+
+Cluster-wide Slurm queue inspection. Read-only — wraps `squeue` /
+`sprio` / `scontrol show reservations` with richer output (including
+sweep-ID linkage for your jobs).
+
+| Subcommand | What it does |
+|---|---|
+| `hsm queue mine` | Your jobs (any state) with sweep IDs cross-referenced from `sweeps/outputs/*/submission_summary.txt`. Same scope as `hsm sweep queue` but with structure. |
+| `hsm queue position [<job_id>]` | Position of your pending GPU job(s) in the cluster-wide priority-sorted GPU queue. With a `job_id`, reports just that job; without, reports every pending GPU job of yours. |
+| `hsm queue gpus [--mine]` | Per-GPU-type queue depth: running/pending counts grouped by `H100` / `L4` / `A100` / `H200` / `<untyped>`. `--mine` adds a column with your contribution. |
+| `hsm queue reservations` | Upcoming Slurm maintenance windows. |
+
+All subcommands degrade gracefully on machines without `squeue` on PATH
+(prints a one-line "no scheduler detected" message). PBS isn't covered
+yet. See [../user_guide/QUEUE.md](../user_guide/QUEUE.md) for output
+samples and the underlying API.
 
 ## `hsm analyze`
 
