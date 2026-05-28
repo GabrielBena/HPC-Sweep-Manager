@@ -134,8 +134,8 @@ def _run_sweep_via_orchestrator(
     project_dir: str,
     combinations: list,
     dry_run: bool,
-    walltime: str,
-    resources: str,
+    walltime: Optional[str],
+    resources: Optional[str],
     group: Optional[str],
     parallel_jobs: Optional[int],
     no_progress: bool,
@@ -298,8 +298,8 @@ def run_sweep(
     dry_run: bool,
     count_only: bool,
     max_runs: Optional[int],
-    walltime: str,
-    resources: str,
+    walltime: Optional[str],
+    resources: Optional[str],
     group: Optional[str],
     parallel_jobs: Optional[int],
     no_progress: bool,
@@ -470,14 +470,9 @@ def run_cmd(
 
     hsm_config = HSMConfig.load()
 
-    if walltime is None:
-        walltime = hsm_config.get_default_walltime() if hsm_config else "23:59:59"
-
-    if resources is None:
-        resources = (
-            hsm_config.get_default_resources() if hsm_config else "select=1:ncpus=4:mem=64gb"
-        )
-
+    # Note: walltime/resources stay None if the CLI flag is omitted — the
+    # typed `local:` / `slurm:` / per-remote `spec:` blocks in .hsm/config.yaml
+    # are the canonical defaults. spec_from_cli reads them based on --mode.
     config_path = Path(config)
 
     run_sweep(

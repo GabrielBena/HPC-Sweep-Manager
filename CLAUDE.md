@@ -112,6 +112,15 @@ These were deliberately removed; resist resurrecting them.
   `SSHComputeSource` has no `.remote_manager` — that was a wrapper of the
   deleted `RemoteJobManager`. The sentinel that kept legacy code paths
   short-circuiting is also gone.
+- **`hpc:` block in `.hsm/config.yaml` + its three accessors
+  (`get_default_walltime` / `get_default_resources` / `get_hpc_system`).**
+  Deleted — `default_walltime` and `default_resources` were opaque-string
+  fallbacks the CLI applied *before* the typed `local:` / `slurm:` blocks,
+  which meant they silently overrode the typed block's `walltime` field
+  (a real bleed bug). `get_hpc_system` was dead. `max_array_size` moved
+  into the `slurm:` block where it belongs (it's slurm-specific).
+  Resource defaults now live exclusively in the typed `local:` /
+  `slurm:` / per-remote `spec:` blocks. Don't bring `hpc:` back.
 - **`hsm sync init|list|run|to|cache|clean` + the `sync/` module.**
   Deleted — SSH and distributed `ComputeSource`s already rsync results
   back via `collect_results()`, so the standalone sync tooling was

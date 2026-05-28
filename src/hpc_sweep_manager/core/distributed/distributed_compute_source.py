@@ -64,7 +64,6 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSou
         project_dir = hsm_config.get_project_root() or str(Path.cwd())
 
         local_max_jobs = distributed_cfg.get("local_max_jobs", 1)
-        local_max_jobs = min(local_max_jobs, hsm_config.get_max_array_size() or local_max_jobs)
 
         return LocalComputeSource(
             name="local",

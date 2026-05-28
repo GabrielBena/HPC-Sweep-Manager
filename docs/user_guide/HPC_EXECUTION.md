@@ -25,8 +25,9 @@ In your project directory:
 ```bash
 # 1. Initialize HSM scaffolding (one-time per project).
 hsm setup init
-# Edit .hsm/config.yaml: set hpc.default_walltime and hpc.default_resources
-# to sensible defaults for your cluster.
+# Edit .hsm/config.yaml: uncomment the typed `slurm:` block at the bottom
+# and set walltime / cpus_per_task / mem / gpus / qos / account / modules
+# for your cluster (the block reaches fields the opaque --resources string can't).
 
 # 2. Dry-run to confirm the resolved spec.
 hsm sweep run --mode array \

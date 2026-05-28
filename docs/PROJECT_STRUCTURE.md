@@ -46,16 +46,17 @@ paths:
   config_dir: configs
   output_dir: outputs
 
-hpc:
-  system: pbs
-  default_walltime: "04:00:00"
-  default_resources: "select=1:ncpus=4:mem=16gb"
-  max_array_size: 10000
-
 wandb:
   project: my-project
   entity: my-team
 ```
+
+Resource defaults live in the typed `local:` / `slurm:` /
+`distributed.remotes.<alias>.spec:` blocks — see
+[HPC_EXECUTION.md](user_guide/HPC_EXECUTION.md#mode-scoped-config-blocks--no-cross-mode-bleed).
+There is no `hpc:` block (it used to hold opaque-string `default_walltime`/
+`default_resources` defaults that silently overrode the typed blocks; both
+were deleted).
 
 The bottom of the file holds two optional commented-out scaffolds —
 `slurm:` (reach fields like `gpu_type`, `modules`, `qos`, `account`) and

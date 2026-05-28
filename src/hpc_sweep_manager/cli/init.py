@@ -100,6 +100,7 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 #   account: "my-project"
 #   pre_script:
 #     - "conda activate my-env"
+#   max_array_size: 10000   # cluster's Slurm-array ceiling (Slurm default)
 
 # --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ------------
 # Per-remote `spec:` sub-block is the no-bleed home for that remote's
@@ -209,26 +210,24 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
 def _extract_config_from_existing(
     existing_config: Dict[str, Any], project_path: Path
 ) -> Dict[str, Any]:
-    """Extract configuration from existing hsm_config.yaml for migration."""
+    """Extract configuration from an existing ``sweeps/hsm_config.yaml`` for migration.
+
+    Preserves project / paths / wandb settings. The old ``hpc:`` block is
+    intentionally dropped — its ``default_walltime`` / ``default_resources``
+    fields silently overrode the typed ``slurm:`` / ``local:`` blocks (see
+    CLAUDE.md gotcha #5b). Users should re-express any such defaults in
+    the typed scaffolds at the bottom of the new ``.hsm/config.yaml``.
+    """
     config = {}
 
-    # Extract project settings
     project_section = existing_config.get("project", {})
     config["project_name"] = project_section.get("name", project_path.name)
 
-    # Extract path settings
     paths_section = existing_config.get("paths", {})
     config["python_path"] = paths_section.get("python_interpreter", "python")
     config["train_script"] = paths_section.get("train_script", "scripts/train.py")
     config["config_dir"] = paths_section.get("config_dir", "configs")
 
-    # Extract HPC settings
-    hpc_section = existing_config.get("hpc", {})
-    config["hpc_system"] = hpc_section.get("system", "pbs")
-    config["default_walltime"] = hpc_section.get("default_walltime", "04:00:00")
-    config["default_resources"] = hpc_section.get("default_resources", "select=1:ncpus=4:mem=16gb")
-
-    # Extract W&B settings if present
     wandb_section = existing_config.get("wandb", {})
     if wandb_section:
         config["wandb_project"] = wandb_section.get("project", config["project_name"])
@@ -319,18 +318,9 @@ def _interactive_configuration(project_info: Dict[str, Any], console: Console) -
     else:
         config["config_dir"] = Prompt.ask("Hydra config directory", default="configs")
 
-    # HPC settings
-    config["hpc_system"] = project_info["hpc_system"]
-
-    # Resource defaults
-    if project_info["hpc_system"] == "pbs":
-        default_resources = "select=1:ncpus=4:mem=16gb"
-    else:  # slurm
-        default_resources = "--nodes=1 --ntasks=4 --mem=16G"
-
-    config["default_walltime"] = Prompt.ask("Default job walltime", default="04:00:00")
-
-    config["default_resources"] = Prompt.ask("Default job resources", default=default_resources)
+    # No HPC/resource prompts: defaults live in the typed `local:` / `slurm:`
+    # scaffolds appended to .hsm/config.yaml. Users edit those blocks
+    # post-init for the modes they actually use.
 
     # W&B settings
     if Confirm.ask("Configure Weights & Biases integration?", default=True):
@@ -341,8 +331,12 @@ def _interactive_configuration(project_info: Dict[str, Any], console: Console) -
 
 
 def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Automatic configuration based on detected information."""
-    config = {
+    """Automatic configuration based on detected information.
+
+    No HPC/resource defaults — the typed ``local:`` / ``slurm:`` scaffolds
+    appended to ``.hsm/config.yaml`` are the canonical home for those.
+    """
+    return {
         "project_name": project_info["project_root"].name,
         "python_path": str(project_info["python_path"])
         if project_info["python_path"]
@@ -351,18 +345,8 @@ def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
         if project_info["train_script"]
         else "scripts/train.py",
         "config_dir": str(project_info["config_dir"]) if project_info["config_dir"] else "configs",
-        "hpc_system": project_info["hpc_system"],
-        "default_walltime": "04:00:00",
         "wandb_project": project_info["project_root"].name,
     }
-
-    # Set default resources based on HPC system
-    if project_info["hpc_system"] == "pbs":
-        config["default_resources"] = "select=1:ncpus=4:mem=16gb"
-    else:  # slurm
-        config["default_resources"] = "--nodes=1 --ntasks=4 --mem=16G"
-
-    return config
 
 
 def _create_sweep_infrastructure(
@@ -389,7 +373,10 @@ def _create_sweep_infrastructure(
 
         console.print("  ✅ Created sweeps/ directory structure")
 
-        # Create HSM configuration file (in new location)
+        # Create HSM configuration file (in new location).
+        # No `hpc:` block — defaults live in the typed `local:` / `slurm:` /
+        # per-remote `spec:` scaffolds appended below. Each --mode reads only
+        # its own block (see CLAUDE.md gotcha #5b).
         hsm_config_path = hsm_dir / "config.yaml"
         hsm_config = {
             "project": {
@@ -401,12 +388,6 @@ def _create_sweep_infrastructure(
                 "train_script": config["train_script"],
                 "config_dir": config["config_dir"],
                 "output_dir": "outputs",
-            },
-            "hpc": {
-                "system": config["hpc_system"],
-                "default_walltime": config["default_walltime"],
-                "default_resources": config["default_resources"],
-                "max_array_size": 10000,
             },
             "metadata": {
                 "created_by": "HSM (HPC Sweep Manager)",

@@ -283,25 +283,18 @@ class TestBuildComputeSource:
         assert sub_mode == "individual"
         assert source.max_parallel_jobs == 4
 
-    def test_local_mode_parallel_jobs_from_hsm_config(self, no_gpus):
+    def test_local_mode_no_parallel_jobs_falls_back_to_one(self, no_gpus):
+        # `slurm.max_array_size` is a Slurm-array cap; it must NOT piggyback
+        # as the local slot-queue default any more. Pre-cleanup it did, and
+        # that was the source of cross-mode bleed for the parallel-jobs knob.
         class FakeConfig:
             def get_max_array_size(self):
-                return 4
+                return 100  # should be ignored by local mode
 
         source, _, _ = build_compute_source(
             mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
         )
-        assert source.max_parallel_jobs == 4
-
-    def test_local_mode_caps_parallel_jobs_at_eight(self, no_gpus):
-        class FakeConfig:
-            def get_max_array_size(self):
-                return 100
-
-        source, _, _ = build_compute_source(
-            mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
-        )
-        assert source.max_parallel_jobs == 8
+        assert source.max_parallel_jobs == 1  # CLI --parallel-jobs is the only knob
 
     def test_local_mode_explicit_parallel_jobs_overrides_config(self, no_gpus):
         class FakeConfig:

@@ -193,16 +193,18 @@ class TestExistingAccessors:
 
     def test_defaults_when_blocks_missing(self):
         cfg = HSMConfig({})
-        assert cfg.get_default_walltime() == "23:59:59"
-        assert "select=" in cfg.get_default_resources()
         assert cfg.get_max_array_size() is None
-        assert cfg.get_hpc_system() is None
         assert cfg.get_project_root() is None
         assert cfg.get_default_python_path() is None
         assert cfg.get_default_script_path() is None
         assert cfg.get_wandb_config() == {}
 
-    def test_walltime_int_seconds_converted_to_string(self):
-        # The accessor accepts an integer seconds value and formats it.
-        cfg = HSMConfig({"hpc": {"default_walltime": 3600}})
-        assert cfg.get_default_walltime() == "01:00:00"
+    def test_max_array_size_reads_from_slurm_block(self):
+        # Moved from `hpc:` to `slurm:` when the legacy hpc: block was deleted.
+        cfg = HSMConfig({"slurm": {"max_array_size": 5000, "gpus": 1}})
+        assert cfg.get_max_array_size() == 5000
+        # And it must NOT leak into the ResourceSpec built from the same block.
+        spec = cfg.get_slurm_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+        assert not hasattr(spec, "max_array_size")

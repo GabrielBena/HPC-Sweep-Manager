@@ -116,14 +116,19 @@ def spec_from_cli(
 
 def _resolve_local_parallel_jobs(
     parallel_jobs: int | None,
-    hsm_config: Any,
+    hsm_config: Any,  # kept for signature compat; no longer consulted
     default: int = 1,
 ) -> int:
+    """Resolve the local slot-queue width.
+
+    CLI ``--parallel-jobs`` is the only knob. Pre-cleanup this used to
+    piggyback on ``slurm.max_array_size`` for a default cap, but that was
+    a leftover from the v0.1 opaque-block era — local mode and Slurm
+    array size have nothing to do with each other. If you need a higher
+    local default, pass ``--parallel-jobs N``.
+    """
     if parallel_jobs is not None:
         return max(parallel_jobs, 1)
-    if hsm_config is not None:
-        cap = hsm_config.get_max_array_size() or default
-        return max(1, min(cap, 8))
     return default
 
 

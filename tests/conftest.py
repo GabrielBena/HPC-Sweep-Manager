@@ -57,17 +57,19 @@ if __name__ == "__main__":
     with open(sweeps_dir / "sweep.yaml", "w") as f:
         yaml.dump(sweep_config, f)
 
-    # Create HSM config
+    # Create HSM config. No `hpc:` block — its `default_walltime` /
+    # `default_resources` fields used to silently override the typed
+    # `local:` / `slurm:` blocks; both are now gone.
     hsm_config = {
         "paths": {
             "python_interpreter": sys.executable,
             "train_script": str(project_dir / "train.py"),
             "config_dir": str(project_dir / "configs"),
         },
-        "local": {"max_parallel_jobs": 2, "timeout": 30},
-        "hpc": {
-            "default_walltime": "01:00:00",
-            "default_resources": "select=1:ncpus=2:mem=4gb",
+        "slurm": {
+            "walltime": "01:00:00",
+            "cpus_per_task": 2,
+            "mem": "4gb",
         },
     }
     with open(sweeps_dir / "hsm_config.yaml", "w") as f:

@@ -48,7 +48,7 @@ hsm sweep run [OPTIONS]
   -d, --dry-run                      Render scripts + show resolved spec; no submission.
   --count-only                       Count parameter combinations and exit.
   --max-runs INTEGER                 Cap N for testing.
-  --walltime TEXT                    HH:MM:SS (overrides hpc.default_walltime).
+  --walltime TEXT                    HH:MM:SS (overrides the typed `local:` / `slurm:` block walltime).
   --resources TEXT                   Scheduler resource string (slurm `--flag=value` or PBS `select=...`).
   --group TEXT                       W&B group name for this sweep.
   --priority INTEGER                 Job priority (HPC schedulers that support it).

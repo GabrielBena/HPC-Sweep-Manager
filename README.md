@@ -137,20 +137,24 @@ paths:
   config_dir: configs
   output_dir: outputs
 
-hpc:
-  system: slurm | pbs                # auto-detected
-  default_walltime: "04:00:00"
-  default_resources: "select=1:ncpus=4:mem=16gb"
-  max_array_size: 10000
-
 wandb:
   project: your-project
   entity: ""
 ```
 
-To use `--mode distributed` or `--remote`, add a `distributed:` block —
-see [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md)
-for the schema.
+Resource defaults live in three independent, mode-scoped typed blocks
+appended to the file as commented scaffolds (and uncommented when GPUs
+are detected for `local:`). Each `--mode` reads only its own block:
+
+| Block | Read by | Holds |
+|---|---|---|
+| `local:` | `--mode local` | `walltime` / `cpus_per_task` / `mem` / `gpus` / `pre_script` |
+| `slurm:` | `--mode array` / `--mode individual` | full Slurm spec including `gpu_type` / `modules` / `qos` / `account` / `max_array_size` |
+| `distributed.remotes.<alias>.spec:` | `--remote <alias>` / `--mode distributed` | per-remote default `ResourceSpec` |
+
+See [HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md#mode-scoped-config-blocks--no-cross-mode-bleed)
+for the full schema, and [SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md)
+for the `distributed:` block layout.
 
 ## Requirements
 

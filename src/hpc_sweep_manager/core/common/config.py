@@ -15,7 +15,6 @@ except ImportError:
     OMEGACONF_AVAILABLE = False
     DictConfig = None
 
-from .utils import format_walltime
 
 logger = logging.getLogger(__name__)
 
@@ -195,21 +194,6 @@ class HSMConfig:
             logger.warning(f"Failed to load HSM config from {config_path}: {e}")
             return None
 
-    def get_default_walltime(self) -> str:
-        """Get default walltime from config."""
-        walltime_value = self.config_data.get("hpc", {}).get("default_walltime", "23:59:59")
-
-        # If the value is an integer (seconds), convert to HH:MM:SS format
-        if isinstance(walltime_value, int):
-            return format_walltime(walltime_value)
-
-        # If it's already a string, assume it's in the correct format
-        return str(walltime_value)
-
-    def get_default_resources(self) -> str:
-        """Get default resources from config."""
-        return self.config_data.get("hpc", {}).get("default_resources", "select=1:ncpus=4:mem=64gb")
-
     def get_default_python_path(self) -> Optional[str]:
         """Get default Python interpreter path from config."""
         return self.config_data.get("paths", {}).get("python_interpreter")
@@ -226,13 +210,13 @@ class HSMConfig:
         """Get wandb configuration from config."""
         return self.config_data.get("wandb", {})
 
-    def get_hpc_system(self) -> Optional[str]:
-        """Get HPC system type from config."""
-        return self.config_data.get("hpc", {}).get("system")
-
     def get_max_array_size(self) -> Optional[int]:
-        """Get maximum array size from config."""
-        return self.config_data.get("hpc", {}).get("max_array_size")
+        """Get the Slurm-array size cap from the ``slurm:`` block.
+
+        Slurm's default ceiling is 10000; this lets users lower it for
+        clusters with a stricter cap. Returns ``None`` when unset.
+        """
+        return self.config_data.get("slurm", {}).get("max_array_size")
 
     def get_slurm_spec(self):
         """Read the typed ``slurm:`` block as a :class:`ResourceSpec`, or ``None``.
@@ -266,8 +250,9 @@ class HSMConfig:
         block = self.config_data.get("slurm")
         if not isinstance(block, dict) or not block:
             return None
-        # Strip orchestrator-only keys before handing to ResourceSpec.
-        filtered = {k: v for k, v in block.items() if k != "qos_whitelist"}
+        # Strip orchestrator-/scheduler-only keys before handing to ResourceSpec.
+        _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size"}
+        filtered = {k: v for k, v in block.items() if k not in _NON_SPEC_KEYS}
         try:
             return ResourceSpec.from_dict(filtered)
         except (TypeError, ValueError) as e:
