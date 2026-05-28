@@ -1,67 +1,23 @@
-# HSM Documentation
+# HSM documentation
 
-Welcome to the documentation for HPC Sweep Manager (HSM). This guide will help you get started and master HSM for your hyperparameter sweeps.
+The repo root has the quickstart ([README.md](../README.md)) and design
+docs ([CLAUDE.md](../CLAUDE.md), [ARCHITECTURE.md](../ARCHITECTURE.md)).
+The rest of the docs live here.
 
-## 📖 Documentation Structure
+## User guides
 
-### For Users
-- **[Getting Started Guide](user_guide/getting_started.md)** - Installation, setup, and first sweep
-- **[CLI Reference](cli/README.md)** - Complete command-line interface documentation
+- **[Getting started](user_guide/getting_started.md)** — install, `hsm setup init`, sweep config, first run. The broad tutorial.
+- **[SSH (push-model) execution](user_guide/SSH_EXECUTION.md)** — `hsm sweep run --remote <alias>` in depth: GPU pinning, conda env handling, rsync excludes, `hsm remote clean`.
+- **[HPC (Slurm / PBS) execution](user_guide/HPC_EXECUTION.md)** — `--mode array|individual|auto` recipe, the `--resources` string format, and the workaround for `gpu_type` + `modules`.
+- **[Completion runs](user_guide/COMPLETION_RUNS.md)** — `hsm sweep complete <id>` for resuming partial sweeps.
 
-### For Developers
-- **[API Reference](api_reference/README.md)** - Complete API documentation for extending HSM
-- **[Testing](#testing)** - Running and writing tests
+## Reference
 
-## 🚀 Quick Start
+- **[CLI reference](cli/README.md)** — every `hsm` command and subcommand.
+- **[API reference](api_reference/README.md)** — Python entry points if you want to embed HSM in your own scripts. See [`compute_sources.md`](api_reference/compute_sources.md) for the live tier; the `job_manager.md` / `hpc/` / `local/` subtrees are legacy (banners explain).
+- **[Project structure](PROJECT_STRUCTURE.md)** — what `.hsm/` contains and how HSM finds your config + scripts.
 
-```bash
-# Install HSM
-pip install hpc-sweep-manager
+## Design
 
-# Initialize your project
-cd /path/to/your/ml/project
-hsm init
-
-# Run your first sweep
-hsm sweep run --mode local --max-runs 5
-
-# Monitor progress
-hsm monitor --watch
-```
-
-See the **[Getting Started Guide](user_guide/getting_started.md)** for detailed instructions.
-
-## 🧪 Testing (For Developers)
-
-HSM includes comprehensive test coverage. To run tests:
-
-```bash
-# Run all tests
-make test
-
-# Run fast tests only (exclude slow/remote tests)
-make test-fast
-
-# Run with coverage
-make test-coverage
-```
-
-For more testing options, see `make help`.
-
-## 🛠️ Development Setup (For Developers)
-
-```bash
-# Clone and setup
-git clone https://github.com/GabrielBena/HPC-Sweep-Manager.git
-cd HPC-Sweep-Manager
-
-# Install in development mode
-make dev-setup
-
-# Run linting and formatting
-make lint
-make format
-
-# Verify installation
-make verify-install
-```
+- **[../ARCHITECTURE.md](../ARCHITECTURE.md)** — why `ComputeSource`, push-SSH lifecycle, slot back-pressure, known limitations.
+- **[../CLAUDE.md](../CLAUDE.md)** — agent on-boarding: do-not-reintroduce list, gotchas-already-patched, test architecture.

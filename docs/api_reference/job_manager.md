@@ -1,4 +1,21 @@
-# Job Manager
+# Job Manager (legacy)
+
+> **⚠️ Legacy — scheduled for deletion in Pass B-heavy.**
+>
+> The `JobManager` hierarchy below is the v0.1 orchestration. **For new
+> code, use the live tier:** the unified async
+> [`ComputeSource`](compute_sources.md) + the
+> [`SweepOrchestrator`](../../src/hpc_sweep_manager/core/common/sweep_orchestrator.py)
+> (`build_compute_source(mode, ...)` + `run_sweep_async(...)`).
+>
+> These classes are kept only because `core/common/completion.py` (the
+> `hsm sweep complete` path) and the legacy `hsm hpc` / `hsm local`
+> CLIs still wire them up. Once completion migrates to the orchestrator,
+> this whole tier — `BaseJobManager`, `HPCJobManager`,
+> `SlurmJobManager`, `PBSJobManager`, `LocalJobManager`,
+> `DistributedSweepWrapper` — gets deleted in a single commit. See
+> [../../ARCHITECTURE.md](../../ARCHITECTURE.md#legacy-tier-whats-still-alive-and-why)
+> for context.
 
 The `JobManager` is the central orchestration component of HSM that coordinates job execution across different compute sources.
 

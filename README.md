@@ -1,270 +1,178 @@
 # HPC Sweep Manager (HSM)
 
-A Python package for automated hyperparameter sweeps on High Performance Computing (HPC) systems using Hydra configs and W&B tracking, with **remote execution** capabilities via SSH.
+A Python package + CLI for running hyperparameter sweeps over Hydra-style
+training scripts. Targets local machines, Slurm/PBS HPC clusters, and
+remote Linux boxes over SSH — same CLI, same sweep config, four
+execution modes.
 
-## 🎯 Overview
+> **Status:** alpha. Active refactor; semantics stable for the modes
+> documented below. See [ARCHITECTURE.md](ARCHITECTURE.md) for what's
+> live vs legacy and [CLAUDE.md](CLAUDE.md) if you're an AI agent
+> landing here cold.
 
-HSM simplifies running large-scale hyperparameter sweeps across different compute environments:
+## Why HSM
 
-- **Local execution** with parallel job management
-- **HPC cluster submission** (PBS/Torque, Slurm) with array jobs
-- **Remote machine execution** via SSH with auto-discovery
-- **Unified configuration** and monitoring across all modes
-- **Automatic path detection** and environment validation
-- **Built-in result collection** and sweep management
+- One CLI runs sweeps locally, on a Slurm/PBS cluster, or on remote SSH
+  boxes — without changing your training script.
+- **Push-model SSH:** rsync your project to a remote, run with per-task
+  GPU pinning, rsync results back. No HSM install needed on the remote.
+- **Typed `ResourceSpec`** for HPC resources — no more opaque PBS strings
+  in Python; templates handle the per-scheduler translation.
+- **Unified async `ComputeSource` interface** — same lifecycle (setup →
+  submit → wait → collect → cleanup) for every backend.
 
-## 🚀 Quick Start
-
-### 1. Installation
-
-```bash
-pip install hpc-sweep-manager
-```
-
-### 2. Initialize Your Project
-
-```bash
-cd /path/to/your/ml/project
-hsm init  # Auto-detects paths and creates config templates
-```
-
-### 3. Configure Parameter Sweep
-
-Edit `sweeps/sweep.yaml`:
-```yaml
-sweep:
-  grid:
-    seed: [1, 2, 3]
-    model.hidden_size: [128, 256, 512]
-    optimizer.lr: [0.001, 0.01]
-```
-
-### 4. Run Your Sweep
+## Quick start
 
 ```bash
-# Local execution (parallel jobs)
-hsm sweep run --mode local --parallel-jobs 4
+# 1. Install (editable, with dev deps).
+git clone <this-repo> && cd HPC-Sweep-Manager
+pip install -e ".[dev]"
 
-# HPC cluster (array job)
-hsm sweep run --mode array
+# 2. Initialize HSM in YOUR ML project.
+cd /path/to/your/project
+hsm setup init                # creates .hsm/config.yaml + sweeps/example_sweep.yaml
 
-# Remote machine execution
-hsm sweep run --mode remote --remote machine_name
+# 3. Edit sweeps/example_sweep.yaml — a simple grid:
+#    sweep:
+#      grid:
+#        seed: [1, 2, 3]
+#        lr: [0.001, 0.01]
+
+# 4. Pick a backend.
+hsm sweep run --mode local                       # parallel local processes
+hsm sweep run --mode array                       # one Slurm sbatch --array=
+hsm sweep run --remote my-box --gpus 1 \
+    --resources "--gpus=1"                        # push to a single SSH box
+hsm sweep run --mode distributed                 # fan across many SSH hosts
 ```
 
-## 🛠️ Execution Modes
+Your `train.py` just needs to accept Hydra-style `key=value` args and
+write its outputs to `output.dir` (HSM passes it in). See
+[`examples/test_train.py`](examples/test_train.py) for the canonical
+contract.
 
-### **Local Mode** - Single Machine Parallel Execution
-```bash
-hsm sweep run --mode local --parallel-jobs 4 --show-output
-```
-- Runs jobs in parallel on your local machine
-- Real-time output display option
-- Automatic resource management and cleanup
+## Execution modes
 
-### **Array Mode** - HPC Cluster Array Jobs  
-```bash
-hsm sweep run --mode array --walltime "04:00:00"
-```
-- Submits efficient array jobs to PBS/Torque or Slurm
-- Auto-detects HPC system and generates appropriate scripts
-- Organized task outputs in `sweep_dir/tasks/task_N/`
+| `--mode` | Backend | What it does |
+|---|---|---|
+| `local` | `LocalComputeSource` | Run on this machine. Per-process slot queue; optional GPU pinning via `--resources "--gpus=N"`. |
+| `array` | `SlurmComputeSource` | One `sbatch --array=1-N` job to the cluster. |
+| `individual` | `SlurmComputeSource` | One `sbatch` per parameter combination. |
+| `remote` | `SSHComputeSource` (push-model) | rsync project to a single SSH alias, run there, rsync back. Auto-cleanup on success. |
+| `distributed` | `DistributedComputeSource` | Fan across N SSH boxes + optional local (driven by `.hsm/config.yaml`'s `distributed:` block). |
+| `auto` | resolved at runtime | `array` if `sbatch` on PATH, else `local`. |
 
-### **Remote Mode** - Single Remote Machine via SSH
-```bash
-hsm sweep run --mode remote --remote blossom
-```
-- Executes jobs on a remote machine via SSH
-- Auto-discovery of remote environments and paths
-- Automatic project synchronization and result collection
+`hsm sweep run --remote <alias>` is a shorthand that implies `--mode remote`.
 
-## 🌐 Remote Machine Setup
-
-### Configure Remote Access
-
-```bash
-# Add a remote machine
-hsm remote add blossom --host "blossom.example.com" --key "~/.ssh/id_ed25519"
-
-# Test connection and auto-discovery  
-hsm remote test blossom
-
-# Check remote health
-hsm remote health blossom
-```
-
-### Remote Requirements
-
-The remote machine needs:
-- SSH access with key-based authentication
-- Python environment with your project dependencies
-- `hsm_config.yaml` in the project directory for path discovery
-
-## 📁 Project Structure
-
-HSM creates organized sweep outputs:
+## Architecture in 30 seconds
 
 ```
-your-project/
-├── sweeps/
-│   ├── sweep.yaml           # Parameter configuration
-│   ├── hsm_config.yaml      # HSM project settings  
-│   └── outputs/
-│       └── sweep_20240315_143022/
-│           ├── tasks/       # Individual task outputs
-│           │   ├── task_1/  # Each job gets its own folder
-│           │   │   ├── task_info.txt
-│           │   │   ├── command.txt
-│           │   │   └── [your outputs]/
-│           │   └── task_N/
-│           ├── logs/        # Job execution logs
-│           ├── scripts/     # Generated job scripts
-│           └── submission_summary.txt
+                 cli/sweep.py
+                     │
+                     ▼
+             SweepOrchestrator                ← core/common/sweep_orchestrator.py
+                     │
+                     ▼  build_compute_source(mode, ...)
+                     │
+        ┌────────────┼─────────────┬───────────────┐
+        ▼            ▼             ▼               ▼
+  LocalCompute  SlurmCompute   SSHCompute    DistributedCompute
+    Source        Source        Source           Source
 ```
 
-**Benefits:**
-- **Clean organization** - No directory pollution
-- **Easy debugging** - Each task self-contained  
-- **Scalable** - Works for 1 to 10,000+ jobs
-- **Cross-platform** - Same structure everywhere
+All `ComputeSource` implementations share one async interface (`setup`,
+`submit_job`, `wait_for_all`, `collect_results`, `cleanup`). The CLI
+is the only sync boundary. See [ARCHITECTURE.md](ARCHITECTURE.md) for
+the full lifecycle.
 
-## 🎛️ CLI Commands
+## CLI surface
 
-### Core Workflow
-```bash
-hsm init                          # Initialize project
-hsm sweep run                     # Run parameter sweep
-hsm monitor SWEEP_ID              # Monitor progress
-hsm collect-results SWEEP_ID      # Collect remote results
+```
+hsm setup    init configure         # project bootstrap
+hsm sweep    run | complete | status | report | errors
+hsm remote   add | list | test | health | gpus | clean | remove
+hsm local    run | status | clean   # legacy — being migrated
+hsm hpc      submit | queue | status | cancel   # legacy — being migrated
+hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
+hsm sync     init | list | run | to
+hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
-### Remote Management
-```bash
-hsm remote add NAME --host HOST   # Add remote machine
-hsm remote list                   # List configured remotes
-hsm remote test [NAME]            # Test connections
-hsm remote health [NAME]          # Check remote status
-```
+Full reference: [docs/cli/README.md](docs/cli/README.md).
 
-### Monitoring & Management  
-```bash
-hsm monitor --watch               # Real-time monitoring
-hsm recent --days 7               # Recent sweeps
-hsm queue --watch                 # HPC queue status
-hsm cancel SWEEP_ID               # Cancel running sweep
-hsm cleanup --days 30             # Clean old jobs
-```
+## Docs
 
-## ⚙️ Configuration
+- **Quickstart (this README)** — install + first sweep.
+- [docs/user_guide/getting_started.md](docs/user_guide/getting_started.md) — broader tutorial with per-mode walkthroughs.
+- [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md) — the push-model SSH recipe in depth.
+- [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) — Slurm / PBS recipe + the `--resources` gap workaround.
+- [docs/user_guide/COMPLETION_RUNS.md](docs/user_guide/COMPLETION_RUNS.md) — resuming partial sweeps with `hsm sweep complete`.
+- [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) — `.hsm/` layout + paths HSM expects.
+- [docs/api_reference/](docs/api_reference/) — Python API for embedding HSM in your own scripts.
+- [ARCHITECTURE.md](ARCHITECTURE.md) — design rationale + known limitations.
+- [CLAUDE.md](CLAUDE.md) — agent on-boarding (read this if you're Claude / Cursor / etc.).
 
-### Sweep Configuration (`sweeps/sweep.yaml`)
+## Runnable examples
+
+- [`examples/test_train.py`](examples/test_train.py) — canonical training-script contract.
+- [`examples/test_sweep.yaml`](examples/test_sweep.yaml) — minimal sweep config.
+- [`examples/smoke_cli.sh`](examples/smoke_cli.sh) — end-to-end smoke for `--mode array` on real Slurm.
+- [`examples/smoke_ssh_cli.sh`](examples/smoke_ssh_cli.sh) — end-to-end smoke for `--remote` on a real SSH box.
+- [`examples/smoke_slurm.py`](examples/smoke_slurm.py) — direct-Python entry point for Slurm features the CLI can't express yet.
+
+## Configuration
+
+`hsm setup init` writes `.hsm/config.yaml` with:
 
 ```yaml
-sweep:
-  grid:  # All combinations
-    seed: [1, 2, 3, 4, 5]
-    model.hidden_size: [128, 256, 512]
-    optimizer.lr: [0.001, 0.01, 0.1]
-  
-  paired:  # Paired parameters
-    - model_and_data:
-        model.name: [cnn, transformer, mlp]
-        data.augmentation: [basic, advanced, none]
-```
-
-### HSM Configuration (`sweeps/hsm_config.yaml`)
-
-Auto-generated with your project settings:
-```yaml
-hpc:
-  default_walltime: "04:00:00"
-  default_resources: "select=1:ncpus=4:mem=16gb"
-  system: pbs
+project:
+  name: your-project
+  root: /path/to/your/project
 
 paths:
   python_interpreter: /path/to/python
-  train_script: /path/to/train.py
-  config_dir: /path/to/configs
+  train_script: train.py
+  config_dir: configs
+  output_dir: outputs
 
-# Remote machines (optional)
-distributed:
-  remotes:
-    blossom:
-      host: "blossom.example.com"
-      ssh_key: ~/.ssh/id_ed25519
-      max_parallel_jobs: 4
+hpc:
+  system: slurm | pbs                # auto-detected
+  default_walltime: "04:00:00"
+  default_resources: "select=1:ncpus=4:mem=16gb"
+  max_array_size: 10000
+
+wandb:
+  project: your-project
+  entity: ""
 ```
 
-## 📊 Examples
+To use `--mode distributed` or `--remote`, add a `distributed:` block —
+see [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md)
+for the schema.
 
-### Basic Grid Search
-```bash
-# Edit sweeps/sweep.yaml with your parameters
-hsm sweep run --dry-run              # Preview jobs
-hsm sweep run --mode array           # Submit to cluster
-hsm monitor --watch                  # Monitor progress
-```
+## Requirements
 
-### Remote Execution
-```bash
-hsm remote add gpu-server --host "gpu.university.edu"
-hsm remote test gpu-server
-hsm sweep run --mode remote --remote gpu-server --max-runs 10
-```
+- Python 3.11+
+- For HPC: a Slurm or PBS cluster with `sbatch`/`qsub` on PATH.
+- For remote SSH: a working `~/.ssh/config` alias to your remote (no
+  HSM install needed on the remote).
+- Dependencies: see `pyproject.toml`. Install with `pip install -e ".[dev]"`
+  to also get pytest + ruff + mypy.
 
-### Local Development
-```bash
-hsm sweep run --mode local --parallel-jobs 2 --show-output --max-runs 5
-```
+## Contributing
 
-## 🔧 Advanced Features
+This is alpha and under active refactor. Before adding a feature, read:
 
-### Job Management
-- **Smart job submission** - Automatic PBS/Slurm detection
-- **Robust execution** - Error handling and recovery
-- **Resource optimization** - Efficient parallel execution
-- **Cross-platform** - Works on any Unix-like system
+- [ARCHITECTURE.md](ARCHITECTURE.md) — what's live vs legacy and what's
+  about to be deleted in Pass B-heavy.
+- [CLAUDE.md](CLAUDE.md) — the "do not reintroduce" list (auto-discovery,
+  `RemoteJobManager`, `--mode remote --remote X` flag shape, etc.).
 
-### Remote Capabilities  
-- **Auto-discovery** - Finds Python environments and scripts
-- **Environment validation** - Checks dependencies before execution
-- **Secure transfer** - SSH-based file synchronization
-- **Result aggregation** - Centralizes outputs for analysis
+Tests: `pytest tests/unit tests/cli tests/integration --no-cov`.
+There's a ~6-test pre-existing baseline failure list (Click + log_cli
+interaction, plus one stale legacy assertion); don't chase those as
+regressions.
 
-### Monitoring & Debugging
-- **Real-time status** - Live job progress tracking
-- **Detailed logging** - Comprehensive execution records
-- **Task isolation** - Each job in separate directory
-- **Easy debugging** - Clear error messages and logs
+## License
 
-## 🏗️ Architecture
-
-```
-┌─────────────────┐    SSH/rsync    ┌─────────────────┐
-│   Local Machine │◄──────────────►│  Remote Machine │
-│   (Controller)  │                 │    (Worker)     │
-│                 │                 │                 │
-│ • HSM Config    │                 │ • HSM Config    │
-│ • Sweep Config  │                 │ • Auto-detected │
-│ • Job Scheduler │                 │ • Environment   │
-│ • Result Collection              │ • Execution     │
-└─────────────────┘                 └─────────────────┘
-```
-
-**Key Principles:**
-- **Unified interface** across all execution modes
-- **Auto-discovery** minimizes manual configuration  
-- **Organized outputs** for easy analysis
-- **Extensible design** for future enhancements
-
-## 📚 Documentation
-
-For comprehensive documentation, see the [`docs/`](docs/) directory:
-- **[User Guide](docs/user_guide/getting_started.md)** - Detailed setup and usage
-- **[CLI Reference](docs/cli/README.md)** - Complete command documentation
-- **[API Reference](docs/api_reference/README.md)** - For developers
-- **[Examples](examples/)** - Working examples to get started
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) file for details. 
+MIT. See `LICENSE`.

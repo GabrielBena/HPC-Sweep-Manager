@@ -1,252 +1,255 @@
-# Getting Started with HPC Sweep Manager
+# Getting started with HPC Sweep Manager
 
-This guide will help you get up and running with HPC Sweep Manager (HSM) across all execution modes.
+This guide walks through installing HSM, initializing it in your ML
+project, and running a sweep in each of the four execution modes.
 
-## 🔧 Installation
+For deeper recipes:
+- [SSH (push-model) execution](SSH_EXECUTION.md) — the `--remote <alias>` path in depth.
+- [HPC (Slurm / PBS) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + workarounds for advanced Slurm features.
+- [Completion runs](COMPLETION_RUNS.md) — `hsm sweep complete <id>` to resume partial sweeps.
 
-### Prerequisites
-- Python 3.8 or higher
-- SSH access to remote machines (for remote/distributed modes)
-- PBS/Torque or Slurm (for HPC mode)
+If you're an AI agent landing in this repo, start with
+[../../CLAUDE.md](../../CLAUDE.md) instead.
 
-### Install from PyPI
+## Installation
+
 ```bash
-pip install hpc-sweep-manager
+# Editable install with dev deps (pytest + ruff + mypy):
+git clone <this-repo> && cd HPC-Sweep-Manager
+pip install -e ".[dev]"
 ```
 
-### Development Installation
+Requirements:
+- Python 3.11+.
+- For HPC mode: a Slurm or PBS cluster with `sbatch` / `qsub` on PATH.
+- For SSH `--remote` mode: a working `~/.ssh/config` alias to your
+  remote box. Nothing needs installing on the remote.
+
+## Pick a mode
+
+| Mode | What it does | When to use |
+|---|---|---|
+| `local` | Run on this machine; parallel processes with optional GPU pinning. | Dev / quick experiments / no cluster nearby. |
+| `array` | Submit one Slurm `sbatch --array=1-N` job. | HPC, many tasks, scheduler-friendly. |
+| `individual` | Submit one `sbatch` per parameter combination. | HPC when you want per-task scheduling control. |
+| `remote` | Push-model SSH: rsync project to a single remote box, run there. | Lab box / shared GPU server / "scp it over and run it" use cases. |
+| `distributed` | Fan across N SSH boxes + optional local, via `.hsm/config.yaml`. | Multi-lab-host workloads, ad-hoc compute pool. |
+| `auto` | Detected at runtime — `array` if `sbatch` exists, else `local`. | When you don't want to think about it. |
+
+## Step 0 — initialize HSM in your project
+
+In the directory containing your `train.py` (and Hydra `configs/`, if
+any):
+
 ```bash
-git clone https://github.com/yourusername/hpc-sweep-manager.git
-cd hpc-sweep-manager
-pip install -e .
+hsm setup init
 ```
 
-## 🎯 Quick Start: Choose Your Mode
+This creates:
 
-HSM supports four execution modes. Choose based on your needs:
-
-| Mode | Use Case | Setup Complexity | Scale |
-|------|----------|------------------|-------|
-| **Local** | Development, testing | ⭐ Simple | 1-10 jobs |
-| **Remote** | Utilize remote GPU/server | ⭐⭐ Medium | 10-100 jobs |
-| **Distributed** | Multi-machine experiments | ⭐⭐⭐ Advanced | 100-1000 jobs |
-| **HPC** | Cluster computing | ⭐⭐ Medium | 1000+ jobs |
-
-## 🚀 Local Mode - Quick Start
-
-Perfect for development and small experiments on your local machine.
-
-### 1. Initialize Project
-```bash
-cd /path/to/your/ml/project
-hsm init
+```
+.hsm/
+├── config.yaml          # HSM project config (paths, defaults)
+├── sync_config.yaml     # Optional: rsync targets for hsm sync
+├── cache/               # HSM scratch
+└── logs/
+sweeps/
+├── example_sweep.yaml   # Starter sweep config
+├── outputs/             # Per-sweep result dirs land here
+├── logs/
+└── README.md
 ```
 
-HSM will auto-detect your Python environment and training script:
-```
-✓ Detected Python: /opt/conda/bin/python
-✓ Found training script: train.py
-✓ Created configuration: sweeps/hsm_config.yaml
-```
+Edit `.hsm/config.yaml` to point at your interpreter + training script.
+HSM auto-detects most of this on first run.
 
-### 2. Configure Parameters
-Edit `sweeps/sweep.yaml`:
+## Step 1 — define your sweep
+
+Edit `sweeps/example_sweep.yaml` (or write a fresh `sweeps/sweep.yaml`):
+
 ```yaml
+script: train.py             # path (relative to project root)
 sweep:
-  grid:
+  grid:                      # Cartesian product
     seed: [1, 2, 3]
-    model.hidden_size: [128, 256]
-    optimizer.lr: [0.001, 0.01]
+    lr: [0.001, 0.01, 0.1]
+  paired:                    # zipped within group, then Cartesian with grid
+    - schedule_pair:
+        optimizer: ["adam", "sgd"]
+        momentum: [0.9, 0.95]
+defaults:                    # applied to every combination
+  batch_size: 32
+metadata:
+  description: "smoke test for new arch"
 ```
 
-### 3. Run Local Sweep
+Quick stats without running anything:
+
 ```bash
-# Small test run
-hsm sweep run --mode local --parallel-jobs 2 --max-runs 6
-
-# With real-time output
-hsm sweep run --mode local --parallel-jobs 2 --show-output
+hsm sweep run --config sweeps/example_sweep.yaml --count-only
+hsm sweep run --config sweeps/example_sweep.yaml --dry-run
 ```
 
-## 🌐 Remote Mode - Quick Start
+## Step 2 — your training script's contract
 
-Execute jobs on a remote machine via SSH.
+HSM passes parameters as Hydra-style `key=value` tokens, plus two
+HSM-injected args:
 
-### 1. Setup SSH Access
-Ensure passwordless SSH to your remote machine:
+- `wandb.group=<sweep_id>` — pass to wandb if you use it.
+- `output.dir=<path>` — your script must `mkdir -p` it and write any
+  outputs there. HSM rsyncs this dir back for `--remote` mode.
+
+Minimum viable Python:
+
+```python
+import os, sys
+from pathlib import Path
+
+params = {}
+for tok in sys.argv[1:]:
+    if "=" in tok:
+        k, v = tok.split("=", 1)
+        params[k] = v
+
+output_dir = Path(params.get("output.dir", "."))
+output_dir.mkdir(parents=True, exist_ok=True)
+
+# ... your training loop here, writing checkpoints/metrics to output_dir ...
+```
+
+See [`examples/test_train.py`](../../examples/test_train.py) for a more
+complete reference (sentinel files, progress prints, optional failure
+mode for testing).
+
+## Step 3 — run
+
+### Local mode (default fallback)
+
 ```bash
-ssh-copy-id user@remote-server.edu
-ssh user@remote-server.edu  # Should not prompt for password
+hsm sweep run --mode local --parallel-jobs 4
+# Or, with GPU pinning if you have N GPUs and want one per task:
+hsm sweep run --mode local --parallel-jobs 4 --resources "--gpus=1"
 ```
 
-### 2. Add Remote Machine
+`--show-output` streams stdout/stderr live (handy for small runs).
+
+### HPC array mode
+
 ```bash
-hsm remote add gpu-server remote-server.edu --key ~/.ssh/id_rsa
+hsm sweep run --mode array \
+    --walltime 01:00:00 \
+    --resources "--cpus-per-task=4 --mem=16gb --qos=normal"
 ```
 
-### 3. Test Connection
+This submits one `sbatch --array=1-N` job. For per-task `sbatch` calls,
+use `--mode individual`. Many production clusters need `gpu_type` and
+`modules` set together for GPU allocation — that's a known CLI gap;
+see [HPC_EXECUTION.md](HPC_EXECUTION.md#known-limitation--what---resources-cant-express).
+
+### SSH push-model (single remote)
+
 ```bash
-hsm remote test gpu-server
+# One-time: register the remote (uses ~/.ssh/config for the alias).
+hsm remote add my-box
+hsm remote test my-box
+hsm remote gpus my-box      # sanity check: what GPUs are visible?
+
+# Real submission.
+hsm sweep run --remote my-box --gpus 1 --resources "--gpus=1"
 ```
 
-Expected output:
-```
-✓ gpu-server: Configuration discovered successfully
-  Host: remote-server.edu
-  Python: /home/user/miniconda3/bin/python
-  Project Root: /home/user/my-project
-  Train Script: train.py
-  Max Jobs: 4
-```
+Replace `my-box` with your `~/.ssh/config` alias. HSM rsyncs your
+project up, runs the sweep with GPU pinning, rsyncs results back, and
+cleans up the remote on success. Full guide:
+[SSH_EXECUTION.md](SSH_EXECUTION.md).
 
-### 4. Run Remote Sweep
-```bash
-hsm sweep run --mode remote --remote gpu-server --max-runs 12
-```
+### Multi-host distributed mode
 
-## 🌟 Distributed Mode - Quick Start
+Add a `distributed:` block to `.hsm/config.yaml`:
 
-Orchestrate jobs across multiple machines simultaneously.
-
-### 1. Initialize Distributed Computing
-```bash
-hsm distributed init
-```
-
-### 2. Add Multiple Compute Sources
-```bash
-# Add remote machines
-hsm distributed add gpu-server1 gpu1.university.edu --max-jobs 2
-hsm distributed add gpu-server2 gpu2.university.edu --max-jobs 4
-hsm distributed add workstation ws.lab.edu --max-jobs 1
-
-# Local machine is automatically included
+```yaml
+distributed:
+  enabled: true
+  local_max_jobs: 4
+  remote_root: ~/.hsm/runs
+  conda_env: my-env
+  remotes:
+    box-1:
+      max_parallel_jobs: 4
+      gpus: [0, 1, 2, 3]
+    box-2:
+      max_parallel_jobs: 2
+      conda_env: my-env-cpu
 ```
 
-### 3. Test All Sources
-```bash
-hsm distributed test --all
-```
+Then:
 
-### 4. Run Distributed Sweep
 ```bash
 hsm sweep run --mode distributed
 ```
 
-HSM will automatically balance jobs across all available sources:
+HSM fans the parameter combinations across all sources (local + every
+enabled remote) using a round-robin or least-loaded strategy. Schema
+details in [SSH_EXECUTION.md](SSH_EXECUTION.md#hsmconfigyaml--the-distributed-block).
+
+## Step 4 — inspect
+
+Each sweep lands at `sweeps/outputs/<sweep_id>/`:
+
 ```
-✓ 3 compute sources ready for distributed execution
-Starting distributed execution across 3 sources...
-[1/24] Job task_001 submitted to local
-[2/24] Job task_002 submitted to gpu-server1  
-[3/24] Job task_003 submitted to gpu-server2
-...
-Progress: 18/24 (75.0%) - ✓ 15 completed, ✗ 0 failed
+sweeps/outputs/sweep_20260601_143022/
+├── sweep_config.yaml            # snapshot of what you ran
+├── submission_summary.txt       # job IDs + final statuses
+├── tasks/
+│   ├── task_001/
+│   │   ├── task_info.txt        # node, params, started/finished, status
+│   │   ├── command.txt          # exact command that ran
+│   │   └── <your training outputs here>
+│   ├── task_002/
+│   └── ...
+├── logs/
+└── scripts/
 ```
 
-## 🏛️ HPC Mode - Quick Start
+Quick status:
 
-Submit array jobs to PBS/Torque or Slurm clusters.
-
-### 1. Verify HPC System
 ```bash
-# PBS/Torque
-qstat --version
-
-# Slurm  
-squeue --version
+hsm sweep status                          # all sweeps
+hsm sweep status <sweep_id>               # one sweep, detail
+hsm sweep report <sweep_id>               # completion report
+hsm sweep errors <sweep_id>               # error summaries for failed tasks
 ```
 
-HSM auto-detects your scheduler.
+## Step 5 — partial sweeps + retries
 
-### 2. Configure HPC Settings
-Edit `sweeps/hsm_config.yaml`:
-```yaml
-hpc:
-  default_walltime: "04:00:00"
-  default_resources: "select=1:ncpus=4:mem=16gb"  # PBS
-  # default_resources: "--nodes=1 --ntasks=4 --mem=16G"  # Slurm
-  system: "pbs"  # or "slurm"
-```
+If some tasks failed (or you killed the sweep midway), continue from
+where you left off:
 
-### 3. Submit Array Job
 ```bash
-hsm sweep run --mode array --walltime "02:00:00"
+hsm sweep complete <sweep_id>
 ```
 
-### 4. Monitor Progress
-```bash
-hsm monitor --watch
-```
+This re-runs missing/failed tasks while preserving task numbering. See
+[COMPLETION_RUNS.md](COMPLETION_RUNS.md) for filter flags
+(`--task-ids`, `--no-retry-failed`, etc.).
 
-## 📊 Monitoring & Results
+## Common environment + tooling notes
 
-### Real-time Monitoring
-```bash
-# Monitor specific sweep
-hsm monitor sweep_20241215_143022 --watch
+- HSM's CLI is the only sync boundary; everything below it is async.
+  If you're using HSM from Python, see
+  [`../api_reference/compute_sources.md`](../api_reference/compute_sources.md)
+  for the `run_sweep_async()` + `ComputeSource` API.
+- `~/.ssh/config` is the single source of truth for SSH host resolution.
+  Aliases, `ProxyJump`, port, identity files — all honored.
+- `hsm remote gpus <alias>` is a quick way to see what's free on a box
+  before submitting a sweep there.
+- `hsm remote clean <alias>` removes HSM's scratch on a remote.
 
-# Monitor recent sweeps  
-hsm recent --watch
+## Where to next
 
-# Monitor HPC queue
-hsm queue --watch
-```
-
-### Collect Results
-```bash
-# Collect remote results
-hsm collect-results sweep_20241215_143022
-
-# Export results to CSV
-hsm results sweep_20241215_143022 --format csv
-```
-
-## 🔧 Common Configuration
-
-### HSM Configuration (`sweeps/hsm_config.yaml`)
-```yaml
-# Project paths
-paths:
-  python_interpreter: /opt/conda/bin/python
-  train_script: train.py
-  project_root: /path/to/project
-
-# HPC settings
-hpc:
-  default_walltime: "04:00:00"  
-  default_resources: "select=1:ncpus=4:mem=16gb"
-  system: "pbs"
-
-# W&B integration
-wandb:
-  project: my-experiment
-  entity: my-team
-
-# Distributed computing
-distributed:
-  enabled: true
-  strategy: "round_robin"
-  remotes:
-    gpu-server:
-      host: gpu.university.edu
-      max_parallel_jobs: 2
-```
-
-### Sweep Configuration (`sweeps/sweep.yaml`)
-```yaml
-sweep:
-  grid:
-    seed: [1, 2, 3, 4, 5]
-    model.hidden_size: [128, 256, 512]
-    optimizer.lr: [0.001, 0.01, 0.1]
-  
-  paired:
-    - model_and_data:
-        model.name: [cnn, transformer]
-        data.augmentation: [basic, advanced]
-
-metadata:
-  description: "Hyperparameter sweep for model comparison"
-  tags: ["baseline", "comparison"]
-```
+- [SSH_EXECUTION.md](SSH_EXECUTION.md) — the push-model recipe + the
+  `distributed:` config schema.
+- [HPC_EXECUTION.md](HPC_EXECUTION.md) — Slurm / PBS + the `--resources`
+  gap workaround.
+- [../api_reference/compute_sources.md](../api_reference/compute_sources.md) — Python API.
+- [../../ARCHITECTURE.md](../../ARCHITECTURE.md) — design rationale.

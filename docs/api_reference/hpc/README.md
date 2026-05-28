@@ -1,4 +1,17 @@
-# HPC Execution Module
+# HPC Execution Module (legacy)
+
+> **⚠️ Legacy — scheduled for deletion in Pass B-heavy.**
+>
+> `HPCJobManager` / `SlurmJobManager` / `PBSJobManager` documented below
+> are the v0.1 sync hierarchy. **For new code, use
+> [`SlurmComputeSource`](../compute_sources.md#slurmcomputesource)
+> instead** — async, typed `ResourceSpec`, integrates with the unified
+> `SweepOrchestrator`. The CLI's `--mode array` / `--mode individual` /
+> `--mode auto` already route through `SlurmComputeSource` for non-completion
+> runs.
+>
+> See [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md#legacy-tier-whats-still-alive-and-why)
+> for why this tier still exists (completion-runs blocker).
 
 The HPC execution module provides interfaces for submitting jobs to High Performance Computing clusters using schedulers like PBS/Torque and Slurm.
 

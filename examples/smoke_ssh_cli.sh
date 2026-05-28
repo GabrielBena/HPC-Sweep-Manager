@@ -6,12 +6,12 @@
 # rsync them back and confirm they appear locally, then check that the remote
 # per-sweep dir was auto-cleaned on success.
 #
-# Usage:
-#     bash examples/smoke_ssh_cli.sh                  # bare-alias, 2 tasks, bare python
-#     REMOTE=anahita bash examples/smoke_ssh_cli.sh   # pick a different alias
-#     CONDA_ENV=lab bash examples/smoke_ssh_cli.sh    # use 'conda run -n lab python'
-#     bash examples/smoke_ssh_cli.sh --dry-only       # dry-run only, no submission
-#     bash examples/smoke_ssh_cli.sh --keep           # keep $WORK between runs
+# Usage (REMOTE is required — set it to your ~/.ssh/config alias):
+#     REMOTE=my-box bash examples/smoke_ssh_cli.sh
+#     REMOTE=my-box CONDA_ENV=my-env bash examples/smoke_ssh_cli.sh   # use `conda run -n my-env python`
+#     REMOTE=my-box GPUS=0,1 bash examples/smoke_ssh_cli.sh           # allowlist
+#     REMOTE=my-box bash examples/smoke_ssh_cli.sh --dry-only         # no submission
+#     REMOTE=my-box bash examples/smoke_ssh_cli.sh --keep              # keep $WORK between runs
 #
 # Prerequisites:
 #   - `pip install -e ".[dev]"` of this repo locally.
@@ -37,7 +37,7 @@ for arg in "$@"; do
     --dry-only) DRY_ONLY=1 ;;
     --keep)     KEEP=1 ;;
     -h|--help)
-      sed -n '2,28p' "$0"
+      sed -n '2,30p' "$0"
       exit 0
       ;;
     *)
@@ -48,8 +48,11 @@ for arg in "$@"; do
 done
 
 # ----- tune for your setup ---------------------------------------------------
-REMOTE="${REMOTE:-anahita}"
-CONDA_ENV="${CONDA_ENV:-hsm}"  # empty → bare `python`; default 'hsm' for the lab box
+# REMOTE is required: must be a ~/.ssh/config alias you can ssh to.
+REMOTE="${REMOTE:?set REMOTE=<your-ssh-alias> (must resolve via ~/.ssh/config)}"
+# CONDA_ENV is optional: empty → bare `python` on the remote PATH;
+# else uses `conda run -n <env> python` (the script auto-sources conda init).
+CONDA_ENV="${CONDA_ENV:-}"
 WORK="${TMPDIR:-/tmp}/hsm-ssh-smoke"
 GPUS="${GPUS:-all}"            # all / cpu / N / i,j,k
 MAX_PARALLEL="${MAX_PARALLEL:-2}"

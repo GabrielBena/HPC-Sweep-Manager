@@ -1,189 +1,193 @@
-# CLI Commands Reference
+# CLI reference
 
-HSM provides a comprehensive command-line interface for managing parameter sweeps across different execution environments.
+Every `hsm <group> <command>` documented here is verified against
+`hsm --help` output. If you spot drift, regenerate this doc by running
+each group's `--help` and comparing.
 
-## Core Commands
+For broader tutorials (sweep config, training-script contract, GPU
+pinning, etc.) see the [user guides](../user_guide/).
 
-- **`hsm init`** - Initialize HSM in your project (creates config files)
-- **`hsm sweep run`** - Execute parameter sweeps across different modes (shortcut: `hsm run`)
-- **`hsm sweep complete`** - Complete partially finished sweeps
-- **`hsm sweep status`** - Show sweep completion status
-- **`hsm sweep errors`** - Show error summaries for sweeps
-- **`hsm monitor`** - Monitor job progress and status  
-- **`hsm remote`** - Manage remote machines for SSH-based execution
-- **`hsm distributed`** - Manage distributed computing across multiple sources
-- **`hsm collect-results`** - Collect and aggregate results from remote runs
+## Top-level groups
 
-## Quick Reference
-
-### Common Workflows
-
-#### Development & Testing
-```bash
-# Initialize project
-hsm init
-
-# Small local test
-hsm sweep run --mode local --parallel-jobs 2 --max-runs 5 --show-output
-
-# Monitor progress
-hsm monitor --watch
+```
+hsm setup    init configure                       # bootstrap
+hsm sweep    run | complete | status | report | errors
+hsm remote   add | list | test | health | gpus | clean | remove
+hsm local    run | status | clean                 # legacy backend (kept until completion migrates)
+hsm hpc      submit | queue | status | cancel     # legacy backend (kept until completion migrates)
+hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
+hsm sync     init | list | run | to               # rsync results to a target
+hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
-#### Production HPC Runs
-```bash
-# Large array job
-hsm sweep run --mode array --walltime "08:00:00" --resources "select=4:ncpus=8:mem=32gb"
+Global options (apply to every command):
 
-# Monitor sweep progress
-hsm monitor --watch
+- `-v, --verbose` — DEBUG-level logging.
+- `-q, --quiet` — ERROR-level only.
+- `--version` — print version and exit.
 
-# Check queue status
-hsm queue --watch
+## `hsm setup`
+
+Project bootstrap. Run once per ML project.
+
+| Subcommand | What it does |
+|---|---|
+| `hsm setup init` | Auto-detect paths, write `.hsm/config.yaml`, `sweeps/example_sweep.yaml`, etc. Idempotent — re-running migrates an old `sweeps/hsm_config.yaml` to the new `.hsm/` layout. |
+| `hsm setup configure` | Interactive sweep-config builder. |
+
+## `hsm sweep`
+
+The main workflow. `hsm sweep run` is the entry point you'll use most.
+
+### `hsm sweep run`
+
+```
+hsm sweep run [OPTIONS]
+
+  -c, --config PATH                  Path to sweep config (default: sweeps/sweep.yaml)
+  --mode [auto|local|array|individual|distributed|remote]
+                                     Default: 'remote' if --remote given, else 'auto'
+  --remote TEXT                      ssh-config alias to push the sweep to. Implies --mode remote.
+  --gpus TEXT                        Allowlist on the remote: 'all' (default), 'cpu', int N, or '0,1,3'.
+  -d, --dry-run                      Render scripts + show resolved spec; no submission.
+  --count-only                       Count parameter combinations and exit.
+  --max-runs INTEGER                 Cap N for testing.
+  --walltime TEXT                    HH:MM:SS (overrides hpc.default_walltime).
+  --resources TEXT                   Scheduler resource string (slurm `--flag=value` or PBS `select=...`).
+  --group TEXT                       W&B group name for this sweep.
+  --priority INTEGER                 Job priority (HPC schedulers that support it).
+  -p, --parallel-jobs INTEGER        Max concurrent jobs (local / remote slot count).
+  --show-output                      Stream stdout/stderr live (local mode only).
+  --no-progress                      Suppress progress callback prints.
 ```
 
-#### Remote Execution
-```bash
-# Setup remote machine
-hsm remote add gpu-server --host "gpu.university.edu"
-
-# Test connection
-hsm remote test gpu-server
-
-# Execute sweep
-hsm sweep run --mode remote --remote gpu-server --max-runs 20
-```
-
-## Global Options
-
-All HSM commands support these global options:
-
-- `--config-dir PATH` - Specify custom config directory
-- `--verbose` - Enable verbose output
-- `--quiet` - Suppress non-essential output
-- `--help` - Show command help
-
-## Configuration Precedence
-
-HSM resolves configuration from multiple sources in this order:
-
-1. **Command-line flags** (highest priority)
-2. **Environment variables** 
-3. **HSM config file** (`hsm_config.yaml`)
-4. **Default values** (lowest priority)
-
-## Environment Variables
-
-Set these to override default behavior:
+Examples:
 
 ```bash
-export HSM_CONFIG_DIR="./configs"
-export HSM_VERBOSE=true
-export HSM_DEFAULT_MODE="local"
-export HSM_MAX_PARALLEL_JOBS=4
+hsm sweep run --mode local --parallel-jobs 4
+hsm sweep run --mode array --walltime 01:00:00 --resources "--cpus-per-task=4 --mem=16gb"
+hsm sweep run --remote my-box --gpus 0,1 --resources "--gpus=1"
+hsm sweep run --mode distributed     # uses .hsm/config.yaml's distributed: block
 ```
 
-## Exit Codes
+### `hsm sweep complete <sweep_id>`
 
-HSM commands return standardized exit codes:
+Resume an incomplete sweep by re-running missing/failed task numbers.
+Same flags as `run` plus `--task-ids "1,3,5-9"`, `--no-retry-failed`,
+`--complete-baselines`, `--verify-running`, etc.
 
-- `0` - Success
-- `1` - General error
-- `2` - Configuration error
-- `3` - Connection/network error  
-- `4` - Permission/authentication error
-- `5` - Resource not found
-- `130` - Interrupted by user (Ctrl+C)
+See [../user_guide/COMPLETION_RUNS.md](../user_guide/COMPLETION_RUNS.md).
 
-## Error Handling
+### `hsm sweep status [sweep_id]`
 
-HSM provides clear error messages and suggestions:
+Show completion status. With no argument, summarizes every sweep under
+`sweeps/outputs/`. With a sweep ID, shows per-task state.
 
-```bash
-$ hsm sweep --mode invalid
-Error: Invalid execution mode 'invalid'
-Available modes: local, array, individual, remote
+### `hsm sweep report <sweep_id>` / `errors <sweep_id>`
 
-Suggestion: Use 'hsm sweep --help' to see available options
-```
+Detailed completion report; error summaries for FAILED tasks.
 
-## Logging
+## `hsm remote`
 
-HSM logs are written to:
-- **Console**: Real-time status and errors
-- **Log files**: Detailed execution logs in sweep directories
-- **HSM log**: Global HSM operations in `~/.hsm/hsm.log`
+Manage SSH remote registrations. Many of these work with a bare
+`~/.ssh/config` alias (no `hsm remote add` required first).
 
-Control logging verbosity:
-```bash
-hsm sweep --verbose      # Detailed output
-hsm sweep --quiet        # Minimal output  
-hsm sweep --debug        # Debug-level logging
-```
+| Subcommand | What it does |
+|---|---|
+| `hsm remote add <name> [host]` | Register a remote in `.hsm/config.yaml`. Host defaults to alias. Optional flags: `--key`, `--port`, `--max-jobs`, `--enabled/--disabled`. |
+| `hsm remote list` | Table of registered remotes. |
+| `hsm remote test <name> [more...]` / `--all` | Quick SSH ping (date + python --version + uptime). |
+| `hsm remote health <name> [more...]` / `--all` / `--watch` | Detailed health (load + disk + python). `--watch` polls. |
+| `hsm remote gpus <name> [more...]` / `--all` | `nvidia-smi` probe; shows memory + util + free/busy per GPU. |
+| `hsm remote clean <name>` / `--all-projects` / `-y` | `rm -rf` HSM's scratch on the remote (this project's dir or the whole `~/.hsm/runs/`). |
+| `hsm remote remove <name>` | Unregister from config. |
 
-## Auto-completion
+See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the full SSH workflow.
 
-Enable bash completion for HSM commands:
+## `hsm monitor`
 
-```bash
-# Add to ~/.bashrc
-eval "$(_HSM_COMPLETE=bash_source hsm)"
+Live sweep monitoring + job management.
 
-# Or for zsh, add to ~/.zshrc  
-eval "$(_HSM_COMPLETE=zsh_source hsm)"
-```
+| Subcommand | What it does |
+|---|---|
+| `hsm monitor watch [sweep_id]` | Live progress display. |
+| `hsm monitor status` | One-shot status snapshot. |
+| `hsm monitor recent [--days N]` | Recent sweeps from the last N days. |
+| `hsm monitor queue` | All your jobs across schedulers. |
+| `hsm monitor cancel <sweep_id>` | Cancel a running sweep. |
+| `hsm monitor cleanup` | Tidy old job artifacts by age/state. |
+| `hsm monitor delete-jobs` | Delete specific jobs with filters. |
 
-## Configuration Files
+## `hsm sync`
 
-HSM uses YAML configuration files:
+rsync sweep outputs to a destination machine (or pull them from one).
+Separate from the auto-rsync inside `--remote` execution; this is for
+moving completed sweep dirs around after the fact.
 
-### Sweep Configuration (`sweeps/sweep.yaml`)
-```yaml
-sweep:
-  grid:
-    lr: [0.001, 0.01, 0.1]
-    batch_size: [16, 32, 64]
-```
+| Subcommand | What it does |
+|---|---|
+| `hsm sync init` | Write `.hsm/sync_config.yaml` template. |
+| `hsm sync list` | Show configured sync targets. |
+| `hsm sync run <sweep_id> [--target X]` | Sync one sweep. |
+| `hsm sync to <target>` | Sync the most recent sweep to a target. |
+| `hsm sync cache` | Manage wandb sync cache. |
+| `hsm sync clean` | Delete local sweep data including wandb runs + metadata. |
 
-### HSM Configuration (`sweeps/hsm_config.yaml`)
-```yaml
-paths:
-  python_interpreter: /opt/conda/bin/python
-  train_script: ./train.py
-  
-hpc:
-  default_walltime: "04:00:00"
-  default_resources: "select=1:ncpus=4:mem=16gb"
-```
+## `hsm local` (legacy)
 
-## Debugging Tips
+Direct local execution via the legacy `LocalJobManager`. Kept until
+completion runs migrate to `LocalComputeSource`.
 
-### Dry Run Mode
-Test commands without execution:
-```bash
-hsm sweep run --dry-run    # Show what would be executed
-```
+| Subcommand | What it does |
+|---|---|
+| `hsm local run` | Run a sweep locally (legacy path). |
+| `hsm local status` | Local environment info. |
+| `hsm local clean` | Clean old local sweep outputs. |
 
-### Verbose Output
-Get detailed information:
-```bash
-hsm sweep run --verbose    # Detailed execution info
-hsm remote test --verbose  # Connection diagnostics
-```
+Prefer `hsm sweep run --mode local` for new work — it goes through the
+unified orchestrator.
 
-### Log Files
-Check logs for detailed error information:
-```bash
-# Global HSM log
-cat ~/.hsm/hsm.log
+## `hsm hpc` (legacy)
 
-# Sweep-specific logs
-cat sweeps/outputs/sweep_*/logs/*.log
-```
+Direct HPC submission via the legacy `HPCJobManager`. Kept until
+completion runs migrate to `SlurmComputeSource` / `PBSComputeSource`.
 
-### Configuration Validation
-Verify your configuration:
-```bash
-hsm configure validate    # Check config syntax
-hsm init --dry-run       # Validate auto-detected paths
-``` 
+| Subcommand | What it does |
+|---|---|
+| `hsm hpc submit` | Submit a sweep to Slurm/PBS (legacy path). |
+| `hsm hpc queue` | List your queued jobs. |
+| `hsm hpc status` | HPC system status. |
+| `hsm hpc cancel` | Cancel a specific HPC job. |
+
+Prefer `hsm sweep run --mode array|individual|auto` for new work.
+
+## `hsm analyze`
+
+Codebase analysis tooling — for HSM developers, not sweep users.
+
+| Subcommand | What it does |
+|---|---|
+| `hsm analyze enable-tracking` | Turn on usage tracking. |
+| `hsm analyze report` | Generate a usage-analysis report. |
+| `hsm analyze dead-code` | Detect unused code. |
+| `hsm analyze complexity` | Code complexity report. |
+| `hsm analyze dependencies` | Module-dependency graph. |
+| `hsm analyze coverage-gaps` | Identify test coverage gaps. |
+
+## Environment variables
+
+- `HSM_FAKE_STATE_DIR`, `HSM_FAKE_PENDING_S`, `HSM_FAKE_RUNNING_S`,
+  `HSM_FAKE_GPU_COUNT` — internal use, populated by test fixtures. Not
+  for normal usage.
+
+## Exit codes
+
+- `0` — success.
+- non-zero — error (specific code depends on subcommand).
+
+## See also
+
+- [../user_guide/getting_started.md](../user_guide/getting_started.md)
+- [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md)
+- [../user_guide/HPC_EXECUTION.md](../user_guide/HPC_EXECUTION.md)
+- [../api_reference/](../api_reference/)

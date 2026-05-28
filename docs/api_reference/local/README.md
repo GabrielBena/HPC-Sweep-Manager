@@ -1,5 +1,16 @@
 # Local Execution Module
 
+> **Mixed: live + legacy.**
+>
+> `LocalComputeSource` is **LIVE** — see
+> [../compute_sources.md#localcomputesource](../compute_sources.md#localcomputesource).
+> It's the backend `hsm sweep run --mode local` uses, and what new code
+> should target. The `LocalJobManager` covered later in this document
+> is **legacy** (sync; used only by `hsm local run` and the completion
+> path) and is scheduled for deletion in Pass B-heavy. See
+> [../../../ARCHITECTURE.md](../../../ARCHITECTURE.md#legacy-tier-whats-still-alive-and-why)
+> for why both still ship.
+
 The Local execution module enables parallel job execution on a single machine using Python's ThreadPoolExecutor.
 
 ## Overview
@@ -191,15 +202,16 @@ export HSM_LOCAL_SHOW_OUTPUT=true
 
 ## Integration with CLI
 
-The local module integrates seamlessly with HSM CLI commands:
+The local module integrates with HSM CLI commands:
 
 ```bash
-# Local mode execution
+# Local mode execution (routes through LocalComputeSource — live path).
 hsm sweep run --mode local --parallel-jobs 4 --show-output
 
-# Local monitoring
-hsm monitor --mode local --sweep-id local_test
+# Local monitoring.
+hsm monitor watch <sweep_id>
 
-# Local result collection
-hsm collect-results --sweep-id local_test
+# Results are written directly to sweeps/outputs/<sweep_id>/tasks/* by the
+# training script (via output.dir). No separate collection step needed for
+# local mode.
 ``` 

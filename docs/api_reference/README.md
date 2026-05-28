@@ -1,39 +1,87 @@
-# API Reference
+# API reference
 
-This section provides detailed documentation for HSM's core modules and classes for developers who want to extend or integrate HSM.
+Python entry points if you want to embed HSM in your own scripts (or
+contribute to it). For end-user CLI usage see the
+[user guides](../user_guide/).
 
-## Core Modules
+## Live tier (use these for new code)
 
-### Job Management
-- [Job Manager](job_manager.md) - Central job management interface
-- [Compute Sources](compute_sources.md) - Abstract compute resource interfaces
+- **[ComputeSource + JobInfo](compute_sources.md)** — the unified async
+  interface implemented by `LocalComputeSource`, `SlurmComputeSource`,
+  `SSHComputeSource`, `DistributedComputeSource`. This is the
+  canonical place new backends and sweep drivers live.
+- **`core/common/sweep_orchestrator.py`** —
+  `build_compute_source(mode, ...)`, `run_sweep_async(...)`,
+  `spec_from_cli(...)`. The async sweep lifecycle driver every CLI
+  mode (except completion) routes through.
+- **`core/common/resource_spec.py`** — typed `ResourceSpec` dataclass
+  (walltime, cpus, mem, gpus, gpu_type, modules, qos, account,
+  pre_script, extra_directives). Replaces the legacy opaque
+  `resources: str` field.
 
-### Execution Modes
-- [Local Execution](local/README.md) - Single machine parallel execution
-- [HPC Execution](hpc/README.md) - HPC cluster job submission (PBS/Slurm)
+## Legacy tier (kept for completion runs + `hsm hpc|local` CLIs)
 
-For complete CLI documentation, see the [CLI Reference](../cli/README.md).
+These will be deleted in Pass B-heavy once `core/common/completion.py`
+migrates to the unified orchestrator. Don't extend them.
 
-## Architecture Overview
+- **[Job manager (legacy)](job_manager.md)** — `BaseJobManager` +
+  `HPCJobManager` + per-scheduler subclasses.
+- **[HPC manager (legacy)](hpc/README.md)** — `SlurmJobManager`,
+  `PBSJobManager`.
+- **[Local manager (legacy)](local/README.md)** — `LocalJobManager`.
 
-HSM follows a modular architecture with clear separation of concerns:
+## Design principles
+
+1. **Async by default below the CLI.** Every `ComputeSource` method is
+   async; the CLI is the only sync boundary
+   (`asyncio.run(run_sweep_async(...))`).
+2. **Typed resource specs.** Backends never receive an opaque string;
+   they get a `ResourceSpec` and emit their own native syntax.
+3. **Push-model SSH.** Remote machines are dumb compute targets: bash +
+   rsync + optionally nvidia-smi. No HSM install, no remote project
+   discovery.
+4. **Strangler-fig migration.** New code (Tier 1, the ComputeSource
+   path) runs alongside the legacy tier; a single future commit
+   deletes the legacy tier when completion-runs migrate.
+
+## Where to look in the code
 
 ```
-HSM Architecture
-├── CLI Layer (Click-based commands)
-├── Job Manager (Central orchestration)
-├── Compute Sources (Execution backends)
-│   ├── Local (ThreadPoolExecutor)
-│   ├── HPC (PBS/Slurm)
-│   ├── Remote (SSH)
-│   └── Distributed (Multi-remote)
-└── Common Utilities (Config, paths, params)
+src/hpc_sweep_manager/
+├── cli/                              # Click command tree
+├── core/
+│   ├── common/
+│   │   ├── compute_source.py         # ABC + JobInfo + SweepResult
+│   │   ├── sweep_orchestrator.py     # build_compute_source + run_sweep_async
+│   │   ├── resource_spec.py          # typed ResourceSpec
+│   │   ├── config.py                 # HSMConfig + SweepConfig
+│   │   ├── templating.py             # params_to_hydra_args + render_template
+│   │   ├── param_generator.py        # grid + paired → param combinations
+│   │   ├── completion.py             # LEGACY — completion runs (Pass B-heavy blocker)
+│   │   └── base_manager.py           # LEGACY — base of the legacy hierarchy
+│   ├── local/
+│   │   ├── local_compute_source.py   # LIVE
+│   │   └── local_manager.py          # LEGACY
+│   ├── hpc/
+│   │   ├── slurm_compute_source.py   # LIVE
+│   │   ├── slurm_manager.py          # LEGACY
+│   │   ├── pbs_manager.py            # LEGACY
+│   │   └── hpc_base.py               # LEGACY
+│   ├── remote/
+│   │   ├── ssh_compute_source.py     # LIVE — push-model + factory + parse_gpus_arg
+│   │   ├── push_exec.py              # LIVE — pure helpers (rsync cmds, slot logic)
+│   │   ├── gpu_probe.py              # LIVE — nvidia-smi parser
+│   │   └── discovery.py              # LIVE but slim — just create_ssh_connection
+│   └── distributed/
+│       ├── distributed_compute_source.py  # LIVE — fan-out wrapper
+│       ├── distributed_manager.py    # interior; wrapped, not user-facing
+│       └── wrapper.py                # LEGACY — used by completion
+└── templates/
+    ├── slurm_single.sh.j2            # one task per sbatch
+    ├── slurm_array.sh.j2             # array submission
+    ├── local_compute_source.sh.j2    # local wrapper
+    └── ssh_compute_source.sh.j2      # push-SSH wrapper
 ```
 
-## Key Design Principles
-
-1. **Unified Interface** - Same API across all execution modes
-2. **Auto-Discovery** - Automatic detection of environments and paths
-3. **Organized Outputs** - Structured job organization and logging
-4. **Extensibility** - Easy to add new compute sources and schedulers
-5. **Error Handling** - Robust error recovery and user feedback 
+For deep design context see [../../ARCHITECTURE.md](../../ARCHITECTURE.md).
+For the agent on-boarding shortlist see [../../CLAUDE.md](../../CLAUDE.md).
