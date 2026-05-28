@@ -1,7 +1,8 @@
 """Sweep execution CLI commands."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -856,6 +857,433 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
 
     console.print("\n[cyan]💡 Use --all to see full error details[/cyan]")
     console.print("[cyan]💡 Use --pattern to filter by specific error types[/cyan]")
+
+
+# --------------------------------------------------------------------------
+# Sweep lifecycle commands moved here from the deleted `hsm monitor` group:
+# watch / recent / queue / cancel / cleanup. All read on-disk metadata via
+# SweepCompletionAnalyzer — no scheduler polling, works for every backend.
+# --------------------------------------------------------------------------
+
+
+def _load_sweep_meta(sweep_dir: Path) -> dict:
+    """Parse ``submission_summary.txt`` into a small dict for lifecycle ops.
+
+    Missing fields just stay ``None`` — every consumer tolerates that. The
+    truth-source for *progress* is ``SweepCompletionAnalyzer`` (reads
+    ``tasks/*/task_info.txt``); this is only for sweep-level metadata like
+    submission time, backend type, and the list of job IDs.
+    """
+    info: dict = {
+        "sweep_id": sweep_dir.name,
+        "sweep_dir": sweep_dir,
+        "submission_time": None,
+        "mode": None,
+        "backend": None,
+        "job_ids": [],
+        "total_combinations": 0,
+    }
+    summary = sweep_dir / "submission_summary.txt"
+    if not summary.exists():
+        return info
+    try:
+        for line in summary.read_text().splitlines():
+            if line.startswith("Submission Time:"):
+                ts = line.split(":", 1)[1].strip()
+                for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                    try:
+                        info["submission_time"] = datetime.strptime(ts, fmt)
+                        break
+                    except ValueError:
+                        continue
+            elif line.startswith("Mode:"):
+                info["mode"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Backend:"):
+                info["backend"] = line.split(":", 1)[1].strip()
+            elif line.startswith("Total Combinations:"):
+                try:
+                    info["total_combinations"] = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("Job IDs:"):
+                ids = line.split(":", 1)[1].strip()
+                info["job_ids"] = [j.strip() for j in ids.split(",") if j.strip()]
+    except Exception:  # noqa: BLE001 — never break on a malformed summary file
+        pass
+    return info
+
+
+@sweep_cmd.command("watch")
+@click.argument("sweep_id")
+@click.option("--refresh", default=5, type=int, help="Refresh interval in seconds (default 5)")
+@click.option(
+    "--once", is_flag=True, help="Show progress once and exit (don't refresh)"
+)
+@common_options
+@click.pass_context
+def watch_cmd(ctx, sweep_id, refresh, once, verbose, quiet):
+    """Live progress view for a single sweep (Ctrl+C to exit).
+
+    Reads ``tasks/*/task_info.txt`` via the same analyzer that backs
+    ``hsm sweep status`` / ``hsm sweep report``. Works for every backend
+    (local / Slurm / SSH push / distributed) because the source of truth
+    is on-disk task state, not a scheduler queue.
+    """
+    import time as _time
+
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.progress_bar import ProgressBar
+
+    from ..core.common.sweep_analysis import SweepCompletionAnalyzer
+
+    console = ctx.obj["console"]
+    sweep_dir = Path("sweeps/outputs") / sweep_id
+    if not sweep_dir.exists():
+        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
+        return
+
+    analyzer = SweepCompletionAnalyzer(sweep_dir)
+
+    def _render() -> Panel:
+        a = analyzer.analyze_completion_status()
+        if "error" in a:
+            return Panel(f"[red]{a['error']}[/red]", title=sweep_id)
+        total = a["total_expected"]
+        done = a["total_completed"]
+        failed = a["total_failed"]
+        missing = a["total_missing"]
+        running = a.get("total_running", 0)
+        cancelled = a.get("total_cancelled", 0)
+        rate = a["completion_rate"]
+        bar = ProgressBar(total=max(total, 1), completed=done, width=40)
+        lines = [
+            f"[bold]{sweep_id}[/bold]",
+            "",
+            f"[green]Completed:[/green] {done}",
+            f"[red]Failed:[/red]    {failed}",
+            f"[yellow]Missing:[/yellow]   {missing}",
+        ]
+        if running:
+            lines.append(f"[blue]Running:[/blue]   {running}")
+        if cancelled:
+            lines.append(f"Cancelled: {cancelled}")
+        lines.append(f"[bold]Total:[/bold]     {total}")
+        lines.append("")
+        lines.append(f"Progress: {done}/{total} ({rate:.1f}%)")
+        from rich.console import Group
+        return Panel(
+            Group("\n".join(lines), bar),
+            title=f"hsm sweep watch — {sweep_id}",
+            border_style="cyan",
+        )
+
+    if once:
+        console.print(_render())
+        return
+
+    try:
+        with Live(_render(), console=console, refresh_per_second=1) as live:
+            while True:
+                _time.sleep(max(refresh, 1))
+                live.update(_render())
+                # Stop refreshing once everything's terminal.
+                a = analyzer.analyze_completion_status()
+                if "error" not in a and not a.get("needs_completion"):
+                    break
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopped watching.[/yellow]")
+
+
+@sweep_cmd.command("recent")
+@click.option("-d", "--days", default=7, type=int, help="Show sweeps from last N days")
+@common_options
+@click.pass_context
+def recent_cmd(ctx, days, verbose, quiet):
+    """List sweeps submitted in the last N days."""
+    from rich.table import Table
+
+    from ..core.common.sweep_analysis import SweepCompletionAnalyzer
+
+    console = ctx.obj["console"]
+
+    sweeps_dir = Path("sweeps/outputs")
+    if not sweeps_dir.exists():
+        console.print("[yellow]No sweeps/outputs directory found.[/yellow]")
+        return
+
+    cutoff = datetime.now() - timedelta(days=days)
+
+    rows = []
+    for sweep_dir in sweeps_dir.iterdir():
+        if not sweep_dir.is_dir() or not sweep_dir.name.startswith("sweep_"):
+            continue
+        meta = _load_sweep_meta(sweep_dir)
+        ts = meta["submission_time"]
+        # Fallback: directory mtime when there's no summary file yet.
+        if ts is None:
+            ts = datetime.fromtimestamp(sweep_dir.stat().st_mtime)
+        if ts < cutoff:
+            continue
+        analysis = SweepCompletionAnalyzer(sweep_dir).analyze_completion_status()
+        if "error" in analysis:
+            rate = -1
+            status = "?"
+            done = total = 0
+        else:
+            rate = analysis["completion_rate"]
+            done = analysis["total_completed"]
+            total = analysis["total_expected"]
+            status = "COMPLETE" if not analysis["needs_completion"] else "INCOMPLETE"
+        rows.append((ts, meta, done, total, rate, status))
+
+    if not rows:
+        console.print(f"[yellow]No sweeps in the last {days} day(s).[/yellow]")
+        return
+
+    rows.sort(key=lambda r: r[0], reverse=True)
+
+    table = Table(title=f"Recent Sweeps (last {days} day(s))")
+    table.add_column("Sweep ID", style="cyan")
+    table.add_column("Submitted", style="dim")
+    table.add_column("Backend", style="magenta")
+    table.add_column("Progress", style="green")
+    table.add_column("%", style="yellow", justify="right")
+    table.add_column("Status", style="bold")
+
+    for ts, meta, done, total, rate, status in rows:
+        progress = f"{done}/{total}" if total else "?"
+        rate_str = f"{rate:.0f}%" if rate >= 0 else "?"
+        status_style = (
+            "green" if status == "COMPLETE" else ("red" if status == "INCOMPLETE" else "dim")
+        )
+        table.add_row(
+            meta["sweep_id"],
+            ts.strftime("%Y-%m-%d %H:%M"),
+            meta["backend"] or "?",
+            progress,
+            rate_str,
+            f"[{status_style}]{status}[/{status_style}]",
+        )
+
+    console.print(table)
+
+
+@sweep_cmd.command("queue")
+@click.pass_context
+def queue_cmd(ctx):
+    """Show the cluster's job queue (auto-detects ``squeue`` or ``qstat``)."""
+    import shutil
+    import subprocess
+
+    console = ctx.obj["console"]
+
+    user = os.environ.get("USER") or os.environ.get("LOGNAME")
+    if shutil.which("squeue"):
+        cmd = ["squeue", "-u", user] if user else ["squeue"]
+    elif shutil.which("qstat"):
+        cmd = ["qstat", "-u", user] if user else ["qstat"]
+    else:
+        console.print(
+            "[yellow]Neither `squeue` nor `qstat` is on PATH — no cluster scheduler "
+            "detected. (`hsm sweep queue` is for HPC clusters.)[/yellow]"
+        )
+        return
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Failed to run {' '.join(cmd)}: {e}[/red]")
+        return
+    if result.returncode != 0:
+        console.print(f"[red]{cmd[0]} exited with rc={result.returncode}[/red]")
+        if result.stderr:
+            console.print(result.stderr.strip())
+        return
+    output = (result.stdout or "").rstrip()
+    if not output:
+        console.print(f"[green]No jobs currently in the queue ({cmd[0]}).[/green]")
+        return
+    console.print(output)
+
+
+@sweep_cmd.command("cancel")
+@click.argument("sweep_id")
+@click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt")
+@click.pass_context
+def cancel_cmd(ctx, sweep_id, yes):
+    """Cancel a running sweep.
+
+    Routes by backend (read from ``submission_summary.txt``):
+
+    - Slurm → ``scancel <job_id>`` per job ID.
+    - PBS   → ``qdel <job_id>`` per job ID.
+    - Local → kills processes matching the sweep ID via ``pkill -f``.
+    - SSH push / distributed → cannot remote-cancel reliably (no remote-pid
+      tracking once the local ``hsm sweep run`` exits). Documents this and
+      tells the user to Ctrl+C the local driver process instead.
+    """
+    import shutil
+    import subprocess
+
+    console = ctx.obj["console"]
+    sweep_dir = Path("sweeps/outputs") / sweep_id
+    if not sweep_dir.exists():
+        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
+        return
+
+    meta = _load_sweep_meta(sweep_dir)
+    backend = (meta["backend"] or "").lower()
+    job_ids = meta["job_ids"]
+
+    console.print(f"[bold]Cancelling sweep:[/bold] {sweep_id}")
+    console.print(f"  Backend: {backend or '?'}")
+    console.print(f"  Job IDs: {job_ids or '(none recorded)'}")
+
+    if not yes:
+        if not click.confirm("Proceed?", default=False):
+            console.print("Cancelled.")
+            return
+
+    if backend == "slurm":
+        tool = "scancel"
+    elif backend == "pbs":
+        tool = "qdel"
+    elif backend == "local":
+        # The local backend records job IDs like local_<pid>_<n>; killing the
+        # parent driver process tree is what works.
+        killed = 0
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", sweep_id], capture_output=True, text=True, timeout=10
+            )
+            if result.returncode in (0, 1):  # 0 = killed, 1 = nothing matched
+                killed = 1 if result.returncode == 0 else 0
+            else:
+                console.print(f"[yellow]pkill exited rc={result.returncode}[/yellow]")
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]pkill failed: {e}[/red]")
+            return
+        msg = "✓ killed local processes" if killed else "no matching local processes found"
+        console.print(f"[green]{msg}[/green]")
+        return
+    elif backend in ("ssh_remote", "distributed"):
+        console.print(
+            "[yellow]Cannot reliably remote-cancel push-model SSH sweeps from here. "
+            "If the local `hsm sweep run` process is still active, Ctrl+C it; "
+            "otherwise the remote tasks are already done or you can kill them via "
+            "`ssh <alias> 'pkill -f <sweep_id>'`.[/yellow]"
+        )
+        return
+    else:
+        console.print(
+            f"[yellow]Unknown backend {backend!r}; can't choose a cancel command.[/yellow]"
+        )
+        return
+
+    if not shutil.which(tool):
+        console.print(f"[red]{tool} not on PATH — can't cancel.[/red]")
+        return
+
+    ok = fail = 0
+    for jid in job_ids:
+        try:
+            r = subprocess.run([tool, jid], capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                ok += 1
+            else:
+                fail += 1
+                console.print(f"[red]✗ {tool} {jid}: {r.stderr.strip()}[/red]")
+        except Exception as e:  # noqa: BLE001
+            fail += 1
+            console.print(f"[red]✗ {tool} {jid}: {e}[/red]")
+
+    console.print(f"[bold]{ok} cancelled, {fail} failed.[/bold]")
+
+
+@sweep_cmd.command("cleanup")
+@click.option(
+    "-d", "--older-than-days", default=30, type=int, help="Delete sweep dirs older than N days"
+)
+@click.option(
+    "--keep-incomplete",
+    is_flag=True,
+    help="Skip sweeps that still have missing or failed tasks",
+)
+@click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt")
+@click.option("--dry-run", "-n", is_flag=True, help="List candidates without deleting")
+@click.pass_context
+def cleanup_cmd(ctx, older_than_days, keep_incomplete, yes, dry_run):
+    """Delete old sweep output dirs to reclaim disk.
+
+    Default policy: dirs whose submission time (or mtime if no summary) is
+    more than ``--older-than-days`` old. Use ``--keep-incomplete`` to spare
+    sweeps that still have failed/missing tasks. ``--dry-run`` to preview.
+    """
+    import shutil as _shutil
+
+    from ..core.common.sweep_analysis import SweepCompletionAnalyzer
+
+    console = ctx.obj["console"]
+
+    sweeps_dir = Path("sweeps/outputs")
+    if not sweeps_dir.exists():
+        console.print("[yellow]No sweeps/outputs directory found.[/yellow]")
+        return
+
+    cutoff = datetime.now() - timedelta(days=older_than_days)
+    candidates: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+
+    for sweep_dir in sweeps_dir.iterdir():
+        if not sweep_dir.is_dir() or not sweep_dir.name.startswith("sweep_"):
+            continue
+        meta = _load_sweep_meta(sweep_dir)
+        ts = meta["submission_time"] or datetime.fromtimestamp(sweep_dir.stat().st_mtime)
+        if ts >= cutoff:
+            continue
+        if keep_incomplete:
+            a = SweepCompletionAnalyzer(sweep_dir).analyze_completion_status()
+            if "error" not in a and a.get("needs_completion"):
+                skipped.append((sweep_dir, "incomplete"))
+                continue
+        candidates.append(sweep_dir)
+
+    if not candidates:
+        console.print(
+            f"[green]No sweeps older than {older_than_days} day(s) to delete.[/green]"
+        )
+        if skipped:
+            console.print(f"[dim]({len(skipped)} skipped — incomplete.)[/dim]")
+        return
+
+    console.print(
+        f"[bold]Would delete {len(candidates)} sweep dir(s) older than "
+        f"{older_than_days} day(s):[/bold]"
+    )
+    for path in candidates:
+        console.print(f"  {path}")
+    if dry_run:
+        console.print(f"\n[dim]Dry run — nothing removed.[/dim]")
+        return
+
+    if not yes:
+        if not click.confirm(f"Delete {len(candidates)} sweep dir(s)?", default=False):
+            console.print("Cancelled.")
+            return
+
+    removed = 0
+    for path in candidates:
+        try:
+            _shutil.rmtree(path)
+            removed += 1
+        except Exception as e:  # noqa: BLE001
+            console.print(f"[red]Failed to remove {path}: {e}[/red]")
+    console.print(f"[green]✓ Removed {removed} sweep dir(s).[/green]")
+    if skipped:
+        console.print(
+            f"[dim]Kept {len(skipped)} incomplete sweep(s) (use without --keep-incomplete to remove).[/dim]"
+        )
 
 
 # Legacy aliases — kept hidden for backwards-compat invocation patterns.

@@ -174,8 +174,10 @@ before submission.
 
 ## Inspecting + cancelling
 
-Use `hsm monitor watch <sweep_id>` for live job state or `scancel <id>`
-directly to cancel a Slurm job.
+Use `hsm sweep watch <sweep_id>` for live job state, `hsm sweep queue`
+for the cluster's queue, or `scancel <id>` directly to cancel a Slurm
+job. `hsm sweep cancel <sweep_id>` dispatches to `scancel` for every
+job ID recorded in the sweep.
 
 Per-task outputs land in `sweeps/outputs/<sweep-id>/tasks/task_NNN/`
 (see [`examples/test_train.py`](../../examples/test_train.py) for the

@@ -6,11 +6,8 @@ from rich.console import Console
 from ..core.common.utils import setup_logging
 from .analyze import analyze  # Code analysis and usage tracking
 from .init import setup  # Project setup: init, configure
-from .monitor import (
-    monitor,
-)  # Monitoring: watch, status, recent, queue, cancel, cleanup, delete-jobs
 from .remote import remote  # Remote management
-from .sweep import sweep_cmd  # Sweep: run, status, report, errors
+from .sweep import sweep_cmd  # Sweep: run/status/report/errors/watch/recent/queue/cancel/cleanup
 from .sync_commands import sync  # Sync: init, list, run, to
 
 console = Console()
@@ -41,9 +38,8 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 
 # Register all command groups
 cli.add_command(setup)  # hsm setup init, hsm setup configure
-cli.add_command(sweep_cmd)  # hsm sweep run/status/report/errors
+cli.add_command(sweep_cmd)  # hsm sweep run/status/report/errors/watch/recent/queue/cancel/cleanup
 cli.add_command(sync)  # hsm sync init/list/run/to/cache/clean
-cli.add_command(monitor)  # hsm monitor watch/status/recent/queue/cancel/cleanup/delete-jobs
 cli.add_command(remote)  # hsm remote add/list/test/health/gpus/clean/remove
 cli.add_command(analyze)  # hsm analyze enable-tracking/report/dead-code/...
 

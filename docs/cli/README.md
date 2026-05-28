@@ -11,9 +11,8 @@ pinning, etc.) see the [user guides](../user_guide/).
 
 ```
 hsm setup    init configure                       # bootstrap
-hsm sweep    run | status | report | errors
+hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
 hsm sync     init | list | run | to | cache | clean
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
@@ -77,6 +76,20 @@ Show completion status. With no argument, summarizes every sweep under
 
 Detailed completion report; error summaries for FAILED tasks.
 
+### `hsm sweep watch <sweep_id>` / `recent` / `queue` / `cancel` / `cleanup`
+
+Sweep lifecycle commands — all built on `SweepCompletionAnalyzer` so
+they're backend-agnostic (work for local / Slurm / SSH push / distributed
+the same way).
+
+| Subcommand | What it does |
+|---|---|
+| `hsm sweep watch <sweep_id>` | Live progress display for one sweep. Polls `tasks/*/task_info.txt` and redraws every `--refresh` seconds. Exits automatically when the sweep finishes. Use `--once` for a one-shot snapshot. |
+| `hsm sweep recent [-d N]` | Table of sweeps from the last N days (default 7). Shows backend, progress, completion %, and COMPLETE/INCOMPLETE status. |
+| `hsm sweep queue` | Auto-detects `squeue` or `qstat` on PATH and shows the cluster's job queue for $USER. Reports cleanly when no scheduler is installed. |
+| `hsm sweep cancel <sweep_id>` | Cancel a running sweep. Reads `Backend:` from `submission_summary.txt` and dispatches: `scancel` (Slurm), `qdel` (PBS), or `pkill -f <sweep_id>` (local). For SSH push and distributed sweeps, prints a clear "kill the local `hsm sweep run` process or `ssh <alias> 'pkill -f <sweep_id>'`" message — no reliable remote-pid tracking exists for those backends. |
+| `hsm sweep cleanup [-d N] [--keep-incomplete] [--dry-run]` | Delete sweep output dirs older than N days (default 30). `--keep-incomplete` spares sweeps with failed/missing tasks. `--dry-run` lists candidates. |
+
 ## `hsm remote`
 
 Manage SSH remote registrations. Many of these work with a bare
@@ -93,20 +106,6 @@ Manage SSH remote registrations. Many of these work with a bare
 | `hsm remote remove <name>` | Unregister from config. |
 
 See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the full SSH workflow.
-
-## `hsm monitor`
-
-Live sweep monitoring + job management.
-
-| Subcommand | What it does |
-|---|---|
-| `hsm monitor watch [sweep_id]` | Live progress display. |
-| `hsm monitor status` | One-shot status snapshot. |
-| `hsm monitor recent [--days N]` | Recent sweeps from the last N days. |
-| `hsm monitor queue` | All your jobs across schedulers. |
-| `hsm monitor cancel <sweep_id>` | Cancel a running sweep. |
-| `hsm monitor cleanup` | Tidy old job artifacts by age/state. |
-| `hsm monitor delete-jobs` | Delete specific jobs with filters. |
 
 ## `hsm sync`
 

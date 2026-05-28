@@ -89,9 +89,8 @@ the full lifecycle.
 
 ```
 hsm setup    init configure         # project bootstrap
-hsm sweep    run | status | report | errors
+hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
 hsm sync     init | list | run | to | cache | clean
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
