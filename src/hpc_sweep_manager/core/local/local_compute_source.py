@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 import re
 import signal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
@@ -61,12 +61,27 @@ class LocalComputeSource(ComputeSource):
         script_path: str = "",
         project_dir: str = ".",
         default_spec: Optional[ResourceSpec] = None,
+        visible_gpus: Union[None, int, Sequence[int]] = None,
     ):
+        """Build a local slot-queue compute source.
+
+        ``visible_gpus`` is the GPU allowlist (same shape as the ``--gpus``
+        CLI flag and ``normalize_gpu_allowlist``): ``None`` = every GPU
+        ``nvidia-smi -L`` reports, ``0`` = CPU-only, ``N`` = first N
+        detected, ``[i, j, k]`` = exactly those indices. Filter is applied
+        in :meth:`setup` after detection; indices in the allowlist that
+        aren't actually present are warned-and-dropped.
+
+        Use case: shared GPU boxes where (e.g.) ``GPU:0`` is reserved for
+        interactive work — set ``visible_gpus=[1, 2, 3]`` and the slot
+        queue never schedules a task on GPU:0.
+        """
         super().__init__(name, "local", max(max_parallel_jobs, 1))
         self.python_path = python_path
         self.script_path = script_path
         self.project_dir = project_dir
         self.default_spec = default_spec or ResourceSpec()
+        self._visible_gpus = visible_gpus
         self.sweep_dir: Optional[Path] = None
         self.sweep_id: Optional[str] = None
         # GPU bookkeeping (populated in setup)
@@ -90,7 +105,28 @@ class LocalComputeSource(ComputeSource):
         self.sweep_id = sweep_id
         self._counter_lock = asyncio.Lock()
 
-        self._gpu_indices = await _detect_gpus()
+        detected = await _detect_gpus()
+        if self._visible_gpus is not None and detected:
+            from ..remote.push_exec import normalize_gpu_allowlist
+
+            if isinstance(self._visible_gpus, (list, tuple)) and not isinstance(
+                self._visible_gpus, bool
+            ):
+                missing = sorted(set(self._visible_gpus) - set(detected))
+                if missing:
+                    logger.warning(
+                        f"LocalComputeSource: visible_gpus references indices "
+                        f"not present in nvidia-smi -L output: {missing}. "
+                        f"Detected: {detected}. Dropping the missing ones."
+                    )
+            self._gpu_indices = normalize_gpu_allowlist(self._visible_gpus, detected)
+            if detected != self._gpu_indices:
+                logger.info(
+                    f"LocalComputeSource: GPU allowlist applied "
+                    f"({len(self._gpu_indices)}/{len(detected)} visible: {self._gpu_indices})"
+                )
+        else:
+            self._gpu_indices = detected
         gpus_per_job = self.default_spec.gpus or 0
 
         self._slot_queue = asyncio.Queue()

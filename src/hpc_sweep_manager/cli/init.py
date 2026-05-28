@@ -51,6 +51,19 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
       sub-block is the no-bleed home for that remote's ResourceSpec defaults.
     """
     if gpu_count > 0:
+        # When >1 GPU is present, surface visible_gpus as a discoverable hint
+        # (shared boxes often reserve GPU:0 for interactive work) — but keep it
+        # commented so the default behavior is "use every GPU."
+        if gpu_count > 1:
+            allowlist_example = list(range(1, gpu_count))  # e.g. 4 GPUs -> [1, 2, 3]
+            visible_hint = (
+                f"# Allowlist (optional): restrict which GPU indices this box uses.\n"
+                f"# CLI `--gpus 0,1,3` overrides. Useful on shared boxes where (e.g.)\n"
+                f"# GPU:0 is reserved for interactive work.\n"
+                f"#   visible_gpus: {allowlist_example}    # would exclude GPU:0\n"
+            )
+        else:
+            visible_hint = ""
         local_block = (
             "# Auto-detected {n} GPU(s) on this box via `nvidia-smi -L` at init time.\n"
             "# To toggle off: set `gpus: 0` or comment the block out.\n"
@@ -59,19 +72,21 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
             "local:\n"
             "  gpus: 1                  # per-task GPU count; LocalComputeSource partitions\n"
             "                           #   the {n} detected GPU(s) into slots of this size\n"
+            "{visible_hint}"
             "# Optional reach fields (commented — uncomment to use):\n"
             "#   walltime: \"04:00:00\"\n"
             "#   cpus_per_task: 4\n"
             "#   mem: \"16gb\"\n"
             "#   pre_script:\n"
             "#     - \"conda activate my-env\"\n"
-        ).format(n=gpu_count)
+        ).format(n=gpu_count, visible_hint=visible_hint)
     else:
         local_block = (
             "# No GPUs detected at init time. Uncomment + edit to use --mode local\n"
             "# with explicit per-task resources.\n"
             "# local:\n"
             "#   gpus: 1                # per-task GPU count (needs nvidia-smi on this box)\n"
+            "#   visible_gpus: [1, 2, 3]  # optional allowlist; CLI --gpus overrides\n"
             "#   walltime: \"04:00:00\"\n"
             "#   cpus_per_task: 4\n"
             "#   mem: \"16gb\"\n"

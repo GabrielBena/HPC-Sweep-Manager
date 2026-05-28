@@ -149,6 +149,7 @@ local:
   mem: "16gb"
   gpus: 1                  # per-task GPU count; LocalComputeSource probes
                            # nvidia-smi -L and partitions GPUs into slots of this size
+  visible_gpus: [1, 2, 3]  # optional allowlist (see below)
   pre_script:
     - "conda activate my-env"
 ```
@@ -164,6 +165,34 @@ commenting the block.
 
 **Precedence** (highest wins): CLI `--walltime` > CLI `--resources`
 parsed fields > `local:` block > defaults.
+
+### `local.visible_gpus` — restrict which GPU indices the slot queue uses
+
+By default `LocalComputeSource` calls `nvidia-smi -L` and uses *every*
+index it reports. On a shared GPU box where (e.g.) `GPU:0` is reserved
+for interactive work, set `visible_gpus` to exclude it:
+
+```yaml
+local:
+  gpus: 1
+  visible_gpus: [1, 2, 3]   # never schedule on GPU:0
+```
+
+CLI `--gpus` uses the same shape and overrides the config value:
+
+```bash
+hsm sweep run --mode local --gpus 1,2,3        # explicit allowlist (overrides config)
+hsm sweep run --mode local --gpus 2            # first 2 visible GPUs
+hsm sweep run --mode local --gpus cpu          # CPU-only
+hsm sweep run --mode local --gpus all          # every detected GPU (default)
+```
+
+Indices in `visible_gpus` that aren't in `nvidia-smi -L` output are
+warned-and-dropped at setup time (stale allowlists fail loud but don't
+crash the sweep).
+
+**Precedence** (highest wins): CLI `--gpus` > `local.visible_gpus` >
+every detected GPU.
 
 ## Per-remote `spec:` — defaults for `--remote` and `--mode distributed`
 

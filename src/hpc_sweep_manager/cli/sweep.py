@@ -423,8 +423,10 @@ def sweep_cmd(ctx):
     "--gpus",
     "gpus_arg",
     help=(
-        "GPU selection on the remote: 'all' (default), 'cpu', an int N (first N), "
-        "or a comma-separated allowlist like '0,1,3'. Used with --mode remote."
+        "GPU allowlist: 'all' (default), 'cpu', an int N (first N detected), "
+        "or a comma-separated list of indices like '0,1,3'. Works with both "
+        "--mode local and --mode remote. For --mode local, the sticky-per-machine "
+        "default lives in `local.visible_gpus`; CLI here overrides it."
     ),
 )
 @click.option("--dry-run", "-d", is_flag=True, help="Show what would be executed without running")

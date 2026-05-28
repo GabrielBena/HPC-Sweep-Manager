@@ -220,12 +220,21 @@ def build_compute_source(
         from ..local.local_compute_source import LocalComputeSource
 
         max_parallel = _resolve_local_parallel_jobs(parallel_jobs, hsm_config, default=1)
+        # GPU allowlist precedence: CLI --gpus > local.visible_gpus > all detected.
+        # CLI sentinel: gpus_override is None when --gpus was not passed.
+        if gpus_override is not None:
+            visible_gpus = gpus_override
+        elif hsm_config is not None:
+            visible_gpus = hsm_config.get_local_visible_gpus()
+        else:
+            visible_gpus = None
         source = LocalComputeSource(
             max_parallel_jobs=max_parallel,
             python_path=python_path,
             script_path=script_path,
             project_dir=project_dir,
             default_spec=default_spec,
+            visible_gpus=visible_gpus,
         )
         return source, "local", "individual"
 

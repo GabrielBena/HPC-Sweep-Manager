@@ -283,6 +283,50 @@ class TestBuildComputeSource:
         assert sub_mode == "individual"
         assert source.max_parallel_jobs == 4
 
+    def test_local_mode_visible_gpus_from_config(self, no_gpus):
+        # local.visible_gpus from config flows into LocalComputeSource as
+        # visible_gpus when CLI --gpus is absent.
+        class FakeConfig:
+            def get_max_array_size(self):
+                return None
+
+            def get_local_spec(self):
+                return None
+
+            def get_local_visible_gpus(self):
+                return [1, 2, 3]
+
+        source, _, _ = build_compute_source(
+            mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
+        )
+        assert source._visible_gpus == [1, 2, 3]
+
+    def test_local_mode_cli_gpus_overrides_config(self, no_gpus):
+        # CLI --gpus wins over local.visible_gpus.
+        class FakeConfig:
+            def get_max_array_size(self):
+                return None
+
+            def get_local_spec(self):
+                return None
+
+            def get_local_visible_gpus(self):
+                return [1, 2, 3]
+
+        source, _, _ = build_compute_source(
+            mode="local",
+            hsm_config=FakeConfig(),
+            gpus_override=[0, 2],  # CLI override
+            **self.BASE_KWARGS,
+        )
+        assert source._visible_gpus == [0, 2]
+
+    def test_local_mode_no_config_no_cli_means_all_detected(self, no_gpus):
+        source, _, _ = build_compute_source(
+            mode="local", hsm_config=None, **self.BASE_KWARGS
+        )
+        assert source._visible_gpus is None  # LocalComputeSource will use all detected
+
     def test_local_mode_no_parallel_jobs_falls_back_to_one(self, no_gpus):
         # `slurm.max_array_size` is a Slurm-array cap; it must NOT piggyback
         # as the local slot-queue default any more. Pre-cleanup it did, and
@@ -290,6 +334,9 @@ class TestBuildComputeSource:
         class FakeConfig:
             def get_max_array_size(self):
                 return 100  # should be ignored by local mode
+
+            def get_local_visible_gpus(self):
+                return None
 
         source, _, _ = build_compute_source(
             mode="local", hsm_config=FakeConfig(), **self.BASE_KWARGS
@@ -300,6 +347,9 @@ class TestBuildComputeSource:
         class FakeConfig:
             def get_max_array_size(self):
                 return 100
+
+            def get_local_visible_gpus(self):
+                return None
 
         source, _, _ = build_compute_source(
             mode="local",

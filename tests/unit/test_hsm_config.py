@@ -147,6 +147,61 @@ class TestLocalSpec:
         assert any("Slurm-only" in r.message for r in caplog.records)
 
 
+# ------------------------------------------------------------ get_local_visible_gpus
+
+
+class TestLocalVisibleGpus:
+    def test_no_block_returns_none(self):
+        assert HSMConfig({}).get_local_visible_gpus() is None
+
+    def test_no_field_returns_none(self):
+        assert HSMConfig({"local": {"gpus": 1}}).get_local_visible_gpus() is None
+
+    def test_list_returns_list_of_ints(self):
+        v = HSMConfig({"local": {"visible_gpus": [1, 2, 3]}}).get_local_visible_gpus()
+        assert v == [1, 2, 3]
+
+    def test_string_indices_coerced(self):
+        # YAML may yield strings if quoted; coerce to int.
+        v = HSMConfig({"local": {"visible_gpus": ["1", "2"]}}).get_local_visible_gpus()
+        assert v == [1, 2]
+
+    def test_empty_list_returns_none(self):
+        assert (
+            HSMConfig({"local": {"visible_gpus": []}}).get_local_visible_gpus()
+            is None
+        )
+
+    def test_non_list_warns_returns_none(self, caplog):
+        # Bare int is the wrong shape — it would be ambiguous with the
+        # `first N` CLI semantics. Force the user to write the list form.
+        with caplog.at_level("WARNING"):
+            result = HSMConfig(
+                {"local": {"visible_gpus": 3}}
+            ).get_local_visible_gpus()
+        assert result is None
+        assert any("must be a list" in r.message for r in caplog.records)
+
+    def test_uncoercible_value_returns_none(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = HSMConfig(
+                {"local": {"visible_gpus": ["one", "two"]}}
+            ).get_local_visible_gpus()
+        assert result is None
+
+    def test_visible_gpus_does_not_leak_into_spec(self):
+        # visible_gpus is consumed separately; get_local_spec must NOT carry it.
+        cfg = HSMConfig(
+            {"local": {"gpus": 1, "visible_gpus": [1, 2, 3]}}
+        )
+        spec = cfg.get_local_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+        assert not hasattr(spec, "visible_gpus")
+        # And it must not be in the rejected-fields warning either —
+        # visible_gpus is a known non-spec key, not an unknown one.
+
+
 # ----------------------------------------------------------- get_slurm_qos_whitelist
 
 

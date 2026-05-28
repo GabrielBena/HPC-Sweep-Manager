@@ -267,7 +267,9 @@ class HSMConfig:
         ``walltime``, ``cpus_per_task``, ``mem``, ``gpus``, ``pre_script``.
         Slurm-only fields (``gpu_type``, ``modules``, ``qos``, ``account``,
         ``extra_directives``) belong in the ``slurm:`` block; if they appear here
-        they are silently dropped with a warning.
+        they are silently dropped with a warning. ``visible_gpus`` is consumed
+        separately by :meth:`get_local_visible_gpus` (it's a GPU allowlist,
+        not a per-job ResourceSpec field).
 
         Example::
 
@@ -277,6 +279,7 @@ class HSMConfig:
               mem: "16gb"
               gpus: 1               # per-task GPU count; LocalComputeSource partitions
                                     # nvidia-smi -L into slots of this size
+              visible_gpus: [1, 2, 3]  # allowlist; CLI --gpus overrides (see get_local_visible_gpus)
               pre_script:
                 - "conda activate my-env"
         """
@@ -285,19 +288,54 @@ class HSMConfig:
         block = self.config_data.get("local")
         if not isinstance(block, dict) or not block:
             return None
-        _LOCAL_ALLOWED = {"walltime", "cpus_per_task", "mem", "gpus", "pre_script"}
-        rejected = set(block) - _LOCAL_ALLOWED
+        _LOCAL_SPEC_FIELDS = {"walltime", "cpus_per_task", "mem", "gpus", "pre_script"}
+        _NON_SPEC_LOCAL_KEYS = {"visible_gpus"}  # consumed by sibling accessors, not ResourceSpec
+        rejected = set(block) - _LOCAL_SPEC_FIELDS - _NON_SPEC_LOCAL_KEYS
         if rejected:
             logger.warning(
                 f"`local:` block has Slurm-only or unknown fields {sorted(rejected)!r}; "
                 f"move them to the `slurm:` block. Ignoring."
             )
-        filtered = {k: v for k, v in block.items() if k in _LOCAL_ALLOWED}
+        filtered = {k: v for k, v in block.items() if k in _LOCAL_SPEC_FIELDS}
         try:
             return ResourceSpec.from_dict(filtered)
         except (TypeError, ValueError) as e:
             logger.warning(f"Invalid `local:` block in HSM config: {e}")
             return None
+
+    def get_local_visible_gpus(self):
+        """Read ``local.visible_gpus`` as a list of int indices, or ``None`` if unset.
+
+        Same allowlist semantics as the ``--gpus`` CLI flag (which overrides
+        this when both are set). Useful for shared GPU boxes where (e.g.)
+        ``GPU:0`` is reserved for interactive work — set
+        ``visible_gpus: [1, 2, 3]`` and ``hsm sweep run --mode local`` will
+        never schedule on GPU:0.
+
+        Mirrors :meth:`get_slurm_qos_whitelist`'s shape: read separately
+        from :meth:`get_local_spec` because it's a per-source filter, not
+        a per-job resource.
+        """
+        block = self.config_data.get("local")
+        if not isinstance(block, dict):
+            return None
+        value = block.get("visible_gpus")
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)):
+            logger.warning(
+                f"`local.visible_gpus` must be a list of GPU indices "
+                f"(e.g. [1, 2, 3]); got {type(value).__name__}. Ignoring."
+            )
+            return None
+        try:
+            indices = [int(x) for x in value]
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Invalid `local.visible_gpus`: {e}. Ignoring.")
+            return None
+        if not indices:
+            return None
+        return indices
 
     def get_slurm_qos_whitelist(self) -> Optional[frozenset]:
         """Read ``slurm.qos_whitelist`` as a frozenset, or ``None`` if unset.

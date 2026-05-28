@@ -103,6 +103,81 @@ class TestSlotAllocation:
         assert slots == [None, None, None, None]
 
 
+class TestVisibleGpusAllowlist:
+    """``visible_gpus`` filters detected GPUs before slot partitioning.
+
+    Use case: shared GPU boxes where (e.g.) ``GPU:0`` is reserved for
+    interactive work. The slot queue must never schedule on excluded
+    indices, regardless of `gpus_per_job`.
+    """
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_explicit_allowlist_excludes_gpu_zero(self, tmp_path, fake_gpus):
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=10,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=[1, 2, 3],  # GPU:0 reserved
+        )
+        assert await src.setup(tmp_path / "sweep", "test_sweep")
+        # 3 visible / 1 per job = 3 slots — none contain GPU:0.
+        assert src._slot_count == 3
+        assert src._gpu_indices == [1, 2, 3]
+        slots = [src._slot_queue.get_nowait() for _ in range(3)]
+        assert slots == [[1], [2], [3]]
+        assert all(0 not in slot for slot in slots)
+
+    async def test_int_n_takes_first_n_of_detected(self, tmp_path, fake_gpus):
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=10,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=2,  # first 2 detected
+        )
+        assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src._gpu_indices == [0, 1]
+        slots = [src._slot_queue.get_nowait() for _ in range(2)]
+        assert slots == [[0], [1]]
+
+    async def test_zero_means_cpu_only(self, tmp_path, fake_gpus):
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=3,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=0,  # CPU-only
+        )
+        assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src._gpu_indices == []
+        # No GPUs visible AND gpus_per_job=1 — falls back to CPU slots.
+        slots = [src._slot_queue.get_nowait() for _ in range(3)]
+        assert slots == [None, None, None]
+
+    async def test_none_means_use_all_detected(self, tmp_path, fake_gpus):
+        # Sanity: visible_gpus=None preserves the pre-feature behavior.
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=10,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=None,
+        )
+        assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src._gpu_indices == [0, 1, 2, 3]
+
+    async def test_stale_indices_warned_and_dropped(self, tmp_path, fake_gpus, caplog):
+        # User says [1, 2, 7] but the box has GPUs 0..3 — index 7 is stale.
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=10,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=[1, 2, 7],
+        )
+        with caplog.at_level("WARNING"):
+            assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src._gpu_indices == [1, 2]  # 7 dropped, no crash
+        assert any("not present in nvidia-smi" in r.message for r in caplog.records)
+
+
 class TestSubmitJobBackPressure:
     pytestmark = pytest.mark.asyncio
 
