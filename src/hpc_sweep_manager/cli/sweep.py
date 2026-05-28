@@ -859,7 +859,12 @@ def _run_sweep_via_orchestrator(
 
     # Build the source first so dry-run can show the resolved mode + spec.
     scheduler_hint = "slurm" if mode in ("array", "individual") else None
-    spec = spec_from_cli(walltime=walltime, resources=resources, scheduler=scheduler_hint)
+    spec = spec_from_cli(
+        walltime=walltime,
+        resources=resources,
+        scheduler=scheduler_hint,
+        hsm_config=hsm_config,
+    )
     try:
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
     except ValueError as e:

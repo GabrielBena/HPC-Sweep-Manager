@@ -142,9 +142,11 @@ hsm sweep run --mode array \
 ```
 
 This submits one `sbatch --array=1-N` job. For per-task `sbatch` calls,
-use `--mode individual`. Many production clusters need `gpu_type` and
-`modules` set together for GPU allocation — that's a known CLI gap;
-see [HPC_EXECUTION.md](HPC_EXECUTION.md#known-limitation--what---resources-cant-express).
+use `--mode individual`. For advanced Slurm fields the opaque
+`--resources` string can't reach (`gpu_type`, `modules`, `pre_script`,
+`account`, `extra_directives`), add a typed `slurm:` block to
+`.hsm/config.yaml` — see
+[HPC_EXECUTION.md](HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
 
 ### SSH push-model (single remote)
 

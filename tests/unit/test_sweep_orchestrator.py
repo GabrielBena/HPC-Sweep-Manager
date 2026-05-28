@@ -55,6 +55,75 @@ class TestSpecFromCli:
         assert spec.gpus == 1
 
 
+class TestSpecFromCliSlurmConfigBlock:
+    """Precedence: CLI --walltime > CLI --resources > slurm: block > empty."""
+
+    def test_slurm_block_alone_is_returned(self):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig(
+            {
+                "slurm": {
+                    "walltime": "01:00:00",
+                    "cpus_per_task": 4,
+                    "gpus": 1,
+                    "gpu_type": "h100",
+                    "modules": ["h100"],
+                }
+            }
+        )
+        spec = spec_from_cli(walltime=None, resources=None, hsm_config=cfg)
+        # Fields the opaque --resources string can't reach come through here.
+        assert spec.gpu_type == "h100"
+        assert spec.modules == ("h100",)
+        assert spec.cpus_per_task == 4
+
+    def test_resources_layers_on_top_of_block(self):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig(
+            {
+                "slurm": {
+                    "walltime": "01:00:00",
+                    "cpus_per_task": 4,
+                    "gpus": 1,
+                    "gpu_type": "h100",
+                    "modules": ["h100"],
+                }
+            }
+        )
+        spec = spec_from_cli(
+            walltime=None,
+            resources="--cpus-per-task=8",  # override cpus
+            scheduler="slurm",
+            hsm_config=cfg,
+        )
+        # --resources overrode cpus_per_task; gpu_type + modules preserved.
+        assert spec.cpus_per_task == 8
+        assert spec.gpu_type == "h100"
+        assert spec.modules == ("h100",)
+
+    def test_walltime_overrides_everything(self):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig({"slurm": {"walltime": "01:00:00", "gpus": 1, "gpu_type": "h100"}})
+        spec = spec_from_cli(
+            walltime="04:00:00",
+            resources="--time=02:00:00",
+            scheduler="slurm",
+            hsm_config=cfg,
+        )
+        assert spec.walltime == "04:00:00"
+        # Slurm block fields still come through.
+        assert spec.gpu_type == "h100"
+
+    def test_no_block_no_resources_returns_empty(self):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig({})  # No slurm block.
+        assert spec_from_cli(walltime=None, resources=None, hsm_config=cfg) == ResourceSpec()
+
+
 class TestBuildComputeSource:
     BASE_KWARGS = dict(
         python_path="python3",
@@ -220,6 +289,27 @@ class TestBuildComputeSource:
             mode="array", qos_whitelist=wl, **self.BASE_KWARGS
         )
         assert source.qos_whitelist is wl
+
+    def test_qos_whitelist_from_hsm_config_is_used(self, fake_slurm):
+        # When the caller doesn't pass qos_whitelist, fall back to
+        # hsm_config's slurm.qos_whitelist block.
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig({"slurm": {"qos_whitelist": ["normal", "medium", "long"]}})
+        source, _, _ = build_compute_source(
+            mode="array", hsm_config=cfg, **self.BASE_KWARGS
+        )
+        assert source.qos_whitelist == frozenset({"normal", "medium", "long"})
+
+    def test_explicit_qos_whitelist_overrides_hsm_config(self, fake_slurm):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        cfg = HSMConfig({"slurm": {"qos_whitelist": ["normal", "medium", "long"]}})
+        explicit = frozenset({"short"})
+        source, _, _ = build_compute_source(
+            mode="array", qos_whitelist=explicit, hsm_config=cfg, **self.BASE_KWARGS
+        )
+        assert source.qos_whitelist is explicit
 
 
 class TestRemoteMode:

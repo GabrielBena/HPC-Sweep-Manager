@@ -207,3 +207,79 @@ async def test_setup_failure_raises_runtimeerror(tmp_path, monkeypatch):
             params_list=[{"x": 1}],
             submission_mode="individual",
         )
+
+
+async def test_slurm_block_in_hsm_config_drives_sbatch_directives(tmp_path, fake_slurm):
+    """The typed `slurm:` block reaches fields the --resources string can't.
+
+    Verifies the full Phase 3.4 wiring: feed a slurm: block with gpu_type +
+    modules + qos_whitelist via HSMConfig, build the source through the
+    orchestrator's spec_from_cli + build_compute_source, submit a job, then
+    read back the rendered sbatch script and confirm the right #SBATCH
+    directives + module-load lines are present.
+    """
+    from hpc_sweep_manager.core.common.config import HSMConfig
+    from hpc_sweep_manager.core.common.sweep_orchestrator import spec_from_cli
+
+    fake_slurm.set_pending_seconds(0.05)
+    fake_slurm.set_running_seconds(0.05)
+
+    train = tmp_path / "train.py"
+    train.write_text("#!/usr/bin/env python3\nprint('hi')\n")
+    train.chmod(0o755)
+
+    cfg = HSMConfig(
+        {
+            "slurm": {
+                "walltime": "00:30:00",
+                "cpus_per_task": 4,
+                "gpus": 1,
+                "gpu_type": "h100",
+                "modules": ["h100"],
+                "qos": "normal",
+                "qos_whitelist": ["normal", "medium", "long"],
+            }
+        }
+    )
+
+    spec = spec_from_cli(walltime=None, resources=None, scheduler="slurm", hsm_config=cfg)
+    assert spec.gpu_type == "h100"
+    assert spec.modules == ("h100",)
+    assert spec.qos == "normal"
+
+    source, _, sub_mode = build_compute_source(
+        mode="individual",
+        python_path=sys.executable,
+        script_path=str(train),
+        project_dir=str(tmp_path),
+        default_spec=spec,
+        hsm_config=cfg,
+    )
+    # qos_whitelist should have come from the hsm_config slurm: block.
+    assert source.qos_whitelist == frozenset({"normal", "medium", "long"})
+
+    result = await run_sweep_async(
+        source=source,
+        sweep_dir=tmp_path / "sweep",
+        sweep_id="orch_slurm_block",
+        params_list=[{"seed": 1}],
+        submission_mode=sub_mode,
+        spec=spec,
+        poll_interval=0.05,
+    )
+    assert result.final_statuses == {result.job_ids[0]: "COMPLETED"}
+
+    # Read the rendered sbatch script and verify the key directives.
+    submitted = fake_slurm.jobs()
+    assert len(submitted) == 1
+    script_path = Path(submitted[0]["script_path"])
+    rendered = script_path.read_text()
+
+    # GPU type → --gres=gpu:h100:1 (NOT --gpus=1, which doesn't allocate on S3IT).
+    assert "--gres=gpu:h100:1" in rendered, rendered
+    # Modules → module load line.
+    assert "module load h100" in rendered, rendered
+    # Walltime + cpus + qos from the slurm: block.
+    assert "--time=00:30:00" in rendered
+    assert "--cpus-per-task=4" in rendered
+    assert "--qos=normal" in rendered

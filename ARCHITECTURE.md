@@ -168,14 +168,17 @@ renders two templates:
 - [`slurm_array.sh.j2`](src/hpc_sweep_manager/templates/slurm_array.sh.j2)
   for `--mode array` (one `sbatch --array=1-N`).
 
-The orchestrator's `spec_from_cli()` parses the legacy `--resources`
-string into a `ResourceSpec`. The Slurm template emits `#SBATCH`
-directives from the spec fields. **Known limitation:** the CLI string
-can express `cpus_per_task`, `mem`, `gpus`, `qos`, `partition`,
-`account`, and `walltime`, but NOT `gpu_type`, `modules`,
-`pre_script`, or `extra_directives`. For those, drive
-`SlurmComputeSource` directly from Python — see
-[`examples/smoke_slurm.py`](examples/smoke_slurm.py).
+The orchestrator's `spec_from_cli()` builds a `ResourceSpec` by
+layering: typed `slurm:` block in `.hsm/config.yaml` (if any) → legacy
+`--resources` string parsing → `--walltime` override. The Slurm
+template emits `#SBATCH` directives from the spec fields.
+
+The `slurm:` config block is the canonical way to express advanced
+fields the opaque `--resources` string can't reach — `gpu_type`,
+`modules`, `pre_script`, `account`, `extra_directives`,
+`qos_whitelist`. See
+[docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant)
+for the schema.
 
 ## Distributed path
 
@@ -248,10 +251,6 @@ The config is read by `HSMConfig.load()` in
 
 ## Known limitations
 
-- **CLI can't express full `ResourceSpec`.** `--resources` is opaque text;
-  `gpu_type`, `modules`, `pre_script`, `account`, `extra_directives`
-  require direct-Python use of `SlurmComputeSource`. Phase 3.4 (typed
-  `slurm:` block in `hsm_config.yaml`) will fix this.
 - **Completion runs (`hsm sweep complete`) bypass the orchestrator.**
   They use the legacy job manager path because `ComputeSource` doesn't
   expose a starting-task-number knob. Pass B-heavy blocked on this.

@@ -55,14 +55,29 @@ def spec_from_cli(
     walltime: str | None,
     resources: str | None,
     scheduler: str | None = None,
+    hsm_config: Any = None,
 ) -> ResourceSpec:
-    """Translate the legacy CLI surface (``--walltime``, ``--resources``) into a typed spec.
+    """Build the effective :class:`ResourceSpec` from CLI flags + config.
 
-    Bridges the still-textual CLI flags into the typed-spec world used by every
-    new ComputeSource. Phase 3 will replace this with a typed ``slurm:`` block
-    in ``hsm_config.yaml``.
+    Precedence (highest wins):
+
+    1. ``--walltime`` CLI flag.
+    2. Fields parsed out of ``--resources`` (legacy opaque string).
+    3. ``slurm:`` block in ``.hsm/config.yaml`` (typed; reaches ``gpu_type``,
+       ``modules``, ``pre_script``, ``account``, ``extra_directives`` —
+       fields the opaque CLI string can't express).
+    4. Hardcoded defaults (i.e. all-``None`` ``ResourceSpec``).
     """
-    spec = spec_from_legacy_resources(resources, scheduler) if resources else ResourceSpec()
+    # Start from the typed slurm: block, if present.
+    base = ResourceSpec()
+    if hsm_config is not None:
+        slurm_spec = hsm_config.get_slurm_spec()
+        if slurm_spec is not None:
+            base = slurm_spec
+
+    # Layer the legacy --resources string on top.
+    spec = base.merge(spec_from_legacy_resources(resources, scheduler)) if resources else base
+
     if walltime:
         spec = spec.merge(ResourceSpec(walltime=walltime))
     return spec
@@ -188,12 +203,18 @@ def build_compute_source(
             )
         from ..hpc.slurm_compute_source import SlurmComputeSource
 
+        # Fall back to the qos_whitelist from .hsm/config.yaml's slurm: block
+        # when the caller didn't supply one. Explicit caller arg always wins.
+        effective_qos_whitelist = qos_whitelist
+        if effective_qos_whitelist is None and hsm_config is not None:
+            effective_qos_whitelist = hsm_config.get_slurm_qos_whitelist()
+
         source = SlurmComputeSource(
             python_path=python_path,
             script_path=script_path,
             project_dir=project_dir,
             default_spec=default_spec,
-            qos_whitelist=qos_whitelist,
+            qos_whitelist=effective_qos_whitelist,
         )
         submission_mode: SubmissionMode = "array" if mode == "array" else "individual"
         return source, mode, submission_mode

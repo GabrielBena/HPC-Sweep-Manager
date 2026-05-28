@@ -135,7 +135,9 @@ it's trying to reintroduce them, push back.
    `--gpus=1` alone produces `#SBATCH --gpus=1` which does NOT allocate a
    GPU on S3IT (confirmed empirically). You need `gpus=1, gpu_type="h100",
    modules=("h100",)` → emits `#SBATCH --gres=gpu:h100:1` + `module load h100`.
-   See "Known CLI limitations" below.
+   The opaque CLI `--resources` string can't express `gpu_type`/`modules`;
+   use the typed `slurm:` block in `.hsm/config.yaml` instead. See
+   [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
 
 7. **Array-job progress reports `1/1` not `N/N`.** `SlurmComputeSource`
    inserts one `JobInfo` for the whole array; `wait_for_all` reports `1 done`
@@ -146,21 +148,19 @@ it's trying to reintroduce them, push back.
    with nested quotes that bash collapses gracefully, but path-as-value
    params with spaces are fragile. Known limitation across all templates.
 
-## Known CLI limitations
-
-- The opaque `--resources "..."` string can only express a subset of
-  `ResourceSpec`. **Not expressible from CLI:** `modules`, `gpu_type`,
-  `pre_script`, `account`, `extra_directives`. For these you must either
-  (a) put them in the legacy `--resources` string as raw scheduler flags,
-  or (b) use the direct-Python entry point in
-  [`examples/smoke_slurm.py`](examples/smoke_slurm.py) with a typed
-  `ResourceSpec`. A future Phase 3.4 will add a typed `slurm:` block in
-  `hsm_config.yaml` to close this gap.
+## Known limitations
 
 - **Completion runs (`hsm sweep complete <id>`)** still flow through the
   legacy `BaseJobManager` path — they need `starting_task_number`
   propagation that the unified `ComputeSource` doesn't have yet. Blocker
   for Pass B-heavy deletion of the legacy tier.
+
+- The CLI `--resources` opaque string covers common Slurm fields
+  (cpus/mem/gpus/qos/partition/walltime) but **cannot** express
+  `gpu_type`, `modules`, `pre_script`, `account`, or
+  `extra_directives`. Use the typed `slurm:` block in
+  `.hsm/config.yaml` for those. See
+  [`HPC_EXECUTION.md`](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
 
 ## Testing model
 

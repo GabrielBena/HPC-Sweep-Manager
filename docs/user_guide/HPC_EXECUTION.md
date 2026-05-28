@@ -75,23 +75,54 @@ select=1:ncpus=4:mem=16gb:ngpus=1
 Unknown tokens land in `ResourceSpec.extra_directives` and are emitted
 verbatim into the rendered submit script.
 
-## Known limitation — what `--resources` can't express
+## The typed `slurm:` block — reach fields `--resources` can't
 
-The opaque CLI string covers the common fields above, but several
-`ResourceSpec` fields are NOT reachable from the CLI today:
+The CLI's opaque `--resources` string covers the common fields above
+but **cannot** express `gpu_type`, `modules`, `pre_script`, `account`,
+or arbitrary `extra_directives`. On clusters where you need both
+`--gres=gpu:h100:1` AND `module load h100` (this is the case on many
+production setups), use the typed `slurm:` block in `.hsm/config.yaml`:
 
-- `gpu_type` (e.g. `h100`, `l4`, `a100`)
-- `modules` (environment modules to `module load`)
-- `pre_script` (shell commands to run before the training script)
-- `account` (in some flavors)
-- `extra_directives` requires raw scheduler flag syntax, which is brittle
+```yaml
+# .hsm/config.yaml
+slurm:
+  walltime: "01:00:00"
+  cpus_per_task: 4
+  mem: "16gb"
+  gpus: 1
+  gpu_type: "h100"           # → #SBATCH --gres=gpu:h100:1
+  partition: "gpu"
+  qos: "normal"
+  account: "my-project"
+  modules:                   # → `module load h100; module load cuda/12`
+    - h100
+    - cuda/12
+  pre_script:                # arbitrary shell commands before the training script
+    - "source ~/.bashrc"
+    - "conda activate my-env"
+  extra_directives:          # any extra #SBATCH directive
+    mail-type: FAIL
+    mail-user: me@example.com
+  qos_whitelist:             # optional guard — errors on submit if --qos isn't in this list
+    - normal
+    - medium
+    - long
+```
 
-On clusters that require both `--gres=gpu:h100:1` AND `module load h100`
-(this is the case on many production setups including UZH's S3IT),
-the CLI flow can't currently emit both. **Workaround until Phase 3.4
-lands:** drive `SlurmComputeSource` directly from Python with a typed
-`ResourceSpec`. See [`examples/smoke_slurm.py`](../../examples/smoke_slurm.py)
-for the runnable template:
+Then submit normally — the block is picked up automatically:
+
+```bash
+hsm sweep run --mode array --config sweeps/sweep.yaml
+```
+
+**Precedence** (highest wins): CLI `--walltime` > CLI `--resources`
+parsed fields > `slurm:` block > defaults. So you can set base
+resources in the config and override `--walltime` per-run from the CLI.
+
+### Direct Python (still supported)
+
+For fully programmatic use, you can also drive `SlurmComputeSource`
+directly with a typed `ResourceSpec`:
 
 ```python
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
@@ -129,16 +160,17 @@ asyncio.run(run_sweep_async(
 ))
 ```
 
-Phase 3.4 will add a typed `slurm:` block to `.hsm/config.yaml` so all
-of this is reachable from the CLI directly.
+See [`examples/smoke_slurm.py`](../../examples/smoke_slurm.py) for the
+runnable template.
 
 ## QOS whitelist
 
-If your cluster has a QOS tier list (e.g. `normal` / `medium` / `long`
-with different walltime caps), you can guard against accidental typos
-by passing a `qos_whitelist` to `SlurmComputeSource` (Python path only
-today). The CLI accepts any string in `--resources --qos=...` and the
-scheduler will reject invalid values at submit time.
+If your cluster has tiered QOS (e.g. `normal` / `medium` / `long` with
+different walltime caps), set `slurm.qos_whitelist` in `.hsm/config.yaml`
+to guard against typos — submission errors with a clear message if
+`--qos=...` (or the spec's `qos` field) isn't in the whitelist. The
+scheduler would reject invalid values anyway, but this catches them
+before submission.
 
 ## Inspecting + cancelling
 

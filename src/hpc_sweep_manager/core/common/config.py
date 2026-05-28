@@ -234,6 +234,66 @@ class HSMConfig:
         """Get maximum array size from config."""
         return self.config_data.get("hpc", {}).get("max_array_size")
 
+    def get_slurm_spec(self):
+        """Read the typed ``slurm:`` block as a :class:`ResourceSpec`, or ``None``.
+
+        The ``slurm:`` block in ``.hsm/config.yaml`` is the canonical place to
+        express HPC fields the opaque ``--resources`` CLI string can't reach:
+        ``gpu_type``, ``modules``, ``pre_script``, ``account``,
+        ``extra_directives``. All keys are optional. Extra (non-ResourceSpec)
+        keys like ``qos_whitelist`` are stripped before construction.
+
+        Example::
+
+            slurm:
+              walltime: "01:00:00"
+              cpus_per_task: 4
+              mem: "16gb"
+              gpus: 1
+              gpu_type: "h100"
+              qos: "normal"
+              modules: [h100]
+              pre_script:
+                - "source ~/.bashrc"
+                - "conda activate my-env"
+              extra_directives:
+                mail-type: FAIL
+                mail-user: me@example.com
+              qos_whitelist: [normal, medium, long]  # consumed separately
+        """
+        from .resource_spec import ResourceSpec
+
+        block = self.config_data.get("slurm")
+        if not isinstance(block, dict) or not block:
+            return None
+        # Strip orchestrator-only keys before handing to ResourceSpec.
+        filtered = {k: v for k, v in block.items() if k != "qos_whitelist"}
+        try:
+            return ResourceSpec.from_dict(filtered)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Invalid `slurm:` block in HSM config: {e}")
+            return None
+
+    def get_slurm_qos_whitelist(self) -> Optional[frozenset]:
+        """Read ``slurm.qos_whitelist`` as a frozenset, or ``None`` if unset.
+
+        Returned from the same ``slurm:`` block as :meth:`get_slurm_spec`,
+        but consumed separately by ``SlurmComputeSource`` (it's a per-source
+        constraint, not a per-job resource).
+        """
+        block = self.config_data.get("slurm")
+        if not isinstance(block, dict):
+            return None
+        whitelist = block.get("qos_whitelist")
+        if not whitelist:
+            return None
+        if not isinstance(whitelist, (list, tuple, set, frozenset)):
+            logger.warning(
+                f"`slurm.qos_whitelist` must be a list of strings; got {type(whitelist).__name__}"
+            )
+            return None
+        return frozenset(str(q) for q in whitelist)
+
 
 class HydraConfigParser:
     """Parser for Hydra configuration files."""
