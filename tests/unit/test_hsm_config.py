@@ -6,9 +6,12 @@ are the only part with real logic (filter + validate + frozenset construction).
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
-from hpc_sweep_manager.core.common.config import HSMConfig
+from hpc_sweep_manager.core.common.config import HSMConfig, resolve_sweep_dir
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 
 
@@ -200,6 +203,146 @@ class TestLocalVisibleGpus:
         assert not hasattr(spec, "visible_gpus")
         # And it must not be in the rejected-fields warning either —
         # visible_gpus is a known non-spec key, not an unknown one.
+
+
+# ----------------------------------------------------------- get_local_sweeps_root
+
+
+class TestLocalSweepsRoot:
+    def test_no_block_returns_none(self):
+        assert HSMConfig({}).get_local_sweeps_root() is None
+
+    def test_no_field_returns_none(self):
+        assert HSMConfig({"local": {"gpus": 1}}).get_local_sweeps_root() is None
+
+    def test_set_returns_raw_string(self):
+        # Accessor returns the raw value; expansion happens in resolve_sweep_dir.
+        v = HSMConfig(
+            {"local": {"sweeps_root": "/mnt/big-disk/sweeps"}}
+        ).get_local_sweeps_root()
+        assert v == "/mnt/big-disk/sweeps"
+
+    def test_envvar_pattern_preserved(self):
+        # Don't expand at accessor time — resolve_sweep_dir does that.
+        v = HSMConfig(
+            {"local": {"sweeps_root": "/mnt/big-disk/$USER/sweeps"}}
+        ).get_local_sweeps_root()
+        assert "$USER" in v
+
+    def test_empty_string_warns_returns_none(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = HSMConfig(
+                {"local": {"sweeps_root": "  "}}
+            ).get_local_sweeps_root()
+        assert result is None
+
+    def test_non_string_warns_returns_none(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = HSMConfig(
+                {"local": {"sweeps_root": ["a", "b"]}}
+            ).get_local_sweeps_root()
+        assert result is None
+        assert any("non-empty string" in r.message for r in caplog.records)
+
+    def test_sweeps_root_does_not_leak_into_spec(self):
+        # Like visible_gpus, sweeps_root is a non-ResourceSpec local field.
+        # get_local_spec must NOT carry it and must NOT warn about it.
+        cfg = HSMConfig(
+            {"local": {"gpus": 1, "sweeps_root": "/mnt/big-disk/sweeps"}}
+        )
+        spec = cfg.get_local_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+        assert not hasattr(spec, "sweeps_root")
+
+
+# ----------------------------------------------------------- resolve_sweep_dir
+
+
+class TestResolveSweepDir:
+    def test_default_when_no_config(self, tmp_path):
+        # No HSMConfig => default <project>/sweeps/outputs/<sweep_id>.
+        result = resolve_sweep_dir(None, "sweep_abc", project_dir=tmp_path)
+        assert result == tmp_path / "sweeps" / "outputs" / "sweep_abc"
+        assert result.is_dir()
+
+    def test_default_when_no_sweeps_root(self, tmp_path):
+        cfg = HSMConfig({"local": {"gpus": 1}})
+        result = resolve_sweep_dir(cfg, "sweep_xyz", project_dir=tmp_path)
+        assert result == tmp_path / "sweeps" / "outputs" / "sweep_xyz"
+        assert result.is_dir()
+
+    def test_redirects_to_sweeps_root(self, tmp_path):
+        big_disk = tmp_path / "big-disk"
+        cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
+        result = resolve_sweep_dir(cfg, "sweep_123", project_dir=tmp_path)
+        # Result is the absolute target, NOT the symlink path.
+        assert result == (big_disk / "sweep_123").resolve()
+        assert result.is_dir()
+
+    def test_creates_discovery_symlink(self, tmp_path):
+        big_disk = tmp_path / "big-disk"
+        cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
+        result = resolve_sweep_dir(cfg, "sweep_42", project_dir=tmp_path)
+        link = tmp_path / "sweeps" / "outputs" / "sweep_42"
+        assert link.is_symlink()
+        assert link.resolve() == result
+
+    def test_expands_envvar(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HSM_TEST_ROOT", str(tmp_path / "expanded"))
+        cfg = HSMConfig(
+            {"local": {"sweeps_root": "$HSM_TEST_ROOT/sweeps"}}
+        )
+        result = resolve_sweep_dir(cfg, "sweep_env", project_dir=tmp_path)
+        assert "expanded" in str(result)
+        assert result.is_dir()
+
+    def test_expands_tilde(self, tmp_path, monkeypatch):
+        # Simulate HOME so ~/... expansion is testable without touching the real one.
+        fake_home = tmp_path / "home-stub"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        cfg = HSMConfig({"local": {"sweeps_root": "~/hsm-sweeps"}})
+        result = resolve_sweep_dir(cfg, "sweep_tilde", project_dir=tmp_path)
+        # The result must live under the fake HOME, not under literal "~".
+        assert str(fake_home) in str(result)
+        assert "~" not in str(result)
+
+    def test_replaces_stale_symlink(self, tmp_path):
+        # If a symlink already exists at the discovery path (pointing to an
+        # old target), resolve_sweep_dir replaces it with one pointing at
+        # the new target.
+        old_target = tmp_path / "old-target"
+        new_root = tmp_path / "new-root"
+        old_target.mkdir()
+        link_parent = tmp_path / "sweeps" / "outputs"
+        link_parent.mkdir(parents=True)
+        link = link_parent / "sweep_id"
+        link.symlink_to(old_target, target_is_directory=True)
+
+        cfg = HSMConfig({"local": {"sweeps_root": str(new_root)}})
+        result = resolve_sweep_dir(cfg, "sweep_id", project_dir=tmp_path)
+        assert link.is_symlink()
+        assert link.resolve() == result
+        assert (new_root / "sweep_id").resolve() == result
+
+    def test_refuses_to_clobber_real_directory(self, tmp_path, caplog):
+        # If a *real* (non-symlink) directory already lives at the discovery
+        # path, resolve_sweep_dir warns instead of overwriting it. Data at
+        # the target still gets created — discovery is just broken.
+        big_disk = tmp_path / "big-disk"
+        link_parent = tmp_path / "sweeps" / "outputs"
+        link_parent.mkdir(parents=True)
+        squatter = link_parent / "sweep_id"
+        squatter.mkdir()  # real dir, not a symlink
+
+        cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
+        with caplog.at_level("WARNING"):
+            result = resolve_sweep_dir(cfg, "sweep_id", project_dir=tmp_path)
+        assert result == (big_disk / "sweep_id").resolve()
+        assert result.is_dir()
+        assert squatter.is_dir() and not squatter.is_symlink()
+        assert any("non-symlink" in r.message for r in caplog.records)
 
 
 # ----------------------------------------------------------- get_slurm_qos_whitelist

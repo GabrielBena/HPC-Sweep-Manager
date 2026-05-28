@@ -216,3 +216,88 @@ class TestBuildSshChildren:
         assert by_name["anahita"]._gpus_config == [0, 1]
         assert by_name["anahita"].conda_env == "lab"  # falls back to global
         assert by_name["box2"].conda_env == "lab-cpu"  # per-remote override
+
+    async def test_dispatches_backend_slurm_to_ssh_slurm_source(self, tmp_path):
+        """A remote with ``backend: slurm`` becomes an SSHSlurmComputeSource."""
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+        from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
+            SSHSlurmComputeSource,
+        )
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "remotes": {
+                        "cluster-2": {  # default backend=ssh
+                            "max_parallel_jobs": 4,
+                            "conda_env": "cpvr",
+                        },
+                        "uzh": {  # SSH-driven Slurm
+                            "backend": "slurm",
+                            "host": "uzh",
+                            "conda_env": "cpvr",
+                            "workdir": "/scratch/$USER/hsm-runs",
+                            "archive_dir": "/shares/payvand.ini.uzh/hsm-archive",
+                            "spec": {
+                                "walltime": "06:00:00",
+                                "gpus": 1,
+                                "gpu_type": "H100",
+                            },
+                        },
+                    },
+                }
+            }
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        sources = await _build_ssh_children(
+            FakeConfig(), FakeConfig.config_data["distributed"]["remotes"]
+        )
+        assert len(sources) == 2
+        by_name = {s.name: s for s in sources}
+        # Plain SSH for cluster-2 (default backend).
+        assert isinstance(by_name["cluster-2"], SSHComputeSource)
+        # SSH-Slurm for uzh, with storage-tier fields populated.
+        uzh = by_name["uzh"]
+        assert isinstance(uzh, SSHSlurmComputeSource)
+        assert uzh.workdir == "/scratch/$USER/hsm-runs"
+        assert uzh.archive_dir == "/shares/payvand.ini.uzh/hsm-archive"
+        assert uzh.default_spec.walltime == "06:00:00"
+        assert uzh.default_spec.gpu_type == "H100"
+
+    async def test_unknown_backend_skipped(self, tmp_path, caplog):
+        """Misconfigured `backend:` doesn't kill the whole sweep — just skips."""
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "remotes": {
+                        "bad": {"backend": "kubernetes", "host": "bad"},
+                        "ok": {"max_parallel_jobs": 1},
+                    },
+                }
+            }
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        with caplog.at_level("WARNING"):
+            sources = await _build_ssh_children(
+                FakeConfig(), FakeConfig.config_data["distributed"]["remotes"]
+            )
+        names = {s.name for s in sources}
+        assert names == {"ok"}
+        assert any("Unknown backend" in r.message for r in caplog.records)

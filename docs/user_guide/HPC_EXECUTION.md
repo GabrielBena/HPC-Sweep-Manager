@@ -5,7 +5,11 @@ Submit sweeps to a Slurm or PBS cluster as either a single array job
 (`--mode individual`). `--mode auto` resolves to `array` if `sbatch` is
 on PATH, else falls back to `local`.
 
-For SSH push-model (no scheduler) see
+This guide is for the **on-cluster** case — i.e., `hsm` is running where
+`sbatch` lives. To drive a Slurm cluster *from off-cluster* (e.g., your
+lab workstation submitting to S3IT over SSH), see
+[SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm](SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm).
+For the SSH push-model (no scheduler) see
 [SSH_EXECUTION.md](SSH_EXECUTION.md).
 
 ## Prerequisites
@@ -184,6 +188,35 @@ commenting the block.
 
 **Precedence** (highest wins): CLI `--walltime` > CLI `--resources`
 parsed fields > `local:` block > defaults.
+
+### `local.sweeps_root` — put sweep dirs on a different filesystem
+
+By default a sweep dir lands at `<project>/sweeps/outputs/<sweep_id>/`.
+On boxes where the system disk is tight but a large secondary mount
+exists, redirect via the `local:` block:
+
+```yaml
+local:
+  sweeps_root: "/mnt/8TB_HDD/$USER/hsm-sweeps"   # or /data, /shares, etc.
+```
+
+`~` / `$HOME` / `$USER` are expanded once at submission. The sweep
+data lives at `<sweeps_root>/<sweep_id>/`, and HSM drops a symlink at
+`<project>/sweeps/outputs/<sweep_id>` pointing to it — so `hsm sweep
+status` / `hsm sweep report` and any project-local tooling keep working
+transparently.
+
+Use cases:
+- Workstation with a small NVMe `/` but a large `/mnt/8TB_HDD` —
+  keep `/` breathing without touching project tooling.
+- Multi-user shared box where you want sweep outputs under your own
+  group-quota mount.
+
+If a symlink at the discovery path already points somewhere, it's
+replaced. If a *real* directory squats there (e.g., from an earlier
+local-only run), HSM warns and leaves it alone — the data still lands
+at `<sweeps_root>/<sweep_id>/`, you'll just need to navigate there
+manually.
 
 ### `local.visible_gpus` — restrict which GPU indices the slot queue uses
 

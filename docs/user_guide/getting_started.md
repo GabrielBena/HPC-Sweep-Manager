@@ -4,8 +4,9 @@ This guide walks through installing HSM, initializing it in your ML
 project, and running a sweep in each of the four execution modes.
 
 For deeper recipes:
-- [SSH (push-model) execution](SSH_EXECUTION.md) — the `--remote <alias>` path in depth.
+- [SSH (push-model) execution](SSH_EXECUTION.md) — the `--remote <alias>` path in depth, including `backend: slurm` to drive a remote Slurm cluster (e.g., S3IT) over SSH.
 - [HPC (Slurm / PBS) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + the typed `slurm:` block for advanced Slurm features.
+- [MULTI_CLUSTER.md](MULTI_CLUSTER.md) — fanning a single sweep across {local GPUs, SSH-Slurm cluster, SSH workstation} from one HQ box.
 
 If you're an AI agent landing in this repo, start with
 [../../CLAUDE.md](../../CLAUDE.md) instead.
@@ -129,6 +130,20 @@ hsm sweep run --mode local --parallel-jobs 4 --resources "--gpus=1"
 
 `--show-output` streams stdout/stderr live (handy for small runs).
 
+On a box where the system disk is tight but you have a larger secondary
+mount, redirect sweep outputs there via the `local:` block:
+
+```yaml
+# .hsm/config.yaml
+local:
+  sweeps_root: "/mnt/8TB_HDD/$USER/hsm-sweeps"
+```
+
+Data lives at `<sweeps_root>/<sweep_id>/`; a symlink at
+`<project>/sweeps/outputs/<sweep_id>` keeps `hsm sweep status` /
+`hsm sweep report` working transparently. See
+[HPC_EXECUTION.md#localsweeps_root](HPC_EXECUTION.md#localsweeps_root--put-sweep-dirs-on-a-different-filesystem).
+
 ### HPC array mode
 
 ```bash
@@ -172,12 +187,24 @@ distributed:
   remote_root: ~/.hsm/runs
   conda_env: my-env
   remotes:
-    box-1:
+    box-1:                       # default backend: ssh
       max_parallel_jobs: 4
       gpus: [0, 1, 2, 3]
-    box-2:
+    box-2:                       # default backend: ssh
       max_parallel_jobs: 2
       conda_env: my-env-cpu
+    cluster:                     # SSH-driven Slurm — sbatch jobs over SSH
+      backend: slurm
+      host: cluster-login
+      conda_env: my-env
+      workdir: "/scratch/$USER/hsm-runs"
+      archive_dir: "/shares/<group>/hsm-archive"
+      spec:
+        walltime: "06:00:00"
+        cpus_per_task: 4
+        mem: "32G"
+        gpus: 1
+        gpu_type: H100
 ```
 
 Then:
@@ -187,8 +214,11 @@ hsm sweep run --mode distributed
 ```
 
 HSM fans the parameter combinations across all sources (local + every
-enabled remote) using a round-robin or least-loaded strategy. Schema
-details in [SSH_EXECUTION.md](SSH_EXECUTION.md#hsmconfigyaml--the-distributed-block).
+enabled remote — including mixed SSH-bash and SSH-Slurm backends in one
+sweep) using a round-robin or least-loaded strategy. Schema details in
+[SSH_EXECUTION.md](SSH_EXECUTION.md#hsmconfigyaml--the-distributed-block).
+For the full HQ-on-workstation pattern (laptop → workstation → S3IT)
+see [MULTI_CLUSTER.md](MULTI_CLUSTER.md).
 
 ## Step 4 — inspect
 

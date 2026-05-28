@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 import asyncio
 
-from ..core.common.config import HSMConfig
+from ..core.common.config import HSMConfig, resolve_sweep_dir
 from ..core.common.sweep_orchestrator import (
     SUPPORTED_MODES as _ORCHESTRATOR_MODES,
 )
@@ -212,8 +212,7 @@ def _run_sweep_via_orchestrator(
         return
 
     sweep_id = create_sweep_id()
-    sweep_dir = Path("sweeps") / "outputs" / sweep_id
-    sweep_dir.mkdir(parents=True, exist_ok=True)
+    sweep_dir = resolve_sweep_dir(hsm_config, sweep_id, project_dir=Path(project_dir))
     console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
     console.print(f"Sweep directory: {sweep_dir}")
 

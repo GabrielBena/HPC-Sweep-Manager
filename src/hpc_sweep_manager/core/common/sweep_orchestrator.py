@@ -189,8 +189,6 @@ def build_compute_source(
         return source, "distributed", "individual"
 
     if mode == "remote":
-        from ..remote.ssh_compute_source import build_ssh_source
-
         if not remote_alias:
             raise RuntimeError("--mode remote requires --remote <alias>")
         # Lookup precedence: registered remote → bare ssh-config alias (empty cfg).
@@ -204,17 +202,52 @@ def build_compute_source(
                 f"Remote {remote_alias!r} not in hsm_config — using bare "
                 f"~/.ssh/config alias"
             )
-        source = build_ssh_source(
-            name=remote_alias,
-            remote_cfg=remote_cfg,
-            distributed_cfg=distributed_cfg,
-            project_dir=project_dir,
-            script_path=script_path,
-            default_spec=default_spec,
-            gpus_override=gpus_override,
-            conda_env_override=conda_env_override,
-        )
-        return source, "remote", "individual"
+
+        # Dispatch on the per-remote `backend:` field (default `ssh`).
+        # `slurm` routes through SSHSlurmComputeSource which drives sbatch
+        # on the remote login node. Stays at the remote level (not nested
+        # under `spec:`) because the backend choice is per-source, not
+        # per-job; keeping it out of ResourceSpec preserves that block's
+        # purity.
+        backend = (remote_cfg.get("backend") or "ssh").lower()
+        if backend == "slurm":
+            from ..remote.ssh_slurm_compute_source import build_ssh_slurm_source
+
+            if gpus_override is not None:
+                logger.warning(
+                    f"--gpus is ignored for backend=slurm on {remote_alias!r} "
+                    f"(Slurm allocates GPUs via the `--gres`/`--gpus` "
+                    f"#SBATCH directive; set `spec.gpus` and `spec.gpu_type`)"
+                )
+            source = build_ssh_slurm_source(
+                name=remote_alias,
+                remote_cfg=remote_cfg,
+                distributed_cfg=distributed_cfg,
+                project_dir=project_dir,
+                script_path=script_path,
+                default_spec=default_spec,
+                conda_env_override=conda_env_override,
+            )
+            return source, "remote", "individual"
+        elif backend == "ssh":
+            from ..remote.ssh_compute_source import build_ssh_source
+
+            source = build_ssh_source(
+                name=remote_alias,
+                remote_cfg=remote_cfg,
+                distributed_cfg=distributed_cfg,
+                project_dir=project_dir,
+                script_path=script_path,
+                default_spec=default_spec,
+                gpus_override=gpus_override,
+                conda_env_override=conda_env_override,
+            )
+            return source, "remote", "individual"
+        else:
+            raise ValueError(
+                f"Unknown backend {backend!r} for remote {remote_alias!r}; "
+                f"expected 'ssh' or 'slurm'"
+            )
 
     if mode == "local":
         from ..local.local_compute_source import LocalComputeSource

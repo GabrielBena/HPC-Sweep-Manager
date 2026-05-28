@@ -23,29 +23,9 @@ from typing import Any, Dict, List, Optional
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, render_template
+from .slurm_protocol import SLURM_STATE_MAP, parse_sbatch_job_id, render_sbatch_directives
 
 logger = logging.getLogger(__name__)
-
-
-# Map raw Slurm states (from `squeue -h -o %T`) to canonical states used by
-# ComputeSource.update_job_status. Unknown states default to RUNNING — safer
-# than treating them as terminal.
-_SLURM_STATE_MAP: Dict[str, str] = {
-    "PENDING": "PENDING",
-    "RUNNING": "RUNNING",
-    "SUSPENDED": "PENDING",
-    "CANCELLED": "CANCELLED",
-    "COMPLETING": "RUNNING",
-    "COMPLETED": "COMPLETED",
-    "CONFIGURING": "PENDING",
-    "FAILED": "FAILED",
-    "TIMEOUT": "FAILED",
-    "PREEMPTED": "FAILED",
-    "NODE_FAIL": "FAILED",
-    "OUT_OF_MEMORY": "FAILED",
-    "BOOT_FAIL": "FAILED",
-    "DEADLINE": "FAILED",
-}
 
 
 class SlurmComputeSource(ComputeSource):
@@ -112,34 +92,6 @@ class SlurmComputeSource(ComputeSource):
             )
         return merged
 
-    def _render_directives(self, spec: ResourceSpec) -> str:
-        lines: List[str] = []
-        if spec.walltime:
-            lines.append(f"#SBATCH --time={spec.walltime}")
-        if spec.cpus_per_task:
-            lines.append(f"#SBATCH --cpus-per-task={spec.cpus_per_task}")
-        if spec.mem:
-            lines.append(f"#SBATCH --mem={spec.mem}")
-        if spec.mem_per_cpu:
-            lines.append(f"#SBATCH --mem-per-cpu={spec.mem_per_cpu}")
-        if spec.gpus is not None and spec.gpus > 0:
-            if spec.gpu_type:
-                lines.append(f"#SBATCH --gres=gpu:{spec.gpu_type}:{spec.gpus}")
-            else:
-                lines.append(f"#SBATCH --gpus={spec.gpus}")
-        if spec.partition:
-            lines.append(f"#SBATCH --partition={spec.partition}")
-        if spec.qos:
-            lines.append(f"#SBATCH --qos={spec.qos}")
-        if spec.account:
-            lines.append(f"#SBATCH --account={spec.account}")
-        for key, value in spec.extra_directives:
-            if value:
-                lines.append(f"#SBATCH {key}={value}")
-            else:
-                lines.append(f"#SBATCH {key}")
-        return "\n".join(lines)
-
     def _ensure_dirs(self) -> tuple[Path, Path, Path]:
         if self.sweep_dir is None:
             raise RuntimeError(
@@ -161,7 +113,7 @@ class SlurmComputeSource(ComputeSource):
         spec: Optional[ResourceSpec] = None,
     ) -> str:
         effective = self._effective_spec(spec)
-        directives = self._render_directives(effective)
+        directives = render_sbatch_directives(effective)
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
         task_dir = tasks_dir / job_name
         task_dir.mkdir(parents=True, exist_ok=True)
@@ -194,8 +146,7 @@ class SlurmComputeSource(ComputeSource):
             raise RuntimeError(
                 f"sbatch failed for {job_name}: {result.stderr.strip() or 'no stderr'}"
             )
-        # Slurm prints "Submitted batch job <id>"
-        job_id = result.stdout.strip().split()[-1]
+        job_id = parse_sbatch_job_id(result.stdout)
 
         self.active_jobs[job_id] = JobInfo(
             job_id=job_id,
@@ -240,7 +191,7 @@ class SlurmComputeSource(ComputeSource):
         if not params_list:
             raise ValueError("Cannot submit an empty array")
         effective = self._effective_spec(spec)
-        directives = self._render_directives(effective)
+        directives = render_sbatch_directives(effective)
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
 
         prefix = job_name_prefix or sweep_id
@@ -282,7 +233,7 @@ class SlurmComputeSource(ComputeSource):
             raise RuntimeError(
                 f"sbatch (array) failed: {result.stderr.strip() or 'no stderr'}"
             )
-        job_id = result.stdout.strip().split()[-1]
+        job_id = parse_sbatch_job_id(result.stdout)
 
         self.active_jobs[job_id] = JobInfo(
             job_id=job_id,
@@ -311,7 +262,7 @@ class SlurmComputeSource(ComputeSource):
             status = "COMPLETED"
         else:
             raw = result.stdout.strip().splitlines()[0].strip()
-            status = _SLURM_STATE_MAP.get(raw, "RUNNING")
+            status = SLURM_STATE_MAP.get(raw, "RUNNING")
         if job_id in self.active_jobs:
             self.update_job_status(job_id, status)
         return status

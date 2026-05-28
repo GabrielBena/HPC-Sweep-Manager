@@ -79,6 +79,11 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
             "#   mem: \"16gb\"\n"
             "#   pre_script:\n"
             "#     - \"conda activate my-env\"\n"
+            "# Optional: redirect sweep dirs to a different filesystem (e.g. a big HDD\n"
+            "# mount on a workstation whose system disk is tight). The data lives at\n"
+            "# `<sweeps_root>/<sweep_id>/`; a symlink at `<project>/sweeps/outputs/<sweep_id>`\n"
+            "# keeps `hsm sweep status`/`report` working transparently.\n"
+            "#   sweeps_root: \"/mnt/big-disk/$USER/hsm-sweeps\"\n"
         ).format(n=gpu_count, visible_hint=visible_hint)
     else:
         local_block = (
@@ -92,6 +97,7 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
             "#   mem: \"16gb\"\n"
             "#   pre_script:\n"
             "#     - \"conda activate my-env\"\n"
+            "#   sweeps_root: \"/mnt/big-disk/$USER/hsm-sweeps\"  # redirect to a larger filesystem\n"
         )
 
     return f"""
@@ -126,6 +132,13 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 # Per-remote `spec:` sub-block is the no-bleed home for that remote's
 # default ResourceSpec — the `local:` / `slurm:` blocks above are deliberately
 # NOT read for --mode remote or --mode distributed.
+#
+# `backend:` selects how this remote is driven:
+#   - "ssh"   (default) — push code via rsync, run wrapped bash directly
+#   - "slurm" — push code via rsync, then sbatch jobs over SSH; pair with
+#               `workdir:` (e.g. /scratch/$USER/...) and `archive_dir:`
+#               (e.g. /shares/<project>/...) for a survive-the-30-day-purge
+#               flow on clusters that auto-clean scratch.
 # distributed:
 #   enabled: false
 #   strategy: round_robin
@@ -140,6 +153,20 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 #         cpus_per_task: 4
 #         mem: "16gb"
 #         gpus: 1                  # per-task GPU count
+#     uzh:                         # example: S3IT Slurm cluster via SSH
+#       backend: slurm
+#       host: uzh
+#       conda_env: my-env
+#       workdir: "/scratch/$USER/hsm-runs"        # ephemeral; cleaned at 30d
+#       archive_dir: "/shares/<project>/hsm-archive"   # durable safety net
+#       archive_on: completed                     # completed | always | never
+#       qos_whitelist: [normal, medium]
+#       spec:
+#         walltime: "06:00:00"
+#         cpus_per_task: 4
+#         mem: "32G"
+#         gpus: 1
+#         gpu_type: H100           # GRES casing is case-sensitive on S3IT
 """
 
 
@@ -535,6 +562,11 @@ def _display_next_steps(console: Console):
    `docs/user_guide/HPC_EXECUTION.md`.
 2. **(Optional) Register an SSH remote**: `hsm remote add <alias>` — uses
    your `~/.ssh/config` alias; nothing needs installing on the remote.
+   For driving a Slurm cluster (e.g., S3IT) over SSH from off-cluster,
+   set `backend: slurm` + `workdir` + `archive_dir` per-remote — see
+   `docs/user_guide/SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm`.
+   For fanning a sweep across local + SSH workstation + SSH-Slurm cluster
+   in one run, see `docs/user_guide/MULTI_CLUSTER.md`.
 3. **Create sweep config**: Run `hsm setup configure` or edit
    `sweeps/example_sweep.yaml` directly.
 4. **Dry-run**: `hsm sweep run --config sweeps/example_sweep.yaml --dry-run`

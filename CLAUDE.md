@@ -22,15 +22,21 @@ the **SweepOrchestrator** in
 | Mode | Backend | Where |
 |---|---|---|
 | `local` | `LocalComputeSource` | this machine (slot queue + per-process monitor) |
-| `array` | `SlurmComputeSource` | submits one Slurm `sbatch --array=...` job |
-| `individual` | `SlurmComputeSource` | one `sbatch` per parameter combo |
-| `remote` | `SSHComputeSource` | push-model rsync to a single SSH host |
-| `distributed` | `DistributedComputeSource` | fans across multiple SSH hosts + local |
+| `array` | `SlurmComputeSource` | submits one Slurm `sbatch --array=...` job (locally) |
+| `individual` | `SlurmComputeSource` | one `sbatch` per parameter combo (locally) |
+| `remote` | `SSHComputeSource` *or* `SSHSlurmComputeSource` | push-model rsync to a single SSH host — bash by default, `sbatch`/`squeue` over SSH when the remote's config has `backend: slurm` |
+| `distributed` | `DistributedComputeSource` | fans across mixed children (local + any combo of `backend: ssh` and `backend: slurm` remotes) |
 | `auto` | resolved at runtime | `array` if `sbatch` on PATH, else `local` |
 
 `hsm sweep run --remote <alias>` implies `--mode remote` (you don't pass
 both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
 (separate from `spec.gpus`, which is per-job count — see "Gotchas" below).
+
+**Backend dispatch lives at the remote level**, NOT inside `spec:`.
+`distributed.remotes.<alias>.backend` is either `ssh` (default, →
+`SSHComputeSource`) or `slurm` (→ `SSHSlurmComputeSource`). Keep this
+out of `ResourceSpec` — `spec:` is per-job (walltime/gpus/...);
+`backend`/`workdir`/`archive_dir` are per-source.
 
 ## Architecture (one tier, post Pass B-heavy)
 
@@ -41,8 +47,8 @@ both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
                                  ↓
                  ┌─────── ComputeSource ABC (async) ───────┐
                  │                                         │
-     LocalComputeSource    SlurmComputeSource    SSHComputeSource    DistributedComputeSource
-                                                                     (fans across child ComputeSources)
+     LocalComputeSource    SlurmComputeSource    SSHComputeSource    SSHSlurmComputeSource    DistributedComputeSource
+                                                  (bash/SSH)         (sbatch/SSH)              (fans across mixed children)
 ```
 
 The old `BaseJobManager` hierarchy + `DistributedSweepWrapper` +
@@ -62,12 +68,19 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/local/local_compute_source.py`](src/hpc_sweep_manager/core/local/local_compute_source.py).
 - [`core/hpc/slurm_compute_source.py`](src/hpc_sweep_manager/core/hpc/slurm_compute_source.py).
 - [`core/remote/ssh_compute_source.py`](src/hpc_sweep_manager/core/remote/ssh_compute_source.py) —
-  push-model class + `build_ssh_source(...)` factory + `parse_gpus_arg(...)` helper.
+  bash-over-SSH push class + `build_ssh_source(...)` factory + `parse_gpus_arg(...)` helper.
+- [`core/remote/ssh_slurm_compute_source.py`](src/hpc_sweep_manager/core/remote/ssh_slurm_compute_source.py) —
+  sbatch-over-SSH class + `build_ssh_slurm_source(...)` factory. Composes push_exec rsync helpers + slurm_protocol directive rendering. Supports `workdir` (overrides `remote_root`) + `archive_dir` (server-side rsync to a durable target after `wait_for_all`) + `archive_on: completed|always|never` + `.archived` sentinel.
+- [`core/hpc/slurm_protocol.py`](src/hpc_sweep_manager/core/hpc/slurm_protocol.py) —
+  pure shared helpers: `SLURM_STATE_MAP`, `render_sbatch_directives(spec)`, `parse_sbatch_job_id(stdout)`. Used by both Slurm sources to avoid drift.
 - [`core/remote/push_exec.py`](src/hpc_sweep_manager/core/remote/push_exec.py) —
   pure helpers (`DEFAULT_RSYNC_EXCLUDES`, `normalize_gpu_allowlist`,
   `partition_gpu_slots`, `resolve_run_prefix`, `build_rsync_push_cmd`,
   `build_rsync_pull_cmd`).
-- [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py).
+- [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py) —
+  `_build_ssh_children` dispatches per-remote on `backend:` (`ssh`/`slurm`) so a single distributed run can mix both.
+- [`core/common/config.py`](src/hpc_sweep_manager/core/common/config.py) —
+  `HSMConfig.get_local_sweeps_root()` + `resolve_sweep_dir(hsm_config, sweep_id, project_dir)` — when `local.sweeps_root` is set, sweep dirs land there with a discovery symlink in the project dir.
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
@@ -153,7 +166,27 @@ it's trying to reintroduce them, push back.
 
 4. **`run_sweep_async` MUST call `collect_results()` + `cleanup()`** after
    `wait_for_all()`. No-op for Local/Slurm; load-bearing for SSH (where
-   `collect_results` IS the rsync-pull). Don't remove these calls.
+   `collect_results` IS the rsync-pull, and the archive step for SSH-Slurm
+   piggybacks on it). Don't remove these calls.
+
+4b. **SSH-Slurm: archive runs BEFORE the local pull.** For
+   `SSHSlurmComputeSource.collect_results()`, the sequence is: (a)
+   server-side rsync `workdir → archive_dir/<sweep_id>/` + write
+   `.archived` sentinel (only when `archive_dir` set and `archive_on`
+   allows), then (b) the local rsync pull of `tasks/`, then (c)
+   `rm -rf` the remote sweep dir on full success. Server-side rsync
+   uses the cluster's internal network (fast); the pull goes through
+   the SSH connection (slow). Reversing the order would have us pulling
+   data we're about to delete, while the durable safety net is still
+   missing. Don't reorder.
+
+4c. **Backend dispatch lives at the remote level, NOT in `ResourceSpec`.**
+   `distributed.remotes.<alias>.backend` is `ssh` (default) or `slurm`.
+   `workdir` / `archive_dir` / `archive_on` also live at the remote
+   level. Per-job concerns (walltime, gpus, gpu_type, modules, ...) stay
+   inside `spec:`. Conflating them invites a `slurm:` style bleed-bug
+   (see gotcha 5b). The orchestrator dispatches in `build_compute_source`
+   (`--mode remote`) and `_build_ssh_children` (`--mode distributed`).
 
 5. **Two-level GPU semantics:** `--gpus` (CLI) = which GPUs are *visible*
    on the box (allowlist). `spec.gpus` (from `--resources --gpus=N`
@@ -270,12 +303,32 @@ it's trying to reintroduce them, push back.
    smoke-script outputs (`sentinel.txt`, `task_info.txt`) are the contract
    to preserve.
 
+## Recently landed (2026-05-28) — Pieces A–D
+
+Four small features that together unlock the "HQ workstation drives
+sweeps across {local, SSH boxes, SSH-Slurm clusters}" workflow. Brief
+plan + decisions: `/home/gbena/.claude/plans/we-are-making-misty-moth.md`.
+
+| Piece | What | Where |
+|---|---|---|
+| A | `local.sweeps_root` — redirect sweep dirs to a different filesystem with a discovery symlink in the project | `core/common/config.py` (`get_local_sweeps_root`, `resolve_sweep_dir`); `cli/sweep.py` |
+| B | `SSHSlurmComputeSource` — sbatch over SSH; reuses push_exec rsync + slurm_protocol directive rendering | `core/remote/ssh_slurm_compute_source.py`, `core/hpc/slurm_protocol.py` (new shared module) |
+| C | `workdir` / `archive_dir` / `archive_on` on SSH-Slurm — `/scratch → /shares` server-side rsync with `.archived` sentinel | same file as B (layered on collect_results) |
+| D | Mixed-backend distributed — `_build_ssh_children` dispatches on `backend:` so `--mode distributed` can fan across `ssh` + `slurm` children in one sweep | `core/distributed/distributed_compute_source.py` |
+
+Smoke driver for the new SSH-Slurm path:
+[`examples/smoke_ssh_slurm_cli.sh`](examples/smoke_ssh_slurm_cli.sh).
+User-facing docs: [docs/user_guide/MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md)
+is the canonical place; [SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm)
+has the per-feature reference.
+
 ## Cross-references
 
 - **Users:** [README.md](README.md) (quickstart),
   [docs/user_guide/getting_started.md](docs/user_guide/getting_started.md),
   [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md),
-  [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md).
+  [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md),
+  [docs/user_guide/MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md).
 - **API:** [docs/api_reference/](docs/api_reference/) — the
   `compute_sources.md` doc is the live one; the others are legacy with banners.
 - **Design rationale:** [ARCHITECTURE.md](ARCHITECTURE.md).

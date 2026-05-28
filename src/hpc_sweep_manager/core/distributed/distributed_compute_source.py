@@ -78,14 +78,18 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSou
 
 
 async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
-    """Construct push-model SSH child sources from local hsm_config.
+    """Construct push-model SSH/SSH-Slurm child sources from local hsm_config.
 
-    No discovery step — every field comes from ``distributed.remotes[name]``
-    (per-remote) or ``distributed:`` (global). Bare ssh-config aliases work
-    because ``host`` defaults to ``name``.
+    Dispatches per-remote on the optional ``backend:`` field
+    (``ssh`` default, ``slurm`` routes through
+    :class:`SSHSlurmComputeSource`). Bare ssh-config aliases work because
+    ``host`` defaults to ``name``. No discovery step — every field comes
+    from ``distributed.remotes[name]`` (per-remote) or ``distributed:``
+    (global).
     """
     from ..common.path_detector import PathDetector
     from ..remote.ssh_compute_source import build_ssh_source
+    from ..remote.ssh_slurm_compute_source import build_ssh_slurm_source
 
     detector = PathDetector()
     project_dir = hsm_config.get_project_root() or str(Path.cwd())
@@ -94,19 +98,41 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
 
     sources: List[ComputeSource] = []
     for remote_name, remote_config in remotes.items():
+        backend = (remote_config.get("backend") or "ssh").lower()
         try:
-            sources.append(
-                build_ssh_source(
+            if backend == "slurm":
+                source = build_ssh_slurm_source(
                     name=remote_name,
                     remote_cfg=remote_config,
                     distributed_cfg=distributed_cfg,
                     project_dir=project_dir,
                     script_path=script_path,
                 )
-            )
-            logger.info(f"Remote source ready: {remote_name}")
+                logger.info(
+                    f"Remote source ready: {remote_name} (backend=slurm)"
+                )
+            elif backend == "ssh":
+                source = build_ssh_source(
+                    name=remote_name,
+                    remote_cfg=remote_config,
+                    distributed_cfg=distributed_cfg,
+                    project_dir=project_dir,
+                    script_path=script_path,
+                )
+                logger.info(
+                    f"Remote source ready: {remote_name} (backend=ssh)"
+                )
+            else:
+                logger.warning(
+                    f"Unknown backend {backend!r} for remote {remote_name!r}; "
+                    f"expected 'ssh' or 'slurm'. Skipping."
+                )
+                continue
+            sources.append(source)
         except Exception as e:  # noqa: BLE001 - a bad remote shouldn't kill the run
-            logger.warning(f"Failed to add SSH source {remote_name!r}: {e}")
+            logger.warning(
+                f"Failed to add {backend} source {remote_name!r}: {e}"
+            )
     return sources
 
 

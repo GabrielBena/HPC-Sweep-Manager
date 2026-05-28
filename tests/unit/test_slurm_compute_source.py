@@ -11,6 +11,7 @@ import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
+from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
 
 
 class TestConstruction:
@@ -36,70 +37,70 @@ class TestConstruction:
 class TestDirectiveRendering:
     def test_empty_spec_emits_nothing(self):
         src = SlurmComputeSource()
-        assert src._render_directives(ResourceSpec()) == ""
+        assert render_sbatch_directives(ResourceSpec()) == ""
 
     def test_walltime(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(walltime="04:00:00"))
+        out = render_sbatch_directives(ResourceSpec(walltime="04:00:00"))
         assert "#SBATCH --time=04:00:00" in out.splitlines()
 
     def test_cpus_per_task(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(cpus_per_task=8))
+        out = render_sbatch_directives(ResourceSpec(cpus_per_task=8))
         assert "#SBATCH --cpus-per-task=8" in out.splitlines()
 
     def test_mem_only(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(mem="32G"))
+        out = render_sbatch_directives(ResourceSpec(mem="32G"))
         assert "#SBATCH --mem=32G" in out.splitlines()
         assert "--mem-per-cpu" not in out
 
     def test_mem_per_cpu_only(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(mem_per_cpu="4G"))
+        out = render_sbatch_directives(ResourceSpec(mem_per_cpu="4G"))
         assert "#SBATCH --mem-per-cpu=4G" in out.splitlines()
         assert not any(l == "#SBATCH --mem=" for l in out.splitlines())
 
     def test_gpus_without_type_uses_gpus_flag(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(gpus=2))
+        out = render_sbatch_directives(ResourceSpec(gpus=2))
         assert "#SBATCH --gpus=2" in out.splitlines()
         assert "--gres" not in out
 
     def test_gpu_type_uses_gres(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(gpus=1, gpu_type="h100"))
+        out = render_sbatch_directives(ResourceSpec(gpus=1, gpu_type="h100"))
         assert "#SBATCH --gres=gpu:h100:1" in out.splitlines()
         assert "--gpus=" not in out
 
     def test_zero_gpus_emits_nothing_gpu_related(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(gpus=0))
+        out = render_sbatch_directives(ResourceSpec(gpus=0))
         assert "--gpus" not in out
         assert "--gres" not in out
 
     def test_s3it_qos(self):
         src = SlurmComputeSource()
         for q in ("normal", "medium", "long"):
-            out = src._render_directives(ResourceSpec(qos=q))
+            out = render_sbatch_directives(ResourceSpec(qos=q))
             assert f"#SBATCH --qos={q}" in out.splitlines()
 
     def test_partition_and_account(self):
         src = SlurmComputeSource()
-        out = src._render_directives(ResourceSpec(partition="gpu", account="proj-x"))
+        out = render_sbatch_directives(ResourceSpec(partition="gpu", account="proj-x"))
         assert "#SBATCH --partition=gpu" in out.splitlines()
         assert "#SBATCH --account=proj-x" in out.splitlines()
 
     def test_extra_directives_with_value(self):
         src = SlurmComputeSource()
         spec = ResourceSpec(extra_directives=(("--mail-type", "BEGIN"),))
-        out = src._render_directives(spec)
+        out = render_sbatch_directives(spec)
         assert "#SBATCH --mail-type=BEGIN" in out.splitlines()
 
     def test_extra_directive_without_value(self):
         src = SlurmComputeSource()
         spec = ResourceSpec(extra_directives=(("--exclusive", ""),))
-        out = src._render_directives(spec)
+        out = render_sbatch_directives(spec)
         assert "#SBATCH --exclusive" in out.splitlines()
 
     def test_full_s3it_spec(self):
@@ -112,7 +113,7 @@ class TestDirectiveRendering:
             gpu_type="h100",
             qos="normal",
         )
-        out = src._render_directives(spec)
+        out = render_sbatch_directives(spec)
         assert "--time=04:00:00" in out
         assert "--cpus-per-task=4" in out
         assert "--mem-per-cpu=4G" in out
@@ -189,7 +190,7 @@ class TestTemplateRendering:
             sweep_id="sweep_42",
             logs_dir="/tmp/logs",
             task_dir="/tmp/tasks/test_job",
-            sbatch_directives=src._render_directives(spec),
+            sbatch_directives=render_sbatch_directives(spec),
             modules=["h100"],
             pre_script=["source ~/venv/bin/activate"],
             project_dir="/home/user/project",
@@ -220,7 +221,7 @@ class TestTemplateRendering:
             logs_dir="/tmp/logs",
             tasks_dir="/tmp/tasks",
             params_file="/tmp/params.json",
-            sbatch_directives=src._render_directives(spec),
+            sbatch_directives=render_sbatch_directives(spec),
             modules=["l4"],
             pre_script=[],
             project_dir="/home/user/project",

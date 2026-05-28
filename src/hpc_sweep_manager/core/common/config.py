@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -289,7 +290,10 @@ class HSMConfig:
         if not isinstance(block, dict) or not block:
             return None
         _LOCAL_SPEC_FIELDS = {"walltime", "cpus_per_task", "mem", "gpus", "pre_script"}
-        _NON_SPEC_LOCAL_KEYS = {"visible_gpus"}  # consumed by sibling accessors, not ResourceSpec
+        # Consumed by sibling accessors, not ResourceSpec:
+        #   visible_gpus  → get_local_visible_gpus
+        #   sweeps_root   → get_local_sweeps_root
+        _NON_SPEC_LOCAL_KEYS = {"visible_gpus", "sweeps_root"}
         rejected = set(block) - _LOCAL_SPEC_FIELDS - _NON_SPEC_LOCAL_KEYS
         if rejected:
             logger.warning(
@@ -337,6 +341,36 @@ class HSMConfig:
             return None
         return indices
 
+    def get_local_sweeps_root(self) -> Optional[str]:
+        """Read ``local.sweeps_root`` — a directory where sweep dirs live, or ``None``.
+
+        When set, sweep dirs are created at ``<sweeps_root>/<sweep_id>/`` (with
+        ``~`` / ``$HOME`` / ``$USER`` expanded by :func:`resolve_sweep_dir`), and
+        a symlink is dropped at ``<cwd>/sweeps/outputs/<sweep_id>`` pointing to
+        it — so existing tooling (``hsm sweep status``, ``hsm sweep report``)
+        keeps finding sweeps where it expects.
+
+        Use case: a fat workstation whose system disk is tight but with a
+        large secondary mount (e.g., ``/mnt/8TB_HDD/<user>/sweeps``). Setting
+        ``sweeps_root`` keeps ``/`` breathing while preserving the
+        project-local discovery pattern.
+
+        Returns the raw string (caller expands); ``None`` when unset.
+        """
+        block = self.config_data.get("local")
+        if not isinstance(block, dict):
+            return None
+        value = block.get("sweeps_root")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            logger.warning(
+                f"`local.sweeps_root` must be a non-empty string; "
+                f"got {type(value).__name__}. Ignoring."
+            )
+            return None
+        return value
+
     def get_slurm_qos_whitelist(self) -> Optional[frozenset]:
         """Read ``slurm.qos_whitelist`` as a frozenset, or ``None`` if unset.
 
@@ -356,6 +390,69 @@ class HSMConfig:
             )
             return None
         return frozenset(str(q) for q in whitelist)
+
+
+def resolve_sweep_dir(
+    hsm_config: Optional["HSMConfig"],
+    sweep_id: str,
+    project_dir: Optional[Path] = None,
+) -> Path:
+    """Resolve and create the sweep dir for ``sweep_id``.
+
+    Default: ``<project_dir>/sweeps/outputs/<sweep_id>`` (where
+    ``project_dir`` falls back to the current working directory).
+
+    When ``hsm_config.local.sweeps_root`` is set, sweep dirs are created
+    at ``<sweeps_root>/<sweep_id>/`` instead (with ``~`` / ``$HOME`` /
+    ``$USER`` expanded), and a symlink at
+    ``<project_dir>/sweeps/outputs/<sweep_id>`` points to it — so
+    project-local tooling keeps working transparently.
+
+    The returned ``Path`` is the *target* (where data actually lives),
+    not the symlink, so callers using it for ``mkdir``, ``glob``, etc.
+    operate on the canonical location.
+    """
+    project_dir = project_dir or Path.cwd()
+    default = project_dir / "sweeps" / "outputs" / sweep_id
+
+    sweeps_root = (
+        hsm_config.get_local_sweeps_root() if hsm_config is not None else None
+    )
+    if not sweeps_root:
+        default.mkdir(parents=True, exist_ok=True)
+        return default
+
+    expanded = Path(os.path.expandvars(os.path.expanduser(sweeps_root))).resolve()
+    target = expanded / sweep_id
+    target.mkdir(parents=True, exist_ok=True)
+
+    link_parent = project_dir / "sweeps" / "outputs"
+    link_parent.mkdir(parents=True, exist_ok=True)
+    link = link_parent / sweep_id
+
+    # If a stale symlink already exists at the link path (e.g., from a
+    # collision on sweep_id), replace it with one pointing at the new
+    # target. Never touch a real directory living at the link path —
+    # that would be data loss.
+    if link.is_symlink():
+        link.unlink()
+    if not link.exists():
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            logger.info(f"Sweep dir at {target} (symlinked from {link})")
+        except OSError as e:
+            logger.warning(
+                f"Could not symlink {link} -> {target}: {e}. Sweep data "
+                f"lives at the target; project-local discovery via "
+                f"`sweeps/outputs/` will not see it."
+            )
+    else:
+        logger.warning(
+            f"Cannot create discovery symlink at {link}: a non-symlink "
+            f"entry already exists there. Sweep data lives at {target}."
+        )
+
+    return target
 
 
 class HydraConfigParser:
