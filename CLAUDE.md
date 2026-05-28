@@ -185,13 +185,24 @@ it's trying to reintroduce them, push back.
      `gpu:H100:N` / `gpu:L4:N`. Use `gpu_type: H100`, not `h100`. Slurm GRES
      names are case-sensitive; lowercase → "Requested node configuration is
      not available."
-   - **DO NOT put flavour modules (`h100`, `l4`, `multigpu`, etc.) in the rendered
-     script.** Earlier versions of this gotcha said you needed BOTH `gpu_type` AND
-     `modules: [h100]` — that was wrong. Per S3IT docs: flavour modules belong on
-     the command line before `sbatch`, not in the batch script ("they set Slurm
-     constraints that may conflict with job directives, causing allocation errors").
-     The `modules:` field of the typed `slurm:` block is still useful for
-     non-flavour modules (e.g. `module load matlab`); just don't put `h100` in it.
+   - **Flavour modules (`h100`, `l4`, `multigpu`, ...) in the rendered script:
+     S3IT docs recommend against, empirically both forms work.** Earlier
+     versions of this gotcha said you NEEDED `modules: [h100]` alongside
+     `gpu_type` — that was wrong; `gpu_type: H100` alone is sufficient.
+     S3IT docs say flavour modules belong on the command line before
+     `sbatch` because they set Slurm constraints that *can* conflict with
+     directives. In practice (verified 2026-05-28), having `module load
+     h100` inside the script alongside `--gres=gpu:H100:1` works fine
+     because both set consistent H100 constraints — no conflict.
+     **Safer default: omit flavour modules from the typed `slurm:` block.**
+     The `modules:` field is still the right home for non-flavour modules
+     (`module load matlab`, `module load openmpi`); just be aware that
+     mixing a flavour module with a contradictory `gpu_type` will hit the
+     conflict path the docs warn about.
+   - Also note: "Requested node configuration is not available" can be a
+     *transient* error on a busy cluster (no matching node currently idle),
+     not just a permanent config mismatch. Retry after a wait before
+     concluding the directives are wrong.
    - CUDA / cudnn usually NOT needed via modules — "containers, conda bundle
      CUDA" (S3IT docs). Only load `cuda` when compiling with `nvcc`.
 

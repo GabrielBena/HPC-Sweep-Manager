@@ -130,14 +130,20 @@ slurm:
     - long
 ```
 
-> **S3IT note:** Earlier docs and CLAUDE.md gotcha #6 suggested adding
-> `modules: [h100]` alongside `gpu_type`. That was based on an
-> empirical misdiagnosis. Per the
-> [S3IT job-submission docs](https://docs.s3it.uzh.ch/cluster/job_submission/):
-> *"You should not load flavour modules (e.g. h100, l4, multigpu) in
-> the job script. They set Slurm constraints that may conflict with job
-> directives, causing allocation errors."* `gpu_type: H100` alone is
-> sufficient on S3IT; CUDA comes from your conda env.
+> **S3IT note:** Earlier docs claimed S3IT NEEDED `modules: [h100]`
+> alongside `gpu_type`. That was wrong — `gpu_type: H100` alone produces
+> `--gres=gpu:H100:1` which is sufficient. CUDA comes from your conda env.
+>
+> The [S3IT docs](https://docs.s3it.uzh.ch/cluster/job_submission/) warn
+> that flavour modules (`h100`, `l4`, `multigpu`) "set Slurm constraints
+> that may conflict with job directives" — but in practice (verified
+> 2026-05-28) having `module load h100` inside the script alongside a
+> matching `--gres=gpu:H100:1` works because both set consistent
+> constraints. The safer default is to omit the flavour module; the
+> `modules:` field is still the right home for non-flavour modules like
+> `matlab` or `openmpi`. Also worth knowing: "Requested node configuration
+> is not available" can be a *transient* sbatch error on a busy cluster —
+> retry after a wait before assuming the directives are wrong.
 
 Then submit normally — the block is picked up automatically:
 
