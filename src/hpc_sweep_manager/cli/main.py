@@ -5,16 +5,12 @@ from rich.console import Console
 
 from ..core.common.utils import setup_logging
 from .analyze import analyze  # Code analysis and usage tracking
-from .hpc import hpc  # HPC execution
-
-# Import consolidated command groups (no more wrappers!)
 from .init import setup  # Project setup: init, configure
-from .local import local  # Local execution
 from .monitor import (
     monitor,
-)  # Monitoring: watch, status, recent, queue, cancel, cleanup, delete-jobs, collect-results
+)  # Monitoring: watch, status, recent, queue, cancel, cleanup, delete-jobs
 from .remote import remote  # Remote management
-from .sweep import sweep_cmd  # Direct sweep command
+from .sweep import sweep_cmd  # Sweep: run, status, report, errors
 from .sync_commands import sync  # Sync: init, list, run, to
 
 console = Console()
@@ -31,7 +27,6 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
     # Ensure that ctx.obj exists and is a dict
     ctx.ensure_object(dict)
 
-    # Set up logging
     if quiet:
         log_level = "ERROR"
     elif verbose:
@@ -46,17 +41,11 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 
 # Register all command groups
 cli.add_command(setup)  # hsm setup init, hsm setup configure
-cli.add_command(sweep_cmd)  # hsm sweep (direct command)
-cli.add_command(sync)  # hsm sync init, list, run, to
-cli.add_command(
-    monitor
-)  # hsm monitor watch, status, recent, queue, cancel, cleanup, delete-jobs, collect-results
-cli.add_command(local)  # hsm local run, status, clean
-cli.add_command(hpc)  # hsm hpc submit, queue, status, cancel
-cli.add_command(remote)  # hsm remote add, list, test, health, remove
-cli.add_command(
-    analyze
-)  # hsm analyze enable-tracking, report, dead-code, complexity, dependencies, coverage-gaps
+cli.add_command(sweep_cmd)  # hsm sweep run/status/report/errors
+cli.add_command(sync)  # hsm sync init/list/run/to/cache/clean
+cli.add_command(monitor)  # hsm monitor watch/status/recent/queue/cancel/cleanup/delete-jobs
+cli.add_command(remote)  # hsm remote add/list/test/health/gpus/clean/remove
+cli.add_command(analyze)  # hsm analyze enable-tracking/report/dead-code/...
 
 
 def main():

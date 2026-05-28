@@ -32,7 +32,7 @@ the **SweepOrchestrator** in
 both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
 (separate from `spec.gpus`, which is per-job count — see "Gotchas" below).
 
-## Architecture in three tiers
+## Architecture (one tier, post Pass B-heavy)
 
 ```
                     CLI (cli/sweep.py, cli/remote.py, ...)
@@ -42,18 +42,16 @@ both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
                  ┌─────── ComputeSource ABC (async) ───────┐
                  │                                         │
      LocalComputeSource    SlurmComputeSource    SSHComputeSource    DistributedComputeSource
-                                                                     (wraps DistributedJobManager — legacy interior)
-
-  Below is the LEGACY tier — still alive but only the completion path uses it.
-  Slated for deletion in Pass B-heavy (once completion.py migrates to the
-  orchestrator):
-
-     BaseJobManager → {HPCJobManager → {SlurmJobManager, PBSJobManager},
-                       LocalJobManager}
-     DistributedSweepWrapper
+                                                                     (fans across child ComputeSources)
 ```
 
-**Live path (use these):**
+The old `BaseJobManager` hierarchy + `DistributedSweepWrapper` +
+`completion.py:SweepCompletor` were all deleted in Pass B-heavy. The
+analyzer half of completion (`SweepCompletionAnalyzer` — pure on-disk
+inspection) survived in `core/common/sweep_analysis.py` and still
+backs `hsm sweep status` / `hsm sweep report`.
+
+**Key files:**
 - [`core/common/sweep_orchestrator.py`](src/hpc_sweep_manager/core/common/sweep_orchestrator.py) —
   `build_compute_source(mode, ...)`, `run_sweep_async(...)`, `spec_from_cli(...)`.
 - [`core/common/compute_source.py`](src/hpc_sweep_manager/core/common/compute_source.py) —
@@ -70,20 +68,32 @@ both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
   `partition_gpu_slots`, `resolve_run_prefix`, `build_rsync_push_cmd`,
   `build_rsync_pull_cmd`).
 - [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py).
-
-**Legacy tier (do not extend, only fix-in-place if blocked):**
-- `core/common/base_manager.py:BaseJobManager`.
-- `core/hpc/hpc_base.py:HPCJobManager` + `core/hpc/slurm_manager.py`/`pbs_manager.py`.
-- `core/local/local_manager.py:LocalJobManager`.
-- `core/distributed/wrapper.py:DistributedSweepWrapper`.
-- `core/common/completion.py` — the completion code path (`hsm sweep complete`)
-  still wires these up. Migrating it to the orchestrator is the gating task
-  for deleting the legacy tier.
+- [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
+  `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
+  Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
 
 ## Do NOT reintroduce
 
 These were deliberately removed; resist resurrecting them.
 
+- **`BaseJobManager` / `HPCJobManager` / `SlurmJobManager` / `PBSJobManager`
+  / `LocalJobManager` / `DistributedSweepWrapper`.** The entire pre-async
+  manager hierarchy was deleted in Pass B-heavy. Inheriting from
+  `BaseJobManager` or wrapping a `JobManager` is the wrong shape — new
+  backends inherit from `ComputeSource` (in `core/common/compute_source.py`).
+- **`completion.py:SweepCompletor`** (the bloated re-runner). Was 1376 LOC
+  of glue between the legacy manager hierarchy and a re-submit loop. The
+  read-only `SweepCompletionAnalyzer` half survives in `sweep_analysis.py`.
+  A clean `hsm sweep complete` will return one day as ~200-400 LOC built
+  directly on `ComputeSource` + a `task_number_offset` knob — do NOT port
+  the old shape forward.
+- **`hsm hpc submit|queue|status|cancel`** + **`hsm local run|status|clean`.**
+  Deleted CLI groups — duplicated `hsm sweep run` with different flags.
+  Use `hsm sweep run --mode array|individual|local` instead.
+- **`hsm sweep complete <sweep_id>`.** Deleted alongside `SweepCompletor`.
+  `cli/sweep.py:run_sweep` errors clearly if it sees `config.complete: <id>`
+  in a sweep yaml. Inspect with `hsm sweep status` / `hsm sweep report`,
+  then re-submit manually with a filtered sweep config for now.
 - **`--mode remote --remote <alias>` shape.** The flag was renamed: now it's
   just `--remote <alias>` (implies `--mode remote`). See `cli/sweep.py:run_cmd`.
 - **`hsm distributed init|add|test|health|remove`.** Deleted — duplicated
@@ -150,10 +160,13 @@ it's trying to reintroduce them, push back.
 
 ## Known limitations
 
-- **Completion runs (`hsm sweep complete <id>`)** still flow through the
-  legacy `BaseJobManager` path — they need `starting_task_number`
-  propagation that the unified `ComputeSource` doesn't have yet. Blocker
-  for Pass B-heavy deletion of the legacy tier.
+- **No `hsm sweep complete` command in this build.** The bloated v0.1
+  re-runner was deleted in Pass B-heavy. The read-only
+  `SweepCompletionAnalyzer` survives so `hsm sweep status` /
+  `hsm sweep report` still tell you which tasks failed; manual
+  re-submission with a filtered sweep config is the current path. A
+  clean rebuild on top of `ComputeSource` + a future `task_number_offset`
+  knob is planned.
 
 - The CLI `--resources` opaque string covers common Slurm fields
   (cpus/mem/gpus/qos/partition/walltime) but **cannot** express

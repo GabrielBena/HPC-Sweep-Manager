@@ -89,16 +89,21 @@ the full lifecycle.
 
 ```
 hsm setup    init configure         # project bootstrap
-hsm sweep    run | complete | status | report | errors
+hsm sweep    run | status | report | errors
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm local    run | status | clean   # legacy — being migrated
-hsm hpc      submit | queue | status | cancel   # legacy — being migrated
 hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
-hsm sync     init | list | run | to
+hsm sync     init | list | run | to | cache | clean
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
 Full reference: [docs/cli/README.md](docs/cli/README.md).
+
+> **Note:** `hsm sweep complete` (resuming partial sweeps) is not in this
+> build. The bloated v0.1 completion code was deleted in Pass B-heavy
+> alongside the legacy job manager hierarchy. `hsm sweep status` and
+> `hsm sweep report` still tell you which tasks failed; manual
+> re-submission with a filtered sweep config is the current path. A
+> clean rebuild is planned.
 
 ## Docs
 
@@ -106,7 +111,6 @@ Full reference: [docs/cli/README.md](docs/cli/README.md).
 - [docs/user_guide/getting_started.md](docs/user_guide/getting_started.md) — broader tutorial with per-mode walkthroughs.
 - [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md) — the push-model SSH recipe in depth.
 - [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) — Slurm / PBS recipe + the `--resources` gap workaround.
-- [docs/user_guide/COMPLETION_RUNS.md](docs/user_guide/COMPLETION_RUNS.md) — resuming partial sweeps with `hsm sweep complete`.
 - [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) — `.hsm/` layout + paths HSM expects.
 - [docs/api_reference/](docs/api_reference/) — Python API for embedding HSM in your own scripts.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — design rationale + known limitations.

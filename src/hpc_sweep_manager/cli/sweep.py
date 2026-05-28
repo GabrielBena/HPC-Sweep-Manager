@@ -3,27 +3,26 @@
 from datetime import datetime
 import logging
 from pathlib import Path
-import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Optional
 
 import click
 from rich.console import Console
 
 if TYPE_CHECKING:
-    from ..core.common.config import HSMConfig
+    from ..core.common.config import HSMConfig, SweepConfig
 
 import asyncio
 
-from ..core.common.config import HSMConfig, SweepConfig
+from ..core.common.config import HSMConfig
 from ..core.common.sweep_orchestrator import (
     SUPPORTED_MODES as _ORCHESTRATOR_MODES,
+)
+from ..core.common.sweep_orchestrator import (
     build_compute_source,
     run_sweep_async,
     spec_from_cli,
 )
-from ..core.common.sweep_tracker import SweepTaskTracker
 from ..core.common.templating import params_to_hydra_args
-from ..core.local.local_manager import LocalJobManager
 from .common import common_options
 
 logger = logging.getLogger(__name__)
@@ -32,19 +31,13 @@ logger = logging.getLogger(__name__)
 def _load_and_validate_config(
     config_path: Path, console: Console, logger: logging.Logger
 ) -> Optional["SweepConfig"]:
-    """Load and validate sweep configuration.
-
-    Returns:
-        SweepConfig if valid, None if validation failed
-    """
+    """Load and validate sweep configuration."""
     from ..core.common.config import SweepConfig
 
     try:
-        # Load sweep configuration
         config = SweepConfig.from_yaml(config_path)
         logger.info(f"Loaded sweep config from {config_path}")
 
-        # Validate configuration
         errors = config.validate()
         if errors:
             console.print("[red]Configuration validation failed:[/red]")
@@ -65,16 +58,11 @@ def _load_and_validate_config(
 def _generate_parameter_combinations(
     config: "SweepConfig", max_runs: Optional[int], count_only: bool, console: Console
 ) -> Optional[list]:
-    """Generate and display parameter combinations.
-
-    Returns:
-        List of parameter combinations, or None if count_only=True
-    """
+    """Generate and display parameter combinations."""
     from rich.table import Table
 
     from ..core.common.param_generator import ParameterGenerator
 
-    # Generate parameter combinations
     generator = ParameterGenerator(config)
 
     if count_only:
@@ -83,8 +71,6 @@ def _generate_parameter_combinations(
         return None
 
     combinations = generator.generate_combinations(max_runs)
-
-    # Show parameter info
     info = generator.get_parameter_info()
 
     table = Table(title="Sweep Information")
@@ -104,328 +90,18 @@ def _generate_parameter_combinations(
     return combinations
 
 
-def _load_completed_tasks(
-    sweep_id: str, console: Console, logger: logging.Logger
-) -> Optional[Dict[str, Any]]:
-    """Load completed tasks from a previous sweep.
-
-    Returns:
-        Dictionary containing completed task parameters, or None if not found
-    """
-    import yaml
-
-    # Look for the previous sweep in outputs directory
-    sweep_dir = Path("sweeps") / "outputs" / sweep_id
-    source_mapping_file = sweep_dir / "source_mapping.yaml"
-
-    if not sweep_dir.exists():
-        console.print(f"[red]Error: Previous sweep directory not found: {sweep_dir}[/red]")
-        return None
-
-    if not source_mapping_file.exists():
-        console.print(f"[red]Error: Source mapping file not found: {source_mapping_file}[/red]")
-        return None
-
-    try:
-        with open(source_mapping_file) as f:
-            mapping_data = yaml.safe_load(f)
-
-        logger.info(f"Loaded source mapping from {source_mapping_file}")
-        return mapping_data
-    except Exception as e:
-        console.print(f"[red]Error loading source mapping: {e}[/red]")
-        logger.error(f"Failed to load source mapping: {e}")
-        return None
-
-
-def _get_max_task_number(completed_tasks: Dict[str, Any]) -> int:
-    """Get the maximum task number from completed tasks.
-
-    Returns:
-        Maximum task number found, or 0 if no tasks exist
-    """
-    if not completed_tasks or "task_assignments" not in completed_tasks:
-        return 0
-
-    max_task_num = 0
-    for task_name in completed_tasks["task_assignments"].keys():
-        # Extract task number from task_001, task_002, etc.
-        match = re.search(r"task_(\d+)", task_name)
-        if match:
-            task_num = int(match.group(1))
-            max_task_num = max(max_task_num, task_num)
-
-    return max_task_num
-
-
-def _filter_completed_combinations(
-    combinations: List[Dict[str, Any]],
-    completed_tasks: Dict[str, Any],
-    console: Console,
-    logger: logging.Logger,
-    completion_sweep_id: str,
-) -> List[Dict[str, Any]]:
-    """Filter out parameter combinations that were already completed.
-
-    Also ensures wandb.group is set to the completion sweep ID for all new combinations.
-
-    Returns:
-        List of parameter combinations that haven't been completed yet
-    """
-    if not completed_tasks or "task_assignments" not in completed_tasks:
-        return combinations
-
-    task_assignments = completed_tasks["task_assignments"]
-
-    # Extract completed parameter sets (only COMPLETED status)
-    completed_params = []
-    for task_info in task_assignments.values():
-        if task_info.get("status") == "COMPLETED":
-            params = task_info.get("params", {})
-            if params:
-                completed_params.append(params)
-
-    logger.info(f"Found {len(completed_params)} completed tasks from previous sweep")
-
-    # Show sample of completed params for debugging
-    if completed_params:
-        console.print("\n[dim]Sample completed task params:[/dim]")
-        sample = completed_params[0]
-        for key, value in list(sample.items())[:5]:
-            console.print(f"[dim]  {key}: {value}[/dim]")
-
-    # Filter out combinations that match completed params
-    def params_match(combo: Dict[str, Any], completed: Dict[str, Any]) -> bool:
-        """Check if a combination matches a completed parameter set."""
-        # Only compare parameters that exist in both (excluding wandb.group)
-        common_keys = set(combo.keys()) & set(completed.keys())
-        common_keys.discard("wandb.group")  # Don't compare wandb.group
-
-        # Debug: log the comparison
-        match = all(combo[key] == completed[key] for key in common_keys)
-        if not match and logger.isEnabledFor(logging.DEBUG):
-            mismatches = [
-                f"{key}: {combo.get(key)} != {completed.get(key)}"
-                for key in common_keys
-                if combo.get(key) != completed.get(key)
-            ]
-            logger.debug(f"No match: {mismatches}")
-
-        return match
-
-    # Keep track of which combinations are new
-    new_combinations = []
-    skipped_count = 0
-
-    # Show sample of new combinations for debugging
-    if combinations:
-        console.print("\n[dim]Sample new combination params:[/dim]")
-        sample = combinations[0]
-        for key, value in list(sample.items())[:5]:
-            console.print(f"[dim]  {key}: {value}[/dim]")
-
-    for combo in combinations:
-        is_completed = False
-        for completed in completed_params:
-            if params_match(combo, completed):
-                is_completed = True
-                skipped_count += 1
-                logger.debug(f"Skipping completed combination: {combo}")
-                break
-
-        if not is_completed:
-            # Ensure wandb.group is set to completion sweep ID
-            combo["wandb.group"] = completion_sweep_id
-            new_combinations.append(combo)
-
-    console.print("\n[yellow]Completion run mode:[/yellow]")
-    console.print(f"  Total combinations in new config: {len(combinations)}")
-    console.print(f"  Already completed: {skipped_count}")
-    console.print(f"  New combinations to run: {len(new_combinations)}")
-
-    if len(new_combinations) == 0:
-        console.print("[green]All combinations already completed![/green]")
-
-    return new_combinations
-
-
-def _parse_task_ids(
-    task_ids_str: str, console: Console, logger: logging.Logger
-) -> Optional[List[int]]:
-    """Parse task ID string or file into list of integers.
-
-    Supports:
-    - Comma-separated: "1,5,10"
-    - Ranges: "1-10"
-    - Mixed: "1,5-8,10"
-    - File path: "@path/to/file.txt" or "path/to/file.txt" (if file exists)
-
-    File format supports:
-    - One task ID per line
-    - Comments (lines starting with #)
-    - Blank lines (ignored)
-    - Ranges on a line (e.g., "1-10")
-    - Multiple IDs per line (comma-separated)
-
-    Args:
-        task_ids_str: String containing task IDs or file path
-        console: Rich console for output
-        logger: Logger for debugging
-
-    Returns:
-        List of task IDs as integers, or None if parsing failed
-    """
-    try:
-        # Check if input is a file path (starts with @ or is an existing file)
-        is_file = False
-        file_path = None
-
-        if task_ids_str.startswith("@"):
-            # Explicit file marker
-            file_path = Path(task_ids_str[1:])
-            is_file = True
-        else:
-            # Check if it's an existing file
-            potential_path = Path(task_ids_str)
-            if potential_path.exists() and potential_path.is_file():
-                file_path = potential_path
-                is_file = True
-
-        if is_file:
-            if not file_path.exists():
-                console.print(f"[red]Error: Task ID file not found: {file_path}[/red]")
-                return None
-
-            console.print(f"[cyan]Reading task IDs from file: {file_path}[/cyan]")
-            logger.info(f"Reading task IDs from file: {file_path}")
-
-            try:
-                with open(file_path, "r") as f:
-                    content = f.read()
-
-                # Parse file content line by line
-                task_ids = []
-                for line_num, line in enumerate(content.split("\n"), 1):
-                    line = line.strip()
-
-                    # Skip empty lines and comments
-                    if not line or line.startswith("#"):
-                        continue
-
-                    # Parse this line (could be single ID, range, or comma-separated)
-                    line_ids = _parse_task_ids_from_string(line, console, logger, line_num)
-                    if line_ids is None:
-                        return None  # Error already printed
-                    task_ids.extend(line_ids)
-
-                # Remove duplicates and sort
-                task_ids = sorted(set(task_ids))
-                console.print(
-                    f"[green]Successfully read {len(task_ids)} task IDs from file[/green]"
-                )
-                logger.info(f"Parsed {len(task_ids)} task IDs from file: {task_ids}")
-                return task_ids
-
-            except Exception as e:
-                console.print(f"[red]Error reading task ID file: {e}[/red]")
-                logger.error(f"Failed to read task ID file: {e}")
-                return None
-        else:
-            # Parse as direct string input
-            task_ids = _parse_task_ids_from_string(task_ids_str, console, logger)
-            if task_ids is not None:
-                logger.debug(f"Parsed task IDs: {task_ids}")
-            return task_ids
-
-    except Exception as e:
-        console.print(f"[red]Error parsing task IDs: {e}[/red]")
-        logger.error(f"Task ID parsing failed: {e}")
-        return None
-
-
-def _parse_task_ids_from_string(
-    task_ids_str: str, console: Console, logger: logging.Logger, line_num: int = None
-) -> Optional[List[int]]:
-    """Parse task IDs from a string (comma-separated, ranges, or single values).
-
-    Args:
-        task_ids_str: String containing task IDs
-        console: Rich console for output
-        logger: Logger for debugging
-        line_num: Optional line number (for file parsing error messages)
-
-    Returns:
-        List of task IDs as integers, or None if parsing failed
-    """
-    try:
-        task_ids = []
-        parts = task_ids_str.split(",")
-
-        line_prefix = f"Line {line_num}: " if line_num else ""
-
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-
-            if "-" in part:
-                # Handle range like "1-10"
-                range_parts = part.split("-")
-                if len(range_parts) != 2:
-                    console.print(
-                        f"[red]Error: {line_prefix}Invalid range format '{part}'. "
-                        f"Expected 'start-end'[/red]"
-                    )
-                    return None
-                try:
-                    start = int(range_parts[0].strip())
-                    end = int(range_parts[1].strip())
-                    if start > end:
-                        console.print(
-                            f"[red]Error: {line_prefix}Invalid range '{part}'. "
-                            f"Start must be <= end[/red]"
-                        )
-                        return None
-                    task_ids.extend(range(start, end + 1))
-                except ValueError:
-                    console.print(
-                        f"[red]Error: {line_prefix}Invalid range '{part}'. "
-                        f"Must contain integers[/red]"
-                    )
-                    return None
-            else:
-                # Handle single number
-                try:
-                    task_ids.append(int(part))
-                except ValueError:
-                    console.print(
-                        f"[red]Error: {line_prefix}Invalid task ID '{part}'. "
-                        f"Must be an integer[/red]"
-                    )
-                    return None
-
-        # Remove duplicates and sort
-        return sorted(set(task_ids))
-
-    except Exception as e:
-        console.print(f"[red]Error parsing task IDs from string: {e}[/red]")
-        logger.error(f"Task ID string parsing failed: {e}")
-        return None
-
-
 def _detect_project_paths(
     hsm_config: Optional["HSMConfig"], sweep_config: Optional["SweepConfig"] = None
 ) -> tuple[str, str, str]:
     """Detect or get project paths for execution.
 
-    Returns:
-        Tuple of (python_path, script_path, project_dir)
+    Returns ``(python_path, script_path, project_dir)``. Priority for the
+    script path: sweep_config.script > hsm_config.train_script > auto-detect.
     """
     from ..core.common.path_detector import PathDetector
 
     detector = PathDetector()
 
-    # First determine project dir and python path
     if hsm_config:
         python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
         project_dir = hsm_config.get_project_root() or str(Path.cwd())
@@ -433,396 +109,17 @@ def _detect_project_paths(
         python_path = detector.detect_python_path()
         project_dir = str(Path.cwd())
 
-    # Priority order for script: sweep_config > hsm_config > auto-detect
-    # 1. Try sweep config script first
     if sweep_config and sweep_config.script:
         script_path = sweep_config.script
-        # If script path is relative, resolve it relative to project root
         script_path_obj = Path(script_path)
         if not script_path_obj.is_absolute():
             script_path = str(Path(project_dir) / script_path)
-    # 2. Then try HSM config
     elif hsm_config:
         script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
-    # 3. Fall back to auto-detection
     else:
         script_path = detector.detect_train_script()
 
     return python_path, script_path, project_dir
-
-
-def _create_job_manager(
-    mode: str,
-    walltime: str,
-    resources: str,
-    python_path: str,
-    script_path: str,
-    project_dir: str,
-    parallel_jobs: Optional[int],
-    no_progress: bool,
-    show_output: bool,
-    hsm_config: Optional["HSMConfig"],
-    console: Console,
-) -> tuple[Optional[object], str]:
-    """Create appropriate job manager based on execution mode.
-
-    Returns:
-        Tuple of (job_manager, updated_mode)
-    """
-    from ..core.hpc.hpc_base import HPCJobManager
-
-    if mode == "local":
-        # For local mode, determine parallel jobs from CLI, HSM config, or default
-        max_parallel_jobs = 1
-        if parallel_jobs is not None:
-            max_parallel_jobs = parallel_jobs
-        elif hsm_config:
-            max_parallel_jobs = hsm_config.get_max_array_size() or 1
-            # For local execution, limit to reasonable number
-            max_parallel_jobs = min(max_parallel_jobs, 8)
-
-        job_manager = LocalJobManager(
-            walltime=walltime,
-            resources=resources,
-            python_path=python_path,
-            script_path=script_path,
-            project_dir=project_dir,
-            max_parallel_jobs=max_parallel_jobs,
-            show_progress=not no_progress,  # Enable progress tracking unless disabled
-            show_output=show_output,  # Show output if requested
-        )
-
-    elif mode == "distributed":
-        # Distributed job execution across multiple sources
-        if not hsm_config:
-            console.print("[red]Error: hsm_config.yaml required for distributed mode[/red]")
-            return None, mode
-
-        # Distributed job manager will be created later with proper sweep directory
-        job_manager = None  # Will be created after sweep directory is set up
-
-    elif mode == "auto" or mode in ["individual", "array"]:
-        # Auto-detect HPC system, fall back to local if none found
-        try:
-            job_manager = HPCJobManager.auto_detect(
-                walltime=walltime,
-                resources=resources,
-                python_path=python_path,
-                script_path=script_path,
-                project_dir=project_dir,
-            )
-            # Update mode to reflect what was detected
-            if mode == "auto":
-                mode = "array"  # Default to array mode for HPC systems
-                console.print(f"[green]Auto-detected HPC system, using {mode} mode[/green]")
-
-        except RuntimeError as e:
-            # No HPC system found, fall back to local mode
-            if mode == "auto":
-                console.print("[yellow]No HPC system detected, falling back to local mode[/yellow]")
-                mode = "local"
-
-                # For local mode, determine parallel jobs from CLI, HSM config, or default
-                max_parallel_jobs = 4  # Better default for auto-detected local
-                if parallel_jobs is not None:
-                    max_parallel_jobs = parallel_jobs
-                elif hsm_config:
-                    max_parallel_jobs = hsm_config.get_max_array_size() or 4
-                    # For local execution, limit to reasonable number
-                    max_parallel_jobs = min(max_parallel_jobs, 8)
-
-                job_manager = LocalJobManager(
-                    walltime=walltime,
-                    resources=resources,
-                    python_path=python_path,
-                    script_path=script_path,
-                    project_dir=project_dir,
-                    max_parallel_jobs=max_parallel_jobs,
-                    show_progress=not no_progress,
-                    show_output=show_output,
-                )
-            else:
-                # User explicitly requested array/individual mode but no HPC found
-                console.print(f"[red]Error: {e}[/red]")
-                console.print("[yellow]Consider using --mode local or --mode auto[/yellow]")
-                return None, mode
-    else:
-        console.print(f"[red]Error: Unknown mode '{mode}'[/red]")
-        return None, mode
-
-    return job_manager, mode
-
-
-def _handle_dry_run(
-    mode: str,
-    job_manager: Optional[object],
-    hsm_config: Optional["HSMConfig"],
-    walltime: str,
-    resources: str,
-    python_path: str,
-    script_path: str,
-    project_dir: str,
-    group: Optional[str],
-    combinations: list,
-    console: Console,
-) -> None:
-    """Handle dry run execution by displaying configuration and sample commands."""
-    from datetime import datetime
-
-    console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
-
-    # Show job configuration
-    console.print("\n[bold]Job Configuration:[/bold]")
-    if mode == "distributed":
-        console.print("  Execution System: DISTRIBUTED")
-        console.print(f"  Mode: {mode} (distributed execution across multiple sources)")
-        console.print("  Note: Compute sources will be discovered during actual execution")
-    elif job_manager:
-        console.print(f"  Execution System: {job_manager.system_type.upper()}")
-        if mode == "local":
-            console.print(
-                f"  Mode: {mode} (local execution with up to {job_manager.max_parallel_jobs} parallel jobs)"
-            )
-        else:
-            console.print(
-                f"  Mode: {mode} ({'array job' if mode == 'array' else 'individual jobs'})"
-            )
-    walltime_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
-    resources_source = " (from hsm_config.yaml)" if hsm_config else " (default)"
-    console.print(f"  Walltime: {walltime}{walltime_source}")
-    console.print(f"  Resources: {resources}{resources_source}")
-    console.print(f"  Python Path: {python_path}")
-    console.print(f"  Script Path: {script_path}")
-    console.print(f"  Project Directory: {project_dir}")
-    if group:
-        console.print(f"  W&B Group: {group}")
-
-    # Show first few combinations with their command lines
-    console.print("\n[bold]First 3 parameter combinations:[/bold]")
-    for i, combo in enumerate(combinations[:3], 1):
-        console.print(f"  {i}. {combo}")
-
-        # Generate the command line that would be executed
-        if job_manager:
-            params_str = job_manager._params_to_string(combo)
-        else:
-            # Distributed mode — no job manager at dry-run time; use canonical conversion.
-            params_str = params_to_hydra_args(combo)
-
-        # Add wandb.group only if not already in params (e.g., completion runs)
-        if "wandb.group" not in combo:
-            # Use sweep_id as fallback for wandb group
-            effective_group = group or f"sweep_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            wandb_group_str = f" wandb.group={effective_group}"
-        else:
-            wandb_group_str = ""
-
-        full_command = f"{python_path} {script_path} {params_str}{wandb_group_str}"
-
-        console.print(f"     [dim]Command: {full_command}[/dim]")
-        console.print()  # Add spacing between combinations
-
-
-def _setup_sweep_directories_and_managers(
-    mode: str,
-    job_manager: Optional[object],
-    hsm_config: Optional["HSMConfig"],
-    no_progress: bool,
-    parallel_jobs: Optional[int],
-    console: Console,
-    logger: logging.Logger,
-    completion_sweep_id: Optional[str] = None,
-) -> tuple[str, Path, Path, Path, Optional[object]]:
-    """Set up sweep directories and create the distributed job manager if needed.
-
-    Returns:
-        Tuple of (sweep_id, sweep_dir, scripts_dir, logs_dir, updated_job_manager)
-    """
-    from ..core.common.utils import create_sweep_id
-
-    # Use existing sweep ID for completion runs, or generate new one
-    if completion_sweep_id:
-        sweep_id = completion_sweep_id
-        console.print(f"\n[yellow]Using existing Sweep ID: {sweep_id}[/yellow]")
-    else:
-        sweep_id = create_sweep_id()
-        console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
-
-    # Create or reuse sweep directory
-    sweep_dir = Path("sweeps") / "outputs" / sweep_id
-    sweep_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"Sweep directory: {sweep_dir}")
-
-    if mode == "distributed":
-        # Create a DistributedSweepWrapper with the proper sweep directory
-        try:
-            from ..core.distributed.wrapper import create_distributed_sweep_wrapper
-
-            job_manager = create_distributed_sweep_wrapper(
-                hsm_config=hsm_config,
-                console=console,
-                logger=logger,
-                sweep_dir=sweep_dir,
-                show_progress=not no_progress,
-            )
-        except Exception as e:
-            console.print(f"[red]Error creating distributed job manager: {e}[/red]")
-            return None, None, None, None, None
-
-    # Create subdirectories for organization
-    if mode == "local":
-        scripts_dir = sweep_dir / "local_scripts"
-        dir_name = "Local scripts"
-    elif mode == "distributed":
-        scripts_dir = sweep_dir / "distributed_scripts"
-        dir_name = "Distributed scripts"
-    elif job_manager.system_type == "slurm":
-        scripts_dir = sweep_dir / "slurm_files"
-        dir_name = "Slurm files"
-    else:
-        scripts_dir = sweep_dir / "pbs_files"
-        dir_name = "PBS files"
-
-    scripts_dir.mkdir(exist_ok=True)
-    logs_dir = sweep_dir / "logs"
-    logs_dir.mkdir(exist_ok=True)
-
-    console.print(f"{dir_name} will be stored in: {scripts_dir}")
-    console.print(f"Job logs will be stored in: {logs_dir}")
-
-    return sweep_id, sweep_dir, scripts_dir, logs_dir, job_manager
-
-
-def _submit_and_track_jobs(
-    job_manager: object,
-    combinations: list,
-    mode: str,
-    sweep_dir: Path,
-    sweep_id: str,
-    group: Optional[str],
-    scripts_dir: Path,
-    logs_dir: Path,
-    config_path: Path,
-    walltime: str,
-    resources: str,
-    console: Console,
-    logger: logging.Logger,
-) -> list:
-    """Submit jobs and create tracking files.
-
-    Returns:
-        List of job IDs
-    """
-    from datetime import datetime
-    import shutil
-
-    # Save sweep config for reference
-    config_backup = sweep_dir / "sweep_config.yaml"
-    shutil.copy2(config_path, config_backup)
-
-    # Submit jobs
-    console.print(f"\n[bold]Submitting {len(combinations)} jobs in {mode} mode...[/bold]")
-
-    # Handle async submission for LocalJobManager
-    if isinstance(job_manager, LocalJobManager):
-        import asyncio
-
-        # Use array mode for LocalJobManager to enable proper parallel execution control
-        local_mode = "array" if job_manager.max_parallel_jobs > 1 else "individual"
-
-        job_ids = asyncio.run(
-            job_manager.submit_sweep(
-                param_combinations=combinations,
-                mode=local_mode,
-                sweep_dir=sweep_dir,
-                sweep_id=sweep_id,
-                wandb_group=group,
-                pbs_dir=scripts_dir,
-                logs_dir=logs_dir,
-            )
-        )
-    else:
-        job_ids = job_manager.submit_sweep(
-            param_combinations=combinations,
-            mode=mode,
-            sweep_dir=sweep_dir,
-            sweep_id=sweep_id,
-            wandb_group=group,
-            pbs_dir=scripts_dir,
-            logs_dir=logs_dir,
-        )
-
-    console.print(f"\n[green]Successfully submitted {len(job_ids)} job(s):[/green]")
-    for job_id in job_ids:
-        console.print(f"  - {job_id}")
-
-    # Create submission summary
-    summary_file = sweep_dir / "submission_summary.txt"
-    with open(summary_file, "w") as f:
-        f.write("Sweep Submission Summary\n")
-        f.write("========================\n")
-        f.write(f"Sweep ID: {sweep_id}\n")
-        f.write(f"Submission Time: {datetime.now()}\n")
-        f.write(f"Mode: {mode}\n")
-        f.write(f"Total Combinations: {len(combinations)}\n")
-        f.write(f"Job IDs: {', '.join(job_ids)}\n")
-        f.write(f"Walltime: {walltime}\n")
-        f.write(f"Resources: {resources}\n")
-        if group:
-            f.write(f"W&B Group: {group}\n")
-
-    console.print(f"\nSummary saved to: {summary_file}")
-
-    # Show source mapping information for all modes
-    source_mapping_file = sweep_dir / "source_mapping.yaml"
-    if source_mapping_file.exists():
-        console.print(f"\n[cyan]📊 Sweep tracking initialized: {source_mapping_file}[/cyan]")
-        console.print(
-            "• Task progress and source assignments are tracked for reliable completion analysis"
-        )
-        console.print(
-            "• Use 'hsm sweep status' to monitor progress and identify missing combinations"
-        )
-
-    logger.info(f"Sweep {sweep_id} submitted successfully with {len(combinations)} combinations")
-
-    return job_ids
-
-
-def _handle_results_collection(
-    mode: str, job_manager: object, sweep_dir: Path, console: Console, logger: logging.Logger
-):
-    """Handle results collection and reporting after jobs are submitted."""
-    # For distributed mode, results are normalized automatically during execution
-    if mode == "distributed":
-        tasks_dir = sweep_dir / "tasks"
-        scripts_dir = sweep_dir / "distributed_scripts"
-        logs_dir = sweep_dir / "logs"
-        source_mapping_file = sweep_dir / "source_mapping.yaml"
-
-        if tasks_dir.exists():
-            task_count = len(
-                [d for d in tasks_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
-            )
-            console.print(f"[green]✓ {task_count} task results available in: {tasks_dir}/[/green]")
-
-            # Show scripts and logs collection status
-            scripts_count = len(list(scripts_dir.glob("*.sh"))) if scripts_dir.exists() else 0
-            logs_count = (
-                len([f for f in logs_dir.glob("*") if f.is_file()]) if logs_dir.exists() else 0
-            )
-
-            if scripts_count > 0:
-                console.print(
-                    f"[green]📜 {scripts_count} job scripts collected in: {scripts_dir}/[/green]"
-                )
-            if logs_count > 0:
-                console.print(f"[green]📋 {logs_count} log files collected in: {logs_dir}/[/green]")
-
-            if source_mapping_file.exists():
-                console.print(f"[cyan]📊 Source assignment details: {source_mapping_file}[/cyan]")
-        else:
-            console.print(f"[yellow]Results will be available in: {tasks_dir}/[/yellow]")
 
 
 def _run_sweep_via_orchestrator(
@@ -848,16 +145,12 @@ def _run_sweep_via_orchestrator(
     """Route a sweep through the unified ComputeSource orchestrator.
 
     Handles ``--mode local|auto|array|individual|distributed|remote``.
-    Completion runs stay on the legacy path until ComputeSource grows a
-    starting-task-number knob.
     """
-    from datetime import datetime
     import shutil
 
     from ..core.common.utils import create_sweep_id
     from ..core.remote.ssh_compute_source import parse_gpus_arg
 
-    # Build the source first so dry-run can show the resolved mode + spec.
     scheduler_hint = "slurm" if mode in ("array", "individual") else None
     spec = spec_from_cli(
         walltime=walltime,
@@ -912,15 +205,12 @@ def _run_sweep_via_orchestrator(
         console.print(f"\nTotal combinations: {len(combinations)}")
         return
 
-    # Materialize the sweep directory; the source's setup() will create
-    # scripts/logs/tasks subdirs underneath.
     sweep_id = create_sweep_id()
     sweep_dir = Path("sweeps") / "outputs" / sweep_id
     sweep_dir.mkdir(parents=True, exist_ok=True)
     console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
     console.print(f"Sweep directory: {sweep_dir}")
 
-    # Backup the user's sweep config alongside the run for reproducibility.
     shutil.copy2(config_path, sweep_dir / "sweep_config.yaml")
 
     console.print(
@@ -959,7 +249,6 @@ def _run_sweep_via_orchestrator(
         f"in {sub_mode} mode: {', '.join(result.job_ids)}[/green]"
     )
 
-    # Tally final statuses.
     if result.final_statuses:
         completed = sum(1 for s in result.final_statuses.values() if s == "COMPLETED")
         failed = sum(1 for s in result.final_statuses.values() if s == "FAILED")
@@ -969,8 +258,6 @@ def _run_sweep_via_orchestrator(
             f"{failed} FAILED, {cancelled} CANCELLED[/bold]"
         )
 
-    # Write submission summary mirroring the legacy format so tooling that
-    # parses it keeps working.
     summary_file = sweep_dir / "submission_summary.txt"
     with open(summary_file, "w") as f:
         f.write("Sweep Submission Summary\n")
@@ -1008,9 +295,7 @@ def run_sweep(
     walltime: str,
     resources: str,
     group: Optional[str],
-    priority: Optional[int],
     parallel_jobs: Optional[int],
-    show_output: bool,
     no_progress: bool,
     console: Console,
     logger: logging.Logger,
@@ -1018,207 +303,79 @@ def run_sweep(
     remote_alias: Optional[str] = None,
     gpus_arg: Optional[str] = None,
 ):
-    """Run parameter sweep."""
+    """Run parameter sweep (orchestrator-only path)."""
 
     console.print("[bold blue]HPC Sweep Manager[/bold blue]")
     console.print(f"Config: {config_path}")
     console.print(f"Mode: {mode}")
 
-    # Show if HSM config is being used
     if hsm_config:
         hsm_config_path = None
-        search_paths = [
+        for path in (
+            Path.cwd() / ".hsm" / "config.yaml",
             Path.cwd() / "sweeps" / "hsm_config.yaml",
             Path.cwd() / "hsm_config.yaml",
-            Path("sweeps") / "hsm_config.yaml",
-            Path("hsm_config.yaml"),
-        ]
-        for path in search_paths:
+        ):
             if path.exists():
                 hsm_config_path = path
                 break
-
         if hsm_config_path:
             console.print(f"[green]Using HSM config: {hsm_config_path}[/green]")
     else:
         console.print("[yellow]No hsm_config.yaml found - using default values[/yellow]")
 
     try:
-        # Load and validate sweep configuration
         config = _load_and_validate_config(config_path, console, logger)
         if config is None:
             return
 
-        # Check if this is a completion run
-        is_completion_run = config.complete is not None
-        completion_sweep_id = config.complete if is_completion_run else None
-
-        if is_completion_run:
-            console.print(f"\n[bold cyan]Completion Run Mode Enabled[/bold cyan]")
-            console.print(f"Completing sweep: {completion_sweep_id}")
-
-        # Generate parameter combinations and display info
-        combinations = _generate_parameter_combinations(config, max_runs, count_only, console)
-        if combinations is None:  # count_only was True
+        if config.complete is not None:
+            console.print(
+                "[red]`config.complete: <sweep_id>` (sweep-resume mode) is not supported in this build.[/red]"
+            )
+            console.print(
+                "[yellow]The legacy completion runner was deleted in Pass B-heavy "
+                "(see CLAUDE.md → 'Do NOT reintroduce'). A cleanly redesigned "
+                "`hsm sweep complete` is planned as a small build on top of the "
+                "unified ComputeSource API.[/yellow]"
+            )
+            console.print(
+                "[yellow]For now, use `hsm sweep status <id>` / `hsm sweep report <id>` "
+                "to inspect, then manually re-submit a filtered sweep.[/yellow]"
+            )
             return
 
-        # For completion runs, filter out already completed combinations
-        completed_tasks = None
-        starting_task_number = 1
-        if is_completion_run:
-            completed_tasks = _load_completed_tasks(completion_sweep_id, console, logger)
-            if completed_tasks is None:
-                console.print("[red]Failed to load completed tasks. Aborting completion run.[/red]")
-                return
+        combinations = _generate_parameter_combinations(config, max_runs, count_only, console)
+        if combinations is None:
+            return
 
-            # Get the maximum task number to continue numbering from there
-            max_task_num = _get_max_task_number(completed_tasks)
-            starting_task_number = max_task_num + 1
-            console.print(
-                f"[cyan]Continuing task numbering from task_{starting_task_number:03d}[/cyan]"
-            )
-
-            combinations = _filter_completed_combinations(
-                combinations, completed_tasks, console, logger, completion_sweep_id
-            )
-
-            if len(combinations) == 0:
-                console.print("[green]Nothing left to do! All combinations completed.[/green]")
-                return
-
-        # Detect project paths for execution (with script from sweep config if specified)
         python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
 
-        # For modes the new ComputeSource orchestrator handles, route there.
-        # Completion runs still flow through the legacy code path because they
-        # need starting-task-number propagation that ComputeSource doesn't have yet.
-        if mode in _ORCHESTRATOR_MODES and not is_completion_run:
-            _run_sweep_via_orchestrator(
-                config_path=config_path,
-                hsm_config=hsm_config,
-                mode=mode,
-                python_path=python_path,
-                script_path=script_path,
-                project_dir=project_dir,
-                combinations=combinations,
-                dry_run=dry_run,
-                walltime=walltime,
-                resources=resources,
-                group=group,
-                parallel_jobs=parallel_jobs,
-                no_progress=no_progress,
-                console=console,
-                logger=logger,
-                remote_alias=remote_alias,
-                gpus_arg=gpus_arg,
+        if mode not in _ORCHESTRATOR_MODES:
+            console.print(
+                f"[red]Unknown --mode {mode!r}. Expected one of {sorted(_ORCHESTRATOR_MODES)}.[/red]"
             )
             return
 
-        # Create appropriate job manager based on mode
-        job_manager, mode = _create_job_manager(
+        _run_sweep_via_orchestrator(
+            config_path=config_path,
+            hsm_config=hsm_config,
             mode=mode,
-            walltime=walltime,
-            resources=resources,
             python_path=python_path,
             script_path=script_path,
             project_dir=project_dir,
+            combinations=combinations,
+            dry_run=dry_run,
+            walltime=walltime,
+            resources=resources,
+            group=group,
             parallel_jobs=parallel_jobs,
             no_progress=no_progress,
-            show_output=show_output,
-            hsm_config=hsm_config,
-            console=console,
-        )
-        if job_manager is None and mode != "distributed":
-            return
-
-        if job_manager:
-            console.print(f"Detected/Selected execution system: {job_manager.system_type}")
-
-        # For completion runs, ensure wandb group is set to the completion sweep ID
-        if is_completion_run and not group:
-            group = completion_sweep_id
-            console.print(f"[cyan]Setting wandb.group to: {group}[/cyan]")
-
-        if dry_run:
-            _handle_dry_run(
-                mode=mode,
-                job_manager=job_manager,
-                hsm_config=hsm_config,
-                walltime=walltime,
-                resources=resources,
-                python_path=python_path,
-                script_path=script_path,
-                project_dir=project_dir,
-                group=group,
-                combinations=combinations,
-                console=console,
-            )
-            return
-
-        # Set up sweep directories and update job manager for distributed mode
-        setup_result = _setup_sweep_directories_and_managers(
-            mode=mode,
-            job_manager=job_manager,
-            hsm_config=hsm_config,
-            no_progress=no_progress,
-            parallel_jobs=parallel_jobs,
             console=console,
             logger=logger,
-            completion_sweep_id=completion_sweep_id,
+            remote_alias=remote_alias,
+            gpus_arg=gpus_arg,
         )
-        if setup_result[0] is None:  # Error occurred
-            return
-
-        sweep_id, sweep_dir, scripts_dir, logs_dir, job_manager = setup_result
-
-        # Mark job manager as completion run if applicable and set starting task number
-        # Note: For LocalJobManager, we use starting_task_number instead of is_completion_run
-        # to avoid the wrapped param_combinations path
-        if is_completion_run:
-            if hasattr(job_manager, "starting_task_number"):
-                job_manager.starting_task_number = starting_task_number
-                logger.info(f"Set job_manager.starting_task_number = {starting_task_number}")
-            # Only set is_completion_run for distributed (not LocalJobManager)
-            if (
-                hasattr(job_manager, "is_completion_run")
-                and type(job_manager).__name__ != "LocalJobManager"
-            ):
-                job_manager.is_completion_run = True
-                logger.info("Set job_manager.is_completion_run = True (for distributed)")
-            else:
-                logger.info("Using starting_task_number for local completion run")
-
-        # Submit jobs and create tracking files
-        try:
-            job_ids = _submit_and_track_jobs(
-                job_manager=job_manager,
-                combinations=combinations,
-                mode=mode,
-                sweep_dir=sweep_dir,
-                sweep_id=sweep_id,
-                group=group,
-                scripts_dir=scripts_dir,
-                logs_dir=logs_dir,
-                config_path=config_path,
-                walltime=walltime,
-                resources=resources,
-                console=console,
-                logger=logger,
-            )
-
-            # Handle results collection and reporting
-            _handle_results_collection(
-                mode=mode,
-                job_manager=job_manager,
-                sweep_dir=sweep_dir,
-                console=console,
-                logger=logger,
-            )
-
-        except Exception as e:
-            console.print(f"[red]Error submitting jobs: {e}[/red]")
-            logger.error(f"Job submission failed: {e}")
-            raise
 
     except FileNotFoundError:
         console.print(f"[red]Error: Sweep config file not found: {config_path}[/red]")
@@ -1228,7 +385,6 @@ def run_sweep(
         raise
 
 
-# Make this a group to support subcommands
 @click.group("sweep")
 @click.pass_context
 def sweep_cmd(ctx):
@@ -1271,9 +427,7 @@ def sweep_cmd(ctx):
 @click.option("--walltime", help="Job walltime (overrides config default)")
 @click.option("--resources", help="Job resources (overrides config default)")
 @click.option("--group", help="W&B group name for this sweep")
-@click.option("--priority", type=int, help="Job priority")
 @click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
-@click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
 @click.option("--no-progress", is_flag=True, help="Disable progress tracking")
 @common_options
 @click.pass_context
@@ -1289,16 +443,12 @@ def run_cmd(
     walltime,
     resources,
     group,
-    priority,
     parallel_jobs,
-    show_output,
     no_progress,
     verbose,
     quiet,
 ):
     """Run parameter sweep."""
-    # Resolve --mode: if the user passed --remote without --mode, infer remote;
-    # otherwise default to auto.
     if mode is None:
         mode = "remote" if remote_alias else "auto"
     elif mode == "remote" and not remote_alias:
@@ -1312,10 +462,8 @@ def run_cmd(
         )
         return
 
-    # Load HSM config for defaults
     hsm_config = HSMConfig.load()
 
-    # Use HSM config defaults if not provided via CLI
     if walltime is None:
         walltime = hsm_config.get_default_walltime() if hsm_config else "23:59:59"
 
@@ -1335,9 +483,7 @@ def run_cmd(
         walltime=walltime,
         resources=resources,
         group=group,
-        priority=priority,
         parallel_jobs=parallel_jobs,
-        show_output=show_output,
         no_progress=no_progress,
         console=ctx.obj["console"],
         logger=ctx.obj["logger"],
@@ -1345,308 +491,6 @@ def run_cmd(
         remote_alias=remote_alias,
         gpus_arg=gpus_arg,
     )
-
-
-@sweep_cmd.command("complete")
-@click.argument("sweep_id")
-@click.option(
-    "--mode",
-    type=click.Choice(["auto", "local", "distributed", "array"]),
-    default="auto",
-    help="Job submission mode for completion (auto=detect from original sweep)",
-)
-@click.option("--dry-run", "-d", is_flag=True, help="Show what would be completed without running")
-@click.option(
-    "--no-retry-failed", is_flag=True, help="Don't retry failed combinations, only missing ones"
-)
-@click.option("--max-runs", type=int, help="Maximum number of runs to execute for completion")
-@click.option("--walltime", help="Job walltime for completion jobs")
-@click.option("--resources", help="Job resources for completion jobs")
-@click.option("--group", help="W&B group name for completion jobs")
-@click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs for completion")
-@click.option("--show-output", is_flag=True, help="Show job output in real-time (local mode only)")
-@click.option("--no-progress", is_flag=True, help="Disable progress tracking")
-@click.option("--complete-baselines", is_flag=True, help="Complete all baseline combinations")
-@click.option("--complete-main-training", is_flag=True, help="Complete main training combinations")
-@click.option(
-    "--baselines-only",
-    is_flag=True,
-    help="Run ONLY baseline completion (skip regular missing/failed runs)",
-)
-@click.option(
-    "--overwrite-source-mapping", is_flag=True, help="Overwrite source mapping with new analysis"
-)
-@click.option(
-    "--no-verify-running",
-    is_flag=True,
-    help="Skip verification of RUNNING tasks (trust status files as-is)",
-)
-@click.option(
-    "--treat-running-as-failed",
-    is_flag=True,
-    help="Treat all RUNNING tasks as FAILED and retry them",
-)
-@click.option(
-    "--task-ids",
-    "-t",
-    help="Specific task IDs to run. Supports: '1,5,10', '1-10', or '@file.txt' / 'file.txt' for file input",
-)
-@common_options
-@click.pass_context
-def complete_cmd(
-    ctx,
-    sweep_id,
-    mode,
-    dry_run,
-    no_retry_failed,
-    max_runs,
-    walltime,
-    resources,
-    group,
-    parallel_jobs,
-    show_output,
-    no_progress,
-    verbose,
-    quiet,
-    complete_baselines,
-    complete_main_training,
-    baselines_only,
-    overwrite_source_mapping,
-    no_verify_running,
-    treat_running_as_failed,
-    task_ids,
-):
-    """Complete a partially finished sweep by running missing/failed combinations."""
-    from rich.table import Table
-
-    from ..core.common.completion import SweepCompletor
-
-    console = ctx.obj["console"]
-    logger = ctx.obj["logger"]
-
-    # Find sweep directory
-    sweep_dir = Path("sweeps/outputs") / sweep_id
-    if not sweep_dir.exists():
-        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-        return
-
-    console.print("[bold blue]HPC Sweep Manager - Completion[/bold blue]")
-    console.print(f"Sweep: {sweep_id}")
-    console.print(f"Directory: {sweep_dir}")
-    console.print(f"Baselines only: {baselines_only}")
-    console.print(f"Overwrite source mapping: {overwrite_source_mapping}")
-
-    # Create completor and analyze
-    completor = SweepCompletor(sweep_dir)
-    analysis = completor.analyzer.analyze_completion_status(
-        overwrite_source_mapping=overwrite_source_mapping
-    )
-
-    if "error" in analysis:
-        console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
-        return
-
-    # Show current status
-    console.print("\n[bold]Current Sweep Status:[/bold]")
-    table = Table()
-    table.add_column("Metric", style="cyan")
-    table.add_column("Count", style="green")
-    table.add_column("Percentage", style="yellow")
-
-    total_expected = analysis["total_expected"]
-    total_completed = analysis["total_completed"]
-    total_failed = analysis["total_failed"]
-    total_cancelled = analysis.get("total_cancelled", 0)  # Handle older mappings without cancelled
-    total_missing = analysis["total_missing"]
-    total_running = analysis["total_running"]
-
-    table.add_row("Expected Combinations", str(total_expected), "100.0%")
-    table.add_row("Completed", str(total_completed), f"{analysis['completion_rate']:.1f}%")
-    table.add_row(
-        "Failed",
-        str(total_failed),
-        f"{total_failed / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
-    )
-    if total_cancelled > 0:
-        table.add_row(
-            "Cancelled",
-            str(total_cancelled),
-            f"{total_cancelled / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
-        )
-    table.add_row(
-        "Missing",
-        str(total_missing),
-        f"{total_missing / total_expected * 100:.1f}%" if total_expected > 0 else "0%",
-    )
-    if total_running > 0:
-        table.add_row("Running", str(total_running), f"{total_running / total_expected * 100:.1f}%")
-
-    console.print(table)
-
-    # Show status fixes if any were made
-    if analysis.get("status_fixes_made", False):
-        console.print("\n[yellow]🔧 Status corrections were made:[/yellow]")
-        console.print("• Some tasks had incorrect status in the tracking file")
-        console.print("• The status was corrected by checking actual task directories")
-        console.print("• This ensures accurate completion analysis")
-        console.print("• The corrected status is now saved to source_mapping.yaml")
-
-    if not analysis["needs_completion"]:
-        console.print("\n[green]✓ Sweep is already complete![/green]")
-        return
-
-    # Load HSM config for defaults
-    hsm_config = HSMConfig.load()
-
-    # Use HSM config defaults if not provided via CLI
-    if walltime is None:
-        walltime = hsm_config.get_default_walltime() if hsm_config else "23:59:59"
-
-    if resources is None:
-        resources = (
-            hsm_config.get_default_resources() if hsm_config else "select=1:ncpus=4:mem=64gb"
-        )
-
-    # If baselines_only is set, ensure complete_baselines is also set
-    if baselines_only and not complete_baselines:
-        complete_baselines = True
-        console.print("[yellow]--baselines-only implies --complete-baselines[/yellow]")
-
-    # Parse task IDs if provided
-    parsed_task_ids = None
-    if task_ids:
-        parsed_task_ids = _parse_task_ids(task_ids, console, logger)
-        if parsed_task_ids is None:
-            console.print("[red]Error: Failed to parse task IDs[/red]")
-            return
-
-        console.print(f"\n[cyan]Manual task ID mode enabled:[/cyan]")
-        console.print(f"  Running {len(parsed_task_ids)} specific tasks: {sorted(parsed_task_ids)}")
-
-        # Validate task IDs are within range
-        if any(tid < 1 or tid > total_expected for tid in parsed_task_ids):
-            console.print(f"[red]Error: Task IDs must be between 1 and {total_expected}[/red]")
-            return
-
-    # Execute completion
-    result = completor.execute_completion(
-        mode=mode,
-        dry_run=dry_run,
-        retry_failed=not no_retry_failed,
-        max_runs=max_runs,
-        walltime=walltime,
-        resources=resources,
-        group=group,
-        parallel_jobs=parallel_jobs,
-        show_output=show_output,
-        no_progress=no_progress,
-        complete_baselines=complete_baselines,
-        complete_main_training=complete_main_training,
-        baselines_only=baselines_only,
-        verify_running=not no_verify_running,
-        treat_running_as_failed=treat_running_as_failed,
-        task_ids=parsed_task_ids,
-        console=console,
-        logger=logger,
-    )
-
-    if "error" in result:
-        console.print(f"[red]Error: {result['error']}[/red]")
-        return
-
-    if result["status"] == "dry_run":
-        console.print("\n[yellow]DRY RUN - Completion Plan:[/yellow]")
-
-        # Show execution mode prominently
-        exec_mode = result.get("execution_mode", mode)
-        console.print(f"\n[bold cyan]Execution Mode: {exec_mode.upper()}[/bold cyan]")
-        if exec_mode == "array":
-            console.print("[green]✓ Will submit as PBS/Slurm array job (HPC cluster)[/green]")
-        elif exec_mode == "distributed":
-            console.print("[green]✓ Will distribute across multiple compute sources[/green]")
-        elif exec_mode == "local":
-            console.print("[yellow]⚠ Will execute locally (not recommended for HPC)[/yellow]")
-
-        # Show script path from sweep_config
-        sweep_config_path = sweep_dir / "sweep_config.yaml"
-        if sweep_config_path.exists():
-            try:
-                import yaml
-
-                with open(sweep_config_path) as f:
-                    sweep_cfg = yaml.safe_load(f)
-                    if sweep_cfg and "script" in sweep_cfg:
-                        console.print(f"[green]✓ Training script: {sweep_cfg['script']}[/green]")
-            except Exception:
-                pass
-
-        console.print(f"\nMissing combinations to run: {result['missing_count']}")
-        if not no_retry_failed:
-            console.print(f"Failed combinations to retry: {result['failed_count']}")
-            cancelled_count = result.get("cancelled_count", 0)
-            if cancelled_count > 0:
-                console.print(f"Cancelled combinations to retry: {cancelled_count}")
-        if complete_baselines:
-            baseline_count = result.get("baseline_count", 0)
-            if baseline_count > 0:
-                console.print(
-                    f"[cyan]Baseline completion runs: {baseline_count} "
-                    f"(completed tasks missing baseline results)[/cyan]"
-                )
-        console.print(f"Total combinations to run: {result['total_to_run']}")
-
-        # Detailed combinations and commands are already shown in completion.py dry_run output
-        # Only show summary here if there are more than 3 of each type
-        regular_runs = result.get("regular_runs", [])
-        baseline_runs = result.get("baseline_runs", [])
-        if regular_runs and len(regular_runs) > 3:
-            console.print(
-                f"\n[dim]Showing first 3 of {len(regular_runs)} regular completion runs "
-                f"(see above for details)[/dim]"
-            )
-        if baseline_runs and len(baseline_runs) > 3:
-            console.print(
-                f"[dim]Showing first 3 of {len(baseline_runs)} baseline completion runs "
-                f"(see above for details)[/dim]"
-            )
-
-        console.print(
-            "\n[dim]To execute the completion, run the same command without --dry-run[/dim]"
-        )
-
-    elif result["status"] == "complete":
-        console.print(f"\n[green]{result['message']}[/green]")
-
-    elif result["status"] == "submitted":
-        console.print(f"\n[green]{result['message']}[/green]")
-        console.print(f"Job IDs: {', '.join(result['job_ids'])}")
-        console.print(f"Combinations submitted: {result['combinations_count']}")
-
-        # Create completion summary
-        summary_file = sweep_dir / "completion_summary.txt"
-        with open(summary_file, "w") as f:
-            f.write("Sweep Completion Summary\n")
-            f.write("========================\n")
-            f.write(f"Completion Time: {datetime.now()}\n")
-            f.write(f"Mode: {mode}\n")
-            f.write(f"Combinations Submitted: {result['combinations_count']}\n")
-            f.write(f"Job IDs: {', '.join(result['job_ids'])}\n")
-            f.write(f"Retry Failed: {not no_retry_failed}\n")
-
-        console.print(f"\nCompletion summary saved to: {summary_file}")
-
-        # Show source mapping information for all modes
-        source_mapping_file = sweep_dir / "source_mapping.yaml"
-        if source_mapping_file.exists():
-            console.print(f"\n[cyan]📊 Sweep tracking updated: {source_mapping_file}[/cyan]")
-            console.print(
-                "• Task progress and source assignments are maintained across all execution modes"
-            )
-            console.print("• Use 'hsm sweep status' to see detailed completion status")
-        else:
-            console.print(
-                f"\n[yellow]⚠ Creating sweep tracking file: {source_mapping_file}[/yellow]"
-            )
 
 
 @sweep_cmd.command("status")
@@ -1659,12 +503,11 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
     """Show completion status of sweep(s)."""
     from rich.table import Table
 
-    from ..core.common.completion import SweepCompletionAnalyzer, find_incomplete_sweeps
+    from ..core.common.sweep_analysis import SweepCompletionAnalyzer, find_incomplete_sweeps
 
     console = ctx.obj["console"]
 
     if all or incomplete_only:
-        # Show status of multiple sweeps
         sweeps_dir = Path("sweeps/outputs")
         if not sweeps_dir.exists():
             console.print("[yellow]No sweeps directory found.[/yellow]")
@@ -1673,10 +516,8 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
         sweeps_to_show = []
 
         if incomplete_only:
-            incomplete_sweeps = find_incomplete_sweeps(sweeps_dir)
-            sweeps_to_show = incomplete_sweeps
+            sweeps_to_show = find_incomplete_sweeps(sweeps_dir)
         else:
-            # Show all sweeps
             for sweep_dir in sweeps_dir.iterdir():
                 if sweep_dir.is_dir() and sweep_dir.name.startswith("sweep_"):
                     analyzer = SweepCompletionAnalyzer(sweep_dir)
@@ -1701,7 +542,6 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
                 console.print("[yellow]No sweeps found.[/yellow]")
             return
 
-        # Create table
         table = Table(title="Sweep Status Summary")
         table.add_column("Sweep ID", style="cyan")
         table.add_column("Progress", style="green")
@@ -1729,7 +569,6 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
         console.print(table)
 
     elif sweep_id:
-        # Show detailed status of specific sweep
         sweep_dir = Path("sweeps/outputs") / sweep_id
         if not sweep_dir.exists():
             console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
@@ -1746,7 +585,6 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
         console.print(f"Directory: {sweep_dir}")
         console.print()
 
-        # Detailed table
         table = Table()
         table.add_column("Metric", style="cyan")
         table.add_column("Count", style="green")
@@ -1789,21 +627,18 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
 
         console.print(table)
 
-        # Show status fixes if any were made
         if analysis.get("status_fixes_made", False):
-            console.print("\n[yellow]🔧 Status corrections were made:[/yellow]")
-            console.print("• Some tasks had incorrect status in the tracking file")
-            console.print("• The status was corrected by checking actual task directories")
-            console.print("• This ensures accurate completion analysis")
-            console.print("• The corrected status is now saved to source_mapping.yaml")
+            console.print("\n[yellow]🔧 Status corrections were applied during analysis.[/yellow]")
 
         if not analysis["needs_completion"]:
-            console.print("\n[green]✓ Sweep is already complete![/green]")
-            return
-
-        console.print(
-            f"\n[yellow]⚠ Sweep needs completion. Run 'hsm sweep complete {sweep_id}' to finish it.[/yellow]"
-        )
+            console.print("\n[green]✓ Sweep is complete![/green]")
+        else:
+            console.print(
+                f"\n[yellow]⚠ Sweep has {analysis['total_missing']} missing + "
+                f"{analysis['total_failed']} failed task(s). "
+                "Manual re-submission with a filtered sweep config is the current path "
+                "(an `hsm sweep complete` rebuild is planned).[/yellow]"
+            )
 
     else:
         console.print("[red]Error: Please specify a sweep ID or use --all/--incomplete-only[/red]")
@@ -1812,7 +647,7 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
 @sweep_cmd.command("report")
 @click.argument("sweep_id")
 @click.option(
-    "--scan-tasks", is_flag=True, help="Force scanning task directories (useful for PBS array jobs)"
+    "--scan-tasks", is_flag=True, help="Force scanning task directories (useful for array jobs)"
 )
 @click.option("--save-json", is_flag=True, help="Save detailed report to JSON file")
 @common_options
@@ -1823,11 +658,10 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
 
     from rich.table import Table
 
-    from ..core.common.completion import SweepCompletionAnalyzer
+    from ..core.common.sweep_analysis import SweepCompletionAnalyzer
 
     console = ctx.obj["console"]
 
-    # Find sweep directory
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
         console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
@@ -1836,7 +670,6 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
     console.print(f"[bold blue]Sweep Completion Report: {sweep_id}[/bold blue]")
     console.print(f"Directory: {sweep_dir}")
 
-    # Create analyzer and run analysis
     analyzer = SweepCompletionAnalyzer(sweep_dir)
 
     if scan_tasks:
@@ -1850,7 +683,6 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
         console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
         return
 
-    # Display summary table
     console.print("\n[bold]Summary:[/bold]")
     table = Table()
     table.add_column("Metric", style="cyan")
@@ -1884,22 +716,17 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
 
     console.print(table)
 
-    # Show detailed task status if available
     if "task_statuses" in analysis and analysis["task_statuses"]:
         console.print(f"\n[bold]Task Status Details:[/bold]")
         console.print(f"Total tasks found: {len(analysis['task_statuses'])}")
 
-        # Group by status
-        status_groups = {}
+        status_groups: dict = {}
         for task_id, status in analysis["task_statuses"].items():
-            if status not in status_groups:
-                status_groups[status] = []
-            status_groups[status].append(task_id)
+            status_groups.setdefault(status, []).append(task_id)
 
         for status, tasks in sorted(status_groups.items()):
             console.print(f"  {status}: {len(tasks)} tasks")
 
-    # Show missing task numbers
     if "missing_task_numbers" in analysis and analysis["missing_task_numbers"]:
         missing_numbers = analysis["missing_task_numbers"]
         if len(missing_numbers) <= 20:
@@ -1910,7 +737,6 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
             )
             console.print(f"[yellow]Total missing: {len(missing_numbers)}[/yellow]")
 
-    # Show failed task numbers
     if analysis.get("failed_tasks"):
         failed_tasks = analysis["failed_tasks"]
         if len(failed_tasks) <= 20:
@@ -1919,11 +745,9 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
             console.print(f"\n[red]Failed tasks (first 20): {failed_tasks[:20]}...[/red]")
             console.print(f"[red]Total failed: {len(failed_tasks)}[/red]")
 
-    # Save detailed report if requested
     if save_json:
         report_file = sweep_dir / "detailed_completion_report.json"
         try:
-            # Create a JSON-serializable version
             json_report = {
                 "sweep_id": sweep_id,
                 "sweep_dir": str(sweep_dir),
@@ -1951,15 +775,9 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
 
-    # Show next steps
-    if analysis.get("needs_completion"):
-        console.print(
-            f"\n[yellow]⚠ Sweep needs completion. Run 'hsm sweep complete {sweep_id}' to finish it.[/yellow]"
-        )
-    else:
+    if not analysis.get("needs_completion"):
         console.print("\n[green]✓ Sweep is complete![/green]")
 
-    # Show where source mapping is stored (single source of truth)
     source_mapping = sweep_dir / "source_mapping.yaml"
     if source_mapping.exists():
         console.print(f"\n[dim]Task tracking: {source_mapping}[/dim]")
@@ -1975,7 +793,6 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
     """Show error summaries for a specific sweep."""
     console = ctx.obj["console"]
 
-    # Find sweep directory
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
         console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
@@ -1997,7 +814,6 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
     console.print(f"[bold blue]Error Summary for Sweep: {sweep_id}[/bold blue]")
     console.print(f"Found {len(error_files)} error files in: {error_dir}")
 
-    # Filter by pattern if provided
     if pattern:
         filtered_files = []
         for error_file in error_files:
@@ -2015,26 +831,22 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
         console.print(f"[yellow]No error files match the pattern '{pattern}'[/yellow]")
         return
 
-    # Show errors
     for i, error_file in enumerate(error_files):
         console.print(f"\n[bold red]Error {i + 1}: {error_file.stem}[/bold red]")
         try:
             with open(error_file) as f:
                 content = f.read()
                 if all:
-                    # Show full content
                     console.print(content)
                 else:
-                    # Show preview (first 400 chars)
                     preview = content[:400]
                     if len(content) > 400:
                         preview += "\n... (use --all to see full content)"
                     console.print(preview)
-
         except Exception as e:
             console.print(f"[red]Could not read error file: {e}[/red]")
 
-        if not all and i >= 4:  # Limit to first 5 errors unless --all is used
+        if not all and i >= 4:
             remaining = len(error_files) - i - 1
             if remaining > 0:
                 console.print(
@@ -2046,7 +858,7 @@ def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
     console.print("[cyan]💡 Use --pattern to filter by specific error types[/cyan]")
 
 
-# Add legacy alias for backwards compatibility
+# Legacy aliases — kept hidden for backwards-compat invocation patterns.
 @click.command("sweep-legacy", hidden=True)
 @click.pass_context
 def sweep_legacy_cmd(ctx):
@@ -2054,20 +866,14 @@ def sweep_legacy_cmd(ctx):
     ctx.invoke(run_cmd)
 
 
-# Keep the old group-based interface for backwards compatibility, but hidden
 @click.group(hidden=True)
 def sweep():
-    """Run and manage parameter sweeps."""
+    """Run and manage parameter sweeps (legacy group)."""
     pass
 
 
 @sweep.command("run", hidden=True)
 @click.pass_context
-def run_cmd(ctx):
+def _legacy_inner_run(ctx):
     """Run parameter sweep (legacy interface)."""
-    # This could redirect to the main sweep command if needed for backwards compatibility
     ctx.invoke(sweep_cmd)
-
-
-if __name__ == "__main__":
-    sweep()

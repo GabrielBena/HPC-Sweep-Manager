@@ -19,17 +19,6 @@ contribute to it). For end-user CLI usage see the
   pre_script, extra_directives). Replaces the legacy opaque
   `resources: str` field.
 
-## Legacy tier (kept for completion runs + `hsm hpc|local` CLIs)
-
-These will be deleted in Pass B-heavy once `core/common/completion.py`
-migrates to the unified orchestrator. Don't extend them.
-
-- **[Job manager (legacy)](job_manager.md)** — `BaseJobManager` +
-  `HPCJobManager` + per-scheduler subclasses.
-- **[HPC manager (legacy)](hpc/README.md)** — `SlurmJobManager`,
-  `PBSJobManager`.
-- **[Local manager (legacy)](local/README.md)** — `LocalJobManager`.
-
 ## Design principles
 
 1. **Async by default below the CLI.** Every `ComputeSource` method is
@@ -40,9 +29,10 @@ migrates to the unified orchestrator. Don't extend them.
 3. **Push-model SSH.** Remote machines are dumb compute targets: bash +
    rsync + optionally nvidia-smi. No HSM install, no remote project
    discovery.
-4. **Strangler-fig migration.** New code (Tier 1, the ComputeSource
-   path) runs alongside the legacy tier; a single future commit
-   deletes the legacy tier when completion-runs migrate.
+4. **One backend interface.** Every execution mode (`local`, `array`,
+   `individual`, `remote`, `distributed`, `auto`) routes through the
+   `ComputeSource` ABC. The pre-async `BaseJobManager` hierarchy was
+   deleted in Pass B-heavy.
 
 ## Where to look in the code
 
@@ -57,25 +47,19 @@ src/hpc_sweep_manager/
 │   │   ├── config.py                 # HSMConfig + SweepConfig
 │   │   ├── templating.py             # params_to_hydra_args + render_template
 │   │   ├── param_generator.py        # grid + paired → param combinations
-│   │   ├── completion.py             # LEGACY — completion runs (Pass B-heavy blocker)
-│   │   └── base_manager.py           # LEGACY — base of the legacy hierarchy
+│   │   └── sweep_analysis.py         # SweepCompletionAnalyzer (read-only)
 │   ├── local/
-│   │   ├── local_compute_source.py   # LIVE
-│   │   └── local_manager.py          # LEGACY
+│   │   └── local_compute_source.py
 │   ├── hpc/
-│   │   ├── slurm_compute_source.py   # LIVE
-│   │   ├── slurm_manager.py          # LEGACY
-│   │   ├── pbs_manager.py            # LEGACY
-│   │   └── hpc_base.py               # LEGACY
+│   │   └── slurm_compute_source.py
 │   ├── remote/
-│   │   ├── ssh_compute_source.py     # LIVE — push-model + factory + parse_gpus_arg
-│   │   ├── push_exec.py              # LIVE — pure helpers (rsync cmds, slot logic)
-│   │   ├── gpu_probe.py              # LIVE — nvidia-smi parser
-│   │   └── discovery.py              # LIVE but slim — just create_ssh_connection
+│   │   ├── ssh_compute_source.py     # push-model + factory + parse_gpus_arg
+│   │   ├── push_exec.py              # pure helpers (rsync cmds, slot logic)
+│   │   ├── gpu_probe.py              # nvidia-smi parser
+│   │   └── discovery.py              # just create_ssh_connection
 │   └── distributed/
-│       ├── distributed_compute_source.py  # LIVE — fan-out wrapper
-│       ├── distributed_manager.py    # interior; wrapped, not user-facing
-│       └── wrapper.py                # LEGACY — used by completion
+│       ├── distributed_compute_source.py  # fan-out wrapper
+│       └── distributed_manager.py    # interior fan-out engine
 └── templates/
     ├── slurm_single.sh.j2            # one task per sbatch
     ├── slurm_array.sh.j2             # array submission

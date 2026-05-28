@@ -31,9 +31,11 @@ view, start with [CLAUDE.md](CLAUDE.md). For user-facing recipes see
 The CLI is the only sync boundary; everything below it is `async` and is
 driven from one `asyncio.run(run_sweep_async(...))` per sweep.
 
-A separate **legacy tier** still lives in the repo (the `BaseJobManager`
-hierarchy + `DistributedSweepWrapper`), reached only by the completion
-code path. It will go when completion migrates to the orchestrator.
+Pass B-heavy deleted the entire pre-async manager hierarchy
+(`BaseJobManager`, `HPCJobManager`, `SlurmJobManager`, `PBSJobManager`,
+`LocalJobManager`, `DistributedSweepWrapper`) along with the bloated
+`SweepCompletor`. There is no parallel "legacy tier" anymore — every
+backend speaks `ComputeSource`.
 
 ## Why a unified `ComputeSource` ABC
 
@@ -192,27 +194,29 @@ N SSH push sources via `build_ssh_source(...)`). The internal
 round-robin/least-loaded dispatch, monitoring, and result normalization.
 It's wrapped behind the ABC; decomposing it further is future work.
 
-## Legacy tier (what's still alive and why)
+## Sweep completion (status today)
 
-These classes are still imported but only the **completion path** uses
-them:
+The original `completion.py` shipped two concerns in one 2000-LOC module:
 
-- `core/common/base_manager.py:BaseJobManager` — common job dataclass +
-  sync `wait_for_all`.
-- `core/hpc/hpc_base.py:HPCJobManager` (+ `slurm_manager.py`,
-  `pbs_manager.py`).
-- `core/local/local_manager.py:LocalJobManager`.
-- `core/distributed/wrapper.py:DistributedSweepWrapper`.
-- `core/common/completion.py` — the completion runner itself.
+- **Analysis** — read `tasks/*/task_info.txt` + `source_mapping.yaml`,
+  figure out which task numbers completed/failed/missing.
+- **Execution** — re-submit missing/failed tasks via a sync wrapper over
+  the legacy `BaseJobManager` hierarchy.
 
-Plus three CLI commands that still use the legacy tier directly:
-`cli/hpc.py` (`hsm hpc submit|queue|status|cancel`), `cli/local.py`
-(`hsm local run|status|clean`).
+Pass B-heavy split them. The analysis half lives in
+[`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py)
+(`SweepCompletionAnalyzer`, `find_incomplete_sweeps`,
+`get_sweep_completion_summary`) and still backs `hsm sweep status` /
+`hsm sweep report`. The execution half (the bloated `SweepCompletor` +
+its `LocalJobManager`/`HPCJobManager`/`DistributedSweepWrapper`
+dependencies) was deleted.
 
-Migrating `completion.py` to the unified orchestrator requires a new
-`task_number_offset` knob on `ComputeSource` (so completion runs can
-continue numbering from where the original sweep left off). When that
-lands, **Pass B-heavy** deletes all of the above in one commit.
+A future `hsm sweep complete` will return — likely ~200-400 LOC built
+directly on `ComputeSource` + a new `task_number_offset` knob on
+`submit_batch`. Until then, the workflow for resuming a partial sweep
+is: `hsm sweep status <id>` to see what's missing → manually edit
+`sweeps/sweep.yaml` (or write a smaller one filtering to the missing
+combinations) → re-submit with `hsm sweep run`.
 
 ## Test architecture
 

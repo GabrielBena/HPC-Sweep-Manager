@@ -11,12 +11,10 @@ pinning, etc.) see the [user guides](../user_guide/).
 
 ```
 hsm setup    init configure                       # bootstrap
-hsm sweep    run | complete | status | report | errors
+hsm sweep    run | status | report | errors
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm local    run | status | clean                 # legacy backend (kept until completion migrates)
-hsm hpc      submit | queue | status | cancel     # legacy backend (kept until completion migrates)
 hsm monitor  watch | status | recent | queue | cancel | cleanup | delete-jobs
-hsm sync     init | list | run | to               # rsync results to a target
+hsm sync     init | list | run | to | cache | clean
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
@@ -69,14 +67,6 @@ hsm sweep run --mode array --walltime 01:00:00 --resources "--cpus-per-task=4 --
 hsm sweep run --remote my-box --gpus 0,1 --resources "--gpus=1"
 hsm sweep run --mode distributed     # uses .hsm/config.yaml's distributed: block
 ```
-
-### `hsm sweep complete <sweep_id>`
-
-Resume an incomplete sweep by re-running missing/failed task numbers.
-Same flags as `run` plus `--task-ids "1,3,5-9"`, `--no-retry-failed`,
-`--complete-baselines`, `--verify-running`, etc.
-
-See [../user_guide/COMPLETION_RUNS.md](../user_guide/COMPLETION_RUNS.md).
 
 ### `hsm sweep status [sweep_id]`
 
@@ -132,34 +122,6 @@ moving completed sweep dirs around after the fact.
 | `hsm sync to <target>` | Sync the most recent sweep to a target. |
 | `hsm sync cache` | Manage wandb sync cache. |
 | `hsm sync clean` | Delete local sweep data including wandb runs + metadata. |
-
-## `hsm local` (legacy)
-
-Direct local execution via the legacy `LocalJobManager`. Kept until
-completion runs migrate to `LocalComputeSource`.
-
-| Subcommand | What it does |
-|---|---|
-| `hsm local run` | Run a sweep locally (legacy path). |
-| `hsm local status` | Local environment info. |
-| `hsm local clean` | Clean old local sweep outputs. |
-
-Prefer `hsm sweep run --mode local` for new work — it goes through the
-unified orchestrator.
-
-## `hsm hpc` (legacy)
-
-Direct HPC submission via the legacy `HPCJobManager`. Kept until
-completion runs migrate to `SlurmComputeSource` / `PBSComputeSource`.
-
-| Subcommand | What it does |
-|---|---|
-| `hsm hpc submit` | Submit a sweep to Slurm/PBS (legacy path). |
-| `hsm hpc queue` | List your queued jobs. |
-| `hsm hpc status` | HPC system status. |
-| `hsm hpc cancel` | Cancel a specific HPC job. |
-
-Prefer `hsm sweep run --mode array|individual|auto` for new work.
 
 ## `hsm analyze`
 

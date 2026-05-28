@@ -1,11 +1,7 @@
-"""HPC execution components for PBS/Torque and Slurm systems."""
+"""HPC execution components (Slurm + PBS) — the live ComputeSource tier."""
 
-from .hpc_base import HPCJobManager
-from .pbs_manager import PBSJobManager
-from .slurm_manager import SlurmJobManager
+from .slurm_compute_source import SlurmComputeSource
 
 __all__ = [
-    "HPCJobManager",
-    "PBSJobManager",
-    "SlurmJobManager",
+    "SlurmComputeSource",
 ]

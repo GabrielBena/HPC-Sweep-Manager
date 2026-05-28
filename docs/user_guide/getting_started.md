@@ -5,8 +5,7 @@ project, and running a sweep in each of the four execution modes.
 
 For deeper recipes:
 - [SSH (push-model) execution](SSH_EXECUTION.md) — the `--remote <alias>` path in depth.
-- [HPC (Slurm / PBS) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + workarounds for advanced Slurm features.
-- [Completion runs](COMPLETION_RUNS.md) — `hsm sweep complete <id>` to resume partial sweeps.
+- [HPC (Slurm / PBS) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + the typed `slurm:` block for advanced Slurm features.
 
 If you're an AI agent landing in this repo, start with
 [../../CLAUDE.md](../../CLAUDE.md) instead.
@@ -224,16 +223,20 @@ hsm sweep errors <sweep_id>               # error summaries for failed tasks
 
 ## Step 5 — partial sweeps + retries
 
-If some tasks failed (or you killed the sweep midway), continue from
-where you left off:
+`hsm sweep complete` (the v0.1 re-runner) was deleted in Pass B-heavy
+alongside the legacy job manager hierarchy — the 2000-LOC bloat made
+clean rebuild the better path. A small replacement built on top of
+`ComputeSource` is planned. For now:
 
 ```bash
-hsm sweep complete <sweep_id>
+hsm sweep status <sweep_id>     # see which tasks failed or are missing
+hsm sweep report <sweep_id>     # detailed per-task breakdown
+hsm sweep errors <sweep_id>     # tail the error logs
 ```
 
-This re-runs missing/failed tasks while preserving task numbering. See
-[COMPLETION_RUNS.md](COMPLETION_RUNS.md) for filter flags
-(`--task-ids`, `--no-retry-failed`, etc.).
+To re-run failed tasks: write a smaller `sweep.yaml` containing only the
+parameter combinations you want to retry (or filter via `--max-runs`)
+and submit it as a fresh sweep with `hsm sweep run`.
 
 ## Common environment + tooling notes
 
