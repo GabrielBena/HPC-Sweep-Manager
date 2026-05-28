@@ -4,6 +4,24 @@ This file orients an AI coding agent landing on this repo cold. Read it first;
 then dip into [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale and
 [docs/user_guide/](docs/user_guide/) for user-facing recipes.
 
+## Workflow rule — dual-location project (experimental)
+
+This project is actively worked from **two machines**: the user's laptop
+and **anahita** (a lab workstation; see the `hq-topology` memory note).
+To keep memory, plans, and session transcripts coherent across both:
+
+**Run `bash scripts/sync-claude-state.sh` at session boundaries** — once
+at the start of a session (pulls the other machine's edits) and once
+before ending a session that wrote anything worth preserving (pushes
+yours). The script is bidirectional `rsync --update`; safe to re-run;
+exits non-zero (with a clear message) if the remote is unreachable
+over the VPN. See the `dual-location-workflow` memory entry for the
+full rule + edge cases.
+
+If you skip this and edit memory, the next agent on the other machine
+will start from a stale snapshot and re-derive things that were
+already settled. Don't be that agent.
+
 ## Quick identity
 
 - **What:** HPC-Sweep-Manager (HSM) — a Python package + CLI for running
