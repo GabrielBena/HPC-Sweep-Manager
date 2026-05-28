@@ -109,13 +109,18 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 #   cpus_per_task: 4
 #   mem: "16gb"
 #   gpus: 1
-#   gpu_type: "h100"        # -> #SBATCH --gres=gpu:h100:1
-#   modules: [h100]         # -> module load h100  (S3IT-style: needs BOTH gpu_type AND modules)
+#   gpu_type: "H100"          # -> #SBATCH --gres=gpu:H100:1
+#                             #   GRES names are CASE-SENSITIVE — check `sinfo -o "%P %G"`
+#                             #   on your cluster (S3IT uses uppercase: H100/L4/A100/H200).
 #   qos: "normal"
 #   account: "my-project"
 #   pre_script:
 #     - "conda activate my-env"
-#   max_array_size: 10000   # cluster's Slurm-array ceiling (Slurm default)
+#   modules:                  # use ONLY for non-flavour modules (matlab, openmpi, ...).
+#     - matlab                #   GPU flavour modules (h100/l4) should be loaded on the
+#                             #   command line BEFORE `hsm sweep run`, not in the script —
+#                             #   they set Slurm constraints that conflict with directives.
+#   max_array_size: 10000     # cluster's Slurm-array ceiling (Slurm default)
 
 # --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ------------
 # Per-remote `spec:` sub-block is the no-bleed home for that remote's

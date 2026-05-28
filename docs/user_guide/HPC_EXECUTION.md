@@ -97,8 +97,8 @@ modes, repeat the fields in each block — it's noisier but unambiguous.
 The CLI's opaque `--resources` string covers the common fields above
 but **cannot** express `gpu_type`, `modules`, `pre_script`, `account`,
 or arbitrary `extra_directives`. On clusters where you need both
-`--gres=gpu:h100:1` AND `module load h100` (this is the case on many
-production setups), use the typed `slurm:` block in `.hsm/config.yaml`:
+a specific `gpu_type`, `account`, or `pre_script`, use the typed
+`slurm:` block in `.hsm/config.yaml`:
 
 ```yaml
 # .hsm/config.yaml
@@ -107,13 +107,17 @@ slurm:
   cpus_per_task: 4
   mem: "16gb"
   gpus: 1
-  gpu_type: "h100"           # → #SBATCH --gres=gpu:h100:1
+  gpu_type: "H100"           # → #SBATCH --gres=gpu:H100:1
+                             #    GRES names are CASE-SENSITIVE — check `sinfo -o "%P %G"`
+                             #    on your cluster (S3IT uses uppercase: H100/L4/A100/H200).
   partition: "gpu"
   qos: "normal"
   account: "my-project"
-  modules:                   # → `module load h100; module load cuda/12`
-    - h100
-    - cuda/12
+  modules:                   # → `module load matlab; module load openmpi`
+    - matlab                 #    Use ONLY for non-flavour modules. GPU flavour modules
+    - openmpi                #    (h100/l4/multigpu) should be loaded on the command line
+                             #    BEFORE `hsm sweep run`, not in the script — they set Slurm
+                             #    constraints that can conflict with the directives above.
   pre_script:                # arbitrary shell commands before the training script
     - "source ~/.bashrc"
     - "conda activate my-env"
@@ -125,6 +129,15 @@ slurm:
     - medium
     - long
 ```
+
+> **S3IT note:** Earlier docs and CLAUDE.md gotcha #6 suggested adding
+> `modules: [h100]` alongside `gpu_type`. That was based on an
+> empirical misdiagnosis. Per the
+> [S3IT job-submission docs](https://docs.s3it.uzh.ch/cluster/job_submission/):
+> *"You should not load flavour modules (e.g. h100, l4, multigpu) in
+> the job script. They set Slurm constraints that may conflict with job
+> directives, causing allocation errors."* `gpu_type: H100` alone is
+> sufficient on S3IT; CUDA comes from your conda env.
 
 Then submit normally — the block is picked up automatically:
 

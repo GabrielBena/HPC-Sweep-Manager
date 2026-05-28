@@ -173,12 +173,30 @@ it's trying to reintroduce them, push back.
    `resolve_auto_mode()` *before* spec lookup so the block matches the
    backend that will actually run.
 
-6. **S3IT-style Slurm needs BOTH `gpu_type` AND `modules`.** Setting
-   `--gpus=1` alone produces `#SBATCH --gpus=1` which does NOT allocate a
-   GPU on S3IT (confirmed empirically). You need `gpus=1, gpu_type="h100",
-   modules=("h100",)` → emits `#SBATCH --gres=gpu:h100:1` + `module load h100`.
-   The opaque CLI `--resources` string can't express `gpu_type`/`modules`;
-   use the typed `slurm:` block in `.hsm/config.yaml` instead. See
+6. **S3IT-style Slurm: `gpu_type` + uppercase GRES, NO flavour modules in script.**
+   Two distinct quirks empirically + per [S3IT docs](https://docs.s3it.uzh.ch/cluster/job_submission/):
+
+   - **Bare `--gpus=N` doesn't pin a type.** `#SBATCH --gpus=1` allocates "any GPU"
+     and may land on the wrong family or fail with "Requested node configuration
+     is not available" if your QoS limits aren't compatible with the default. You
+     usually want `gpu_type: H100` (or L4/A100/H200) → HSM emits
+     `#SBATCH --gres=gpu:H100:1`.
+   - **GRES casing is uppercase on S3IT** — `sinfo -o "%P %G"` reports
+     `gpu:H100:N` / `gpu:L4:N`. Use `gpu_type: H100`, not `h100`. Slurm GRES
+     names are case-sensitive; lowercase → "Requested node configuration is
+     not available."
+   - **DO NOT put flavour modules (`h100`, `l4`, `multigpu`, etc.) in the rendered
+     script.** Earlier versions of this gotcha said you needed BOTH `gpu_type` AND
+     `modules: [h100]` — that was wrong. Per S3IT docs: flavour modules belong on
+     the command line before `sbatch`, not in the batch script ("they set Slurm
+     constraints that may conflict with job directives, causing allocation errors").
+     The `modules:` field of the typed `slurm:` block is still useful for
+     non-flavour modules (e.g. `module load matlab`); just don't put `h100` in it.
+   - CUDA / cudnn usually NOT needed via modules — "containers, conda bundle
+     CUDA" (S3IT docs). Only load `cuda` when compiling with `nvcc`.
+
+   The opaque CLI `--resources` string can't express `gpu_type`; use the typed
+   `slurm:` block in `.hsm/config.yaml`. See
    [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
 
 7. **Array-job progress reports `1/1` not `N/N`.** `SlurmComputeSource`

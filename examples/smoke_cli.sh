@@ -171,11 +171,13 @@ echo "[GPU smoke] --mode array with typed slurm: block (gpu_type=$GPU_TYPE)"
 echo "================================================================"
 
 mkdir -p .hsm
-# S3IT-style case asymmetry: GRES name uppercase (-> --gres=gpu:H100:1),
-# module name lowercase (-> module load h100). If your cluster uses the
-# same casing for both, that's fine — `module load H100` just resolves
-# to whatever's in modulefiles regardless.
-GPU_TYPE_LOWER="${GPU_TYPE,,}"
+# GRES name is uppercase on S3IT (gpu:H100:N from `sinfo -o "%P %G"`).
+# DO NOT add a `modules: [h100]` line here even though earlier HSM gotcha
+# notes suggested it — per S3IT docs (docs.s3it.uzh.ch/cluster/job_submission/):
+# "You should not load flavour modules (e.g. h100, l4, multigpu) in the
+# job script. They set Slurm constraints that may conflict with job
+# directives, causing allocation errors." `--gres=gpu:H100:1` alone is
+# sufficient; CUDA comes from conda/containers.
 cat > .hsm/config.yaml <<YAMLEOF
 project:
   name: hsm-cli-smoke
@@ -189,7 +191,6 @@ slurm:
   mem: "4gb"
   gpus: 1
   gpu_type: $GPU_TYPE
-  modules: [$GPU_TYPE_LOWER]
   qos: normal
 YAMLEOF
 
