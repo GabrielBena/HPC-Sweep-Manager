@@ -16,6 +16,33 @@ from ..core.common.path_detector import PathDetector
 from .common import common_options
 
 
+# Appended verbatim after `yaml.dump` writes the live `.hsm/config.yaml`.
+# Surfaces the typed reach fields (slurm: + distributed:) so users can
+# discover them without grepping the docs — see CLAUDE.md gotcha #6.
+_TYPED_CONFIG_SCAFFOLD = """
+# --- Optional: typed Slurm reach fields (gpu_type, modules, qos, account, ...) ---
+# Uncomment to use. See docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block
+# slurm:
+#   walltime: "01:00:00"
+#   cpus_per_task: 4
+#   mem: "16gb"
+#   gpus: 1
+#   gpu_type: "h100"        # -> #SBATCH --gres=gpu:h100:1
+#   modules: [h100]         # -> module load h100  (S3IT-style: needs BOTH gpu_type AND modules)
+#   qos: "normal"
+#   account: "my-project"
+#   pre_script:
+#     - "conda activate my-env"
+
+# --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ---
+# distributed:
+#   enabled: false
+#   strategy: round_robin
+#   sync_method: rsync
+#   remotes: {}
+"""
+
+
 def init_project(project_path: Path, interactive: bool, console: Console, logger: logging.Logger):
     """Initialize sweep infrastructure in a project."""
     console.print(
@@ -264,17 +291,12 @@ def _create_sweep_infrastructure(
 ) -> bool:
     """Create sweep directories and configuration files."""
     try:
-        # Create .hsm directory structure (NEW)
+        # Create .hsm directory (just the config home — no cache/logs subdirs;
+        # nothing in HSM writes to them).
         hsm_dir = project_path / ".hsm"
         hsm_dir.mkdir(exist_ok=True)
 
-        cache_dir = hsm_dir / "cache"
-        cache_dir.mkdir(exist_ok=True)
-
-        logs_dir = hsm_dir / "logs"
-        logs_dir.mkdir(exist_ok=True)
-
-        console.print("  ✅ Created .hsm/ directory structure")
+        console.print("  ✅ Created .hsm/ directory")
 
         # Create sweep directory structure
         sweeps_dir = project_path / "sweeps"
@@ -323,18 +345,11 @@ def _create_sweep_infrastructure(
 
         with open(hsm_config_path, "w") as f:
             yaml.dump(hsm_config, f, default_flow_style=False, indent=2)
+            f.write(_TYPED_CONFIG_SCAFFOLD)
 
         console.print(
             f"  ✅ Created HSM configuration file: {hsm_config_path.relative_to(project_path)}"
         )
-
-        # Create sync configuration template
-        sync_config_path = hsm_dir / "sync_config.yaml"
-        from ..sync.config import SyncConfig
-
-        SyncConfig.create_template(sync_config_path, config["project_name"])
-        rel_path = sync_config_path.relative_to(project_path)
-        console.print(f"  ✅ Created sync configuration template: {rel_path}")
 
         # Create example sweep configuration
         example_sweep_path = sweeps_dir / "example_sweep.yaml"
@@ -370,10 +385,7 @@ This directory contains HPC sweep configurations and outputs for the {project_na
 
 ```
 .hsm/
-├── config.yaml          # HSM project configuration
-├── sync_config.yaml     # Sync targets configuration
-├── cache/               # Cached metadata
-└── logs/                # HSM operation logs
+└── config.yaml          # HSM project configuration
 
 sweeps/
 ├── example_sweep.yaml   # Example sweep configuration
@@ -383,24 +395,30 @@ sweeps/
 
 ## Usage
 
-### Running Sweeps
+```bash
+# Count combinations (no submission)
+hsm sweep run --config sweeps/example_sweep.yaml --count-only
 
-1. **Count combinations**: `hsm sweep --config sweeps/example_sweep.yaml --count`
-2. **Dry run**: `hsm sweep --config sweeps/example_sweep.yaml --dry-run`
-3. **Submit individual jobs**: `hsm sweep --config sweeps/example_sweep.yaml --individual`
-4. **Submit array job**: `hsm sweep --config sweeps/example_sweep.yaml --array`
+# Preview without submitting
+hsm sweep run --config sweeps/example_sweep.yaml --dry-run
 
-### Syncing Results
+# Run locally with N parallel processes
+hsm sweep run --config sweeps/example_sweep.yaml --mode local
 
-1. **Configure sync targets**: Edit `.hsm/sync_config.yaml` with your destination machines
-2. **Sync sweep results**: `hsm sync <sweep-id> --target desktop`
-3. **Dry run**: `hsm sync <sweep-id> --target desktop --dry-run`
+# Submit as a single Slurm array job
+hsm sweep run --config sweeps/example_sweep.yaml --mode array
+
+# Push to an SSH remote (rsync up, run, rsync results back)
+hsm sweep run --config sweeps/example_sweep.yaml --remote my-box
+```
 
 ## Configuration
 
-- **HSM config**: `.hsm/config.yaml` - Project settings, paths, HPC resources
-- **Sync config**: `.hsm/sync_config.yaml` - Remote sync destinations
-- **Sweep configs**: Create YAML files in `sweeps/` directory
+- **HSM config**: `.hsm/config.yaml` — paths, defaults, optional typed
+  `slurm:` block (for `gpu_type`, `modules`, `qos`, `account`, etc.) and
+  `distributed:` block (SSH remotes, populated by `hsm remote add`).
+- **Sweep configs**: YAML files in `sweeps/` (grid + paired axes,
+  metadata, tags).
 
 See the HSM documentation for details.
 
@@ -426,19 +444,25 @@ def _display_next_steps(console: Console):
     next_steps = """
 [bold]Next Steps:[/bold]
 
-1. **Review HSM configuration**: Edit `.hsm/config.yaml` if needed
-2. **Configure sync targets**: Edit `.hsm/sync_config.yaml` with your destination machines
-3. **Create sweep config**: Use `hsm configure` or edit `sweeps/example_sweep.yaml`
-4. **Test the setup**: Run `hsm sweep --config sweeps/example_sweep.yaml --dry-run`
-5. **Submit jobs**: Run `hsm sweep --config sweeps/example_sweep.yaml --mode array`
-6. **Sync results**: Run `hsm sync <sweep-id> --target <your-target>`
+1. **Review HSM configuration**: Edit `.hsm/config.yaml`. For Slurm reach
+   fields (`gpu_type`, `modules`, `qos`, `account`, `pre_script`), uncomment
+   the typed `slurm:` scaffold at the bottom of the file — see
+   `docs/user_guide/HPC_EXECUTION.md`.
+2. **(Optional) Register an SSH remote**: `hsm remote add <alias>` — uses
+   your `~/.ssh/config` alias; nothing needs installing on the remote.
+3. **Create sweep config**: Run `hsm setup configure` or edit
+   `sweeps/example_sweep.yaml` directly.
+4. **Dry-run**: `hsm sweep run --config sweeps/example_sweep.yaml --dry-run`
+5. **Submit**: `hsm sweep run --config sweeps/example_sweep.yaml --mode array`
+   (or `--mode local`, `--remote <alias>`, `--mode distributed`)
+6. **Inspect**: `hsm sweep status <sweep-id>` and `hsm sweep report <sweep-id>`
 
 [bold]Useful Commands:[/bold]
-- `hsm sweep --help` - Show sweep options
-- `hsm sync --help` - Show sync options
-- `hsm configure` - Interactive sweep configuration builder
-- `hsm monitor` - Monitor active sweeps
-- `hsm --help` - Show all available commands
+- `hsm sweep --help` - Sweep lifecycle (run/status/report/errors/watch/...)
+- `hsm remote --help` - Manage SSH remotes (add/list/test/health/gpus/clean)
+- `hsm sweep watch <sweep-id>` - Live progress for an active sweep
+- `hsm setup configure` - Interactive sweep configuration builder
+- `hsm --help` - All available commands
 """
 
     console.print(Panel(next_steps, title="Getting Started", border_style="green"))

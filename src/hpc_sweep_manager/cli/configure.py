@@ -498,14 +498,15 @@ def _show_configuration_summary(sweep_config: Dict[str, Any], output_file: Path,
 [bold]Next Steps:[/bold]
 
 1. **Review configuration**: Edit `{output_file}` if needed
-2. **Test the sweep**: `hsm sweep --config {output_file} --dry-run --count`
-3. **Run dry-run**: `hsm sweep --config {output_file} --dry-run --max-runs 5`
-4. **Submit jobs**: `hsm sweep --config {output_file} --array`
+2. **Count combinations**: `hsm sweep run --config {output_file} --count-only`
+3. **Dry-run**: `hsm sweep run --config {output_file} --dry-run --max-runs 5`
+4. **Submit jobs**: `hsm sweep run --config {output_file} --mode array`
+   (or `--mode local`, `--remote <alias>`, `--mode distributed`)
 
 [bold]Useful Commands:[/bold]
-- `hsm sweep --config {output_file} --count` - Count total combinations
-- `hsm sweep --config {output_file} --dry-run` - Preview jobs
-- `hsm sweep --config {output_file} --array` - Submit as array job
+- `hsm sweep run --config {output_file} --count-only` - Count total combinations
+- `hsm sweep run --config {output_file} --dry-run` - Preview jobs
+- `hsm sweep run --config {output_file} --mode array` - Submit as Slurm array job
 """
 
         console.print(Panel(next_steps, title="Configuration Complete", border_style="green"))

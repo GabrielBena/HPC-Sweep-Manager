@@ -48,10 +48,7 @@ This creates:
 
 ```
 .hsm/
-├── config.yaml          # HSM project config (paths, defaults)
-├── sync_config.yaml     # Optional: rsync targets for hsm sync
-├── cache/               # HSM scratch
-└── logs/
+└── config.yaml          # HSM project config (paths, defaults, optional slurm:/distributed: blocks)
 sweeps/
 ├── example_sweep.yaml   # Starter sweep config
 ├── outputs/             # Per-sweep result dirs land here

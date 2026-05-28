@@ -13,7 +13,7 @@ The rest of the docs live here.
 ## Reference
 
 - **[CLI reference](cli/README.md)** — every `hsm` command and subcommand.
-- **[API reference](api_reference/README.md)** — Python entry points if you want to embed HSM in your own scripts. See [`compute_sources.md`](api_reference/compute_sources.md) for the live tier; the `job_manager.md` / `hpc/` / `local/` subtrees are legacy (banners explain).
+- **[API reference](api_reference/README.md)** — Python entry points if you want to embed HSM in your own scripts. See [`compute_sources.md`](api_reference/compute_sources.md) for the live `ComputeSource` ABC and its four backends.
 - **[Project structure](PROJECT_STRUCTURE.md)** — what `.hsm/` contains and how HSM finds your config + scripts.
 
 ## Design

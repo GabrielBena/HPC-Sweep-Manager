@@ -8,15 +8,8 @@ HSM uses a unified `.hsm/` folder for all configuration and state management, ke
 
 ```
 your-project/
-├── .hsm/                      # HSM configuration and state
-│   ├── config.yaml            # Main HSM configuration
-│   ├── sync_config.yaml       # Sync targets configuration
-│   ├── cache/                 # Cached metadata
-│   │   ├── synced_runs.db     # Track synced runs (future)
-│   │   └── sweep_metadata/    # Cached sweep configs
-│   └── logs/                  # HSM operation logs
-│       ├── sync_20251022.log
-│       └── init_20251022.log
+├── .hsm/                      # HSM configuration
+│   └── config.yaml            # Main HSM configuration
 │
 ├── sweeps/                    # Sweep definitions and outputs
 │   ├── outputs/               # Sweep results (generated)
@@ -64,63 +57,24 @@ wandb:
   entity: my-team
 ```
 
-### `.hsm/sync_config.yaml`
-
-Sync targets configuration. Defines remote machines for results syncing.
-
-**Example:**
-```yaml
-default_target: desktop
-
-sync_targets:
-  desktop:
-    host: my-desktop.example.com
-    user: username
-    paths:
-      sweeps: /home/username/projects/my-project/sweeps
-      wandb: /home/username/projects/my-project/wandb
-    options:
-      sync_sweep_metadata: true
-      sync_wandb_runs: true
-      latest_only: true
-      parallel_transfers: 4
-```
-
-See [Sync Guide](SYNC_GUIDE.md) for detailed configuration options.
-
-### `.hsm/cache/`
-
-Stores cached metadata for faster operations:
-- Sweep metadata
-- Run tracking databases
-- Completion status
-- Error summaries
-
-This directory can be safely deleted if needed - it will be regenerated.
-
-### `.hsm/logs/`
-
-HSM operation logs:
-- Sync operations
-- Initialization logs
-- Error diagnostics
-
-Useful for debugging issues.
+The bottom of the file holds two optional commented-out scaffolds —
+`slurm:` (reach fields like `gpu_type`, `modules`, `qos`, `account`) and
+`distributed:` (SSH remotes, populated by `hsm remote add`). Uncomment
+either block to opt in.
 
 ## Migration from Old Structure
 
 If you have an existing project with `sweeps/hsm_config.yaml`, simply run:
 
 ```bash
-hsm init
+hsm setup init
 ```
 
 This will:
 1. Detect your existing configuration
 2. Create the new `.hsm/` structure
 3. Migrate your settings to `.hsm/config.yaml`
-4. Create `.hsm/sync_config.yaml` template
-5. Optionally remove the old config file
+4. Optionally remove the old config file
 
 Your existing sweeps and data are **not affected** - only configuration is migrated.
 
@@ -129,10 +83,6 @@ Your existing sweeps and data are **not affected** - only configuration is migra
 ### `.gitignore`
 
 ```gitignore
-# HSM cache and logs
-.hsm/cache/
-.hsm/logs/
-
 # Sweep outputs and wandb runs
 sweeps/outputs/
 sweeps/logs/
@@ -140,18 +90,14 @@ wandb/
 
 # But keep configuration
 !.hsm/config.yaml
-!.hsm/sync_config.yaml
 ```
 
 ### Version Control
 
 **Do commit:**
 - `.hsm/config.yaml` - Share project configuration with team
-- `.hsm/sync_config.yaml` - Can be committed with placeholders, or kept local
 
 **Don't commit:**
-- `.hsm/cache/` - Generated metadata
-- `.hsm/logs/` - Operation logs
 - `sweeps/outputs/` - Large result files
 - `wandb/` - Wandb run directories
 
@@ -176,8 +122,11 @@ The config loader checks both locations, preferring the new `.hsm/` location.
 ### Can I customize the structure?
 
 The `.hsm/` folder structure is fixed, but you can customize:
-- Output directories (in config.yaml)
-- Sync destinations (in sync_config.yaml)
+- Output directories (in `config.yaml`)
+- The typed `slurm:` block (in `config.yaml`) for Slurm reach fields
+  (`gpu_type`, `modules`, `qos`, `account`, `pre_script`, ...)
+- The `distributed:` block (in `config.yaml`, populated by
+  `hsm remote add`) for SSH remotes
 - Sweep configs location (anywhere, reference with `--config`)
 
 ### What if I delete `.hsm/`?
@@ -185,24 +134,22 @@ The `.hsm/` folder structure is fixed, but you can customize:
 You can regenerate it by running:
 
 ```bash
-hsm init
+hsm setup init
 ```
 
 Your sweep outputs and wandb runs won't be affected.
 
-### Do I need `.hsm/` on my local machine?
+### Do I need `.hsm/` on my remote box?
 
-Not necessarily! The `.hsm/` folder is mainly for the **HPC side** where you run sweeps.
-
-On your local analysis machine, you just need:
-- `sweeps/outputs/` - Synced sweep metadata
-- `wandb/` - Synced wandb runs
-- Analysis scripts
-
-However, if you want to sync **from** your local machine to other targets, then yes, create `.hsm/sync_config.yaml`.
+No. In the push-model SSH execution path the remote needs only `bash`,
+`rsync`, and optionally `nvidia-smi`. HSM rsyncs the project up,
+runs the tasks there, and rsyncs the results back. See
+[SSH_EXECUTION.md](user_guide/SSH_EXECUTION.md).
 
 ## See Also
 
-- [Sync Guide](SYNC_GUIDE.md) - Syncing results between machines
 - [Main README](../README.md) - Overall HSM documentation
+- [Getting started](user_guide/getting_started.md)
+- [SSH execution](user_guide/SSH_EXECUTION.md)
+- [HPC execution](user_guide/HPC_EXECUTION.md)
 

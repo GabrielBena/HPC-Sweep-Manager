@@ -13,7 +13,6 @@ pinning, etc.) see the [user guides](../user_guide/).
 hsm setup    init configure                       # bootstrap
 hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm sync     init | list | run | to | cache | clean
 hsm analyze  enable-tracking | report | dead-code | complexity | dependencies | coverage-gaps
 ```
 
@@ -106,21 +105,6 @@ Manage SSH remote registrations. Many of these work with a bare
 | `hsm remote remove <name>` | Unregister from config. |
 
 See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the full SSH workflow.
-
-## `hsm sync`
-
-rsync sweep outputs to a destination machine (or pull them from one).
-Separate from the auto-rsync inside `--remote` execution; this is for
-moving completed sweep dirs around after the fact.
-
-| Subcommand | What it does |
-|---|---|
-| `hsm sync init` | Write `.hsm/sync_config.yaml` template. |
-| `hsm sync list` | Show configured sync targets. |
-| `hsm sync run <sweep_id> [--target X]` | Sync one sweep. |
-| `hsm sync to <target>` | Sync the most recent sweep to a target. |
-| `hsm sync cache` | Manage wandb sync cache. |
-| `hsm sync clean` | Delete local sweep data including wandb runs + metadata. |
 
 ## `hsm analyze`
 

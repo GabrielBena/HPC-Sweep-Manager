@@ -88,7 +88,7 @@ Used by `--mode local` and as a child of `--mode distributed`.
 
 **Source:** [`core/hpc/slurm_compute_source.py`](../../src/hpc_sweep_manager/core/hpc/slurm_compute_source.py)
 
-Native Slurm backend (replaces legacy `SlurmJobManager` for new code).
+Native Slurm backend. Replaces the legacy `SlurmJobManager` (deleted in Pass B-heavy).
 
 - Renders [`slurm_single.sh.j2`](../../src/hpc_sweep_manager/templates/slurm_single.sh.j2)
   per task (`--mode individual`) or
