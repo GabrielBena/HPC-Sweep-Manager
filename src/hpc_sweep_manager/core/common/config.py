@@ -20,6 +20,86 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+MACHINE_CONFIG_PATH = Path.home() / ".hsm" / "config.yaml"
+"""Per-machine HSM defaults — sibling to the per-project ``.hsm/config.yaml``.
+
+Lives outside any project so machine-specific facts (filesystem layout,
+GPU inventory, default conda env) can be set once and reused by every
+project on this user account. Only the ``local:`` block is honored;
+``slurm:``/``distributed:`` here are dropped with a warning (project
+concerns).
+"""
+
+# Top-level keys the machine config is allowed to set. Anything else is
+# considered project scope and dropped with a warning at load time —
+# putting `distributed:` here would mean "every project on this machine
+# silently sees the same remotes," which is surprising.
+_MACHINE_CONFIG_ALLOWED_TOP_LEVEL = {"local"}
+
+
+def _load_yaml_dict(path: Path) -> Optional[Dict[str, Any]]:
+    """Read a YAML file as a dict, returning ``None`` on any failure.
+
+    Empty / comment-only files load as ``None`` from yaml; we coerce to
+    ``{}`` so downstream merge logic doesn't need to special-case them.
+    """
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load HSM config from {path}: {e}")
+        return None
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            f"HSM config at {path} is not a YAML mapping (got {type(data).__name__}); ignoring."
+        )
+        return None
+    return data
+
+
+def _scope_machine_config(data: Dict[str, Any], path: Path) -> Dict[str, Any]:
+    """Drop non-``local:`` top-level keys from the machine config with a warning."""
+    rejected = set(data) - _MACHINE_CONFIG_ALLOWED_TOP_LEVEL
+    if rejected:
+        logger.warning(
+            f"Machine config at {path} has top-level keys {sorted(rejected)!r} "
+            f"that are not honored — only `local:` is read from the machine file. "
+            f"Move project-level settings to <project>/.hsm/config.yaml."
+        )
+    return {k: v for k, v in data.items() if k in _MACHINE_CONFIG_ALLOWED_TOP_LEVEL}
+
+
+def _merge_machine_and_project(
+    machine: Dict[str, Any], project: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge machine (base) + project (overrides) by per-block rule.
+
+    - ``local:`` — deep-merged field-by-field; project fields win on collisions
+      (so a project can override the machine's ``sweeps_root`` without
+      clobbering ``visible_gpus`` it didn't set).
+    - Every other block — whole-block replace (project wins). The machine
+      config shouldn't carry these anyway (see ``_scope_machine_config``),
+      but the rule is here in case someone widens
+      ``_MACHINE_CONFIG_ALLOWED_TOP_LEVEL`` later.
+    """
+    result: Dict[str, Any] = dict(machine)
+    for key, project_val in project.items():
+        machine_val = result.get(key)
+        if (
+            key == "local"
+            and isinstance(machine_val, dict)
+            and isinstance(project_val, dict)
+        ):
+            merged_local = dict(machine_val)
+            merged_local.update(project_val)
+            result[key] = merged_local
+        else:
+            result[key] = project_val
+    return result
+
+
 @dataclass
 class SweepConfig:
     """Configuration for parameter sweeps."""
@@ -151,22 +231,38 @@ class HSMConfig:
         self.config_data = config_data
 
     @classmethod
-    def load(cls, config_path: Optional[Path] = None) -> Optional["HSMConfig"]:
-        """
-        Load HSM configuration from file.
+    def load(
+        cls,
+        config_path: Optional[Path] = None,
+        machine_config_path: Optional[Path] = None,
+    ) -> Optional["HSMConfig"]:
+        """Load HSM configuration, merging the machine-wide base with the project file.
+
+        Precedence (low → high):
+
+        1. ``~/.hsm/config.yaml`` — per-machine defaults. Only the ``local:``
+           block is honored (so machine-specific facts like ``sweeps_root``
+           or ``visible_gpus`` can live here without leaking remote configs
+           across projects). Other top-level keys are dropped with a warning.
+        2. ``<project>/.hsm/config.yaml`` (or legacy ``sweeps/hsm_config.yaml``)
+           — per-project. Wins on collisions; ``local:`` fields are
+           deep-merged so a project can override individual fields without
+           clobbering the machine's other ``local:`` settings.
+
+        Returns ``None`` only when BOTH files are missing.
 
         Args:
-            config_path: Path to hsm_config.yaml file. If None, searches standard locations.
-
-        Returns:
-            HSMConfig instance or None if not found
+            config_path: Explicit project config path. If ``None``, searches
+                standard locations under ``Path.cwd()``.
+            machine_config_path: Override the machine config location.
+                Defaults to :data:`MACHINE_CONFIG_PATH`. Mostly for tests.
         """
         if config_path is None:
-            # Search for config in standard locations (new .hsm/ location takes priority)
+            # Search for the project config in standard locations.
             search_paths = [
-                Path.cwd() / ".hsm" / "config.yaml",  # NEW: primary location
-                Path(".hsm") / "config.yaml",  # NEW: relative .hsm/
-                Path.cwd() / "sweeps" / "hsm_config.yaml",  # Legacy: for backwards compatibility
+                Path.cwd() / ".hsm" / "config.yaml",  # primary location
+                Path(".hsm") / "config.yaml",  # relative .hsm/
+                Path.cwd() / "sweeps" / "hsm_config.yaml",  # Legacy
                 Path.cwd() / "hsm_config.yaml",  # Legacy
                 Path("sweeps") / "hsm_config.yaml",  # Legacy
                 Path("hsm_config.yaml"),  # Legacy
@@ -175,25 +271,30 @@ class HSMConfig:
             for path in search_paths:
                 if path.exists():
                     config_path = path
-                    logger.debug(f"Found HSM config at: {path}")
+                    logger.debug(f"Found HSM project config at: {path}")
                     break
 
-        if config_path is None or not config_path.exists():
-            logger.debug(
-                "No HSM config found in standard locations (.hsm/config.yaml or sweeps/hsm_config.yaml)"
-            )
+        project_data: Optional[Dict[str, Any]] = None
+        if config_path is not None and config_path.exists():
+            project_data = _load_yaml_dict(config_path)
+            if project_data is not None:
+                logger.debug(f"Loaded HSM project config from {config_path}")
+
+        # Machine-wide base config.
+        machine_path = machine_config_path or MACHINE_CONFIG_PATH
+        machine_data: Optional[Dict[str, Any]] = None
+        if machine_path.exists():
+            machine_data = _load_yaml_dict(machine_path)
+            if machine_data is not None:
+                machine_data = _scope_machine_config(machine_data, machine_path)
+                logger.debug(f"Loaded HSM machine config from {machine_path}")
+
+        if not project_data and not machine_data:
+            logger.debug("No HSM config found (machine or project).")
             return None
 
-        try:
-            with open(config_path) as f:
-                config_data = yaml.safe_load(f)
-
-            logger.debug(f"Loaded HSM config from {config_path}")
-            return cls(config_data)
-
-        except Exception as e:
-            logger.warning(f"Failed to load HSM config from {config_path}: {e}")
-            return None
+        merged = _merge_machine_and_project(machine_data or {}, project_data or {})
+        return cls(merged)
 
     def get_default_python_path(self) -> Optional[str]:
         """Get default Python interpreter path from config."""
@@ -411,6 +512,14 @@ def resolve_sweep_dir(
     The returned ``Path`` is the *target* (where data actually lives),
     not the symlink, so callers using it for ``mkdir``, ``glob``, etc.
     operate on the canonical location.
+
+    Raises:
+        FileNotFoundError: when ``local.sweeps_root`` is set but resolves
+            to a directory that doesn't exist on this machine. Catches
+            the "shared `.hsm/config.yaml` references a path that exists
+            on machine A but not on machine B" footgun — HSM refuses to
+            silently `mkdir -p` a path that almost certainly should have
+            been a mount point.
     """
     project_dir = project_dir or Path.cwd()
     default = project_dir / "sweeps" / "outputs" / sweep_id
@@ -422,7 +531,17 @@ def resolve_sweep_dir(
         default.mkdir(parents=True, exist_ok=True)
         return default
 
-    expanded = Path(os.path.expandvars(os.path.expanduser(sweeps_root))).resolve()
+    expanded = Path(os.path.expandvars(os.path.expanduser(sweeps_root)))
+    if not expanded.exists():
+        raise FileNotFoundError(
+            f"`local.sweeps_root` is set to {sweeps_root!r} "
+            f"(resolved to {expanded}), but that directory does not "
+            f"exist on this machine. Either create it "
+            f"(`mkdir -p {expanded}`) or remove the `local.sweeps_root` "
+            f"field from your HSM config (machine: {MACHINE_CONFIG_PATH}, "
+            f"or this project's `.hsm/config.yaml`)."
+        )
+    expanded = expanded.resolve()
     target = expanded / sweep_id
     target.mkdir(parents=True, exist_ok=True)
 

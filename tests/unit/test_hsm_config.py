@@ -274,6 +274,7 @@ class TestResolveSweepDir:
 
     def test_redirects_to_sweeps_root(self, tmp_path):
         big_disk = tmp_path / "big-disk"
+        big_disk.mkdir()  # caller's responsibility — see hard-error test below
         cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
         result = resolve_sweep_dir(cfg, "sweep_123", project_dir=tmp_path)
         # Result is the absolute target, NOT the symlink path.
@@ -282,6 +283,7 @@ class TestResolveSweepDir:
 
     def test_creates_discovery_symlink(self, tmp_path):
         big_disk = tmp_path / "big-disk"
+        big_disk.mkdir()
         cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
         result = resolve_sweep_dir(cfg, "sweep_42", project_dir=tmp_path)
         link = tmp_path / "sweeps" / "outputs" / "sweep_42"
@@ -289,6 +291,8 @@ class TestResolveSweepDir:
         assert link.resolve() == result
 
     def test_expands_envvar(self, tmp_path, monkeypatch):
+        expanded_root = tmp_path / "expanded" / "sweeps"
+        expanded_root.mkdir(parents=True)
         monkeypatch.setenv("HSM_TEST_ROOT", str(tmp_path / "expanded"))
         cfg = HSMConfig(
             {"local": {"sweeps_root": "$HSM_TEST_ROOT/sweeps"}}
@@ -301,6 +305,7 @@ class TestResolveSweepDir:
         # Simulate HOME so ~/... expansion is testable without touching the real one.
         fake_home = tmp_path / "home-stub"
         fake_home.mkdir()
+        (fake_home / "hsm-sweeps").mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         cfg = HSMConfig({"local": {"sweeps_root": "~/hsm-sweeps"}})
         result = resolve_sweep_dir(cfg, "sweep_tilde", project_dir=tmp_path)
@@ -315,6 +320,7 @@ class TestResolveSweepDir:
         old_target = tmp_path / "old-target"
         new_root = tmp_path / "new-root"
         old_target.mkdir()
+        new_root.mkdir()
         link_parent = tmp_path / "sweeps" / "outputs"
         link_parent.mkdir(parents=True)
         link = link_parent / "sweep_id"
@@ -331,6 +337,7 @@ class TestResolveSweepDir:
         # path, resolve_sweep_dir warns instead of overwriting it. Data at
         # the target still gets created — discovery is just broken.
         big_disk = tmp_path / "big-disk"
+        big_disk.mkdir()
         link_parent = tmp_path / "sweeps" / "outputs"
         link_parent.mkdir(parents=True)
         squatter = link_parent / "sweep_id"
@@ -343,6 +350,21 @@ class TestResolveSweepDir:
         assert result.is_dir()
         assert squatter.is_dir() and not squatter.is_symlink()
         assert any("non-symlink" in r.message for r in caplog.records)
+
+    def test_raises_when_sweeps_root_missing(self, tmp_path):
+        # Hard-error guard: shared .hsm/config.yaml that references a path
+        # that exists on machine A but not on machine B should fail loudly
+        # rather than silently mkdir-ing a probably-wrong directory.
+        missing = tmp_path / "not-mounted"  # not created
+        cfg = HSMConfig({"local": {"sweeps_root": str(missing)}})
+        with pytest.raises(FileNotFoundError, match="does not.*exist"):
+            resolve_sweep_dir(cfg, "sweep_x", project_dir=tmp_path)
+
+    def test_raises_when_expanded_envvar_path_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HSM_TEST_ROOT", str(tmp_path / "still-not-there"))
+        cfg = HSMConfig({"local": {"sweeps_root": "$HSM_TEST_ROOT/sweeps"}})
+        with pytest.raises(FileNotFoundError):
+            resolve_sweep_dir(cfg, "sweep_x", project_dir=tmp_path)
 
 
 # ----------------------------------------------------------- get_slurm_qos_whitelist
@@ -381,6 +403,155 @@ class TestSlurmQosWhitelist:
             HSMConfig({"slurm": {"qos_whitelist": []}}).get_slurm_qos_whitelist()
             is None
         )
+
+
+# ----------------------------------------------------------- HSMConfig.load merge
+
+
+class TestLoadMachineProjectMerge:
+    """Cover the per-machine + per-project merge in :meth:`HSMConfig.load`.
+
+    All tests pass ``machine_config_path`` explicitly so they never touch
+    the real ``~/.hsm/config.yaml``.
+    """
+
+    def _write_yaml(self, path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def test_neither_file_returns_none(self, tmp_path):
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"  # missing
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"     # missing
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=machine_path,
+        )
+        assert result is None
+
+    def test_only_machine_file(self, tmp_path):
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        self._write_yaml(machine_path, "local:\n  sweeps_root: /big-disk/sweeps\n")
+        result = HSMConfig.load(
+            config_path=tmp_path / "missing.yaml",
+            machine_config_path=machine_path,
+        )
+        assert result is not None
+        assert result.get_local_sweeps_root() == "/big-disk/sweeps"
+
+    def test_only_project_file(self, tmp_path):
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"
+        self._write_yaml(
+            project_path,
+            "project:\n  name: foo\nlocal:\n  gpus: 1\n",
+        )
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=tmp_path / "no-machine.yaml",
+        )
+        assert result is not None
+        assert result.get_project_root() is None  # only name set, not root
+        spec = result.get_local_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+
+    def test_local_block_deep_merged(self, tmp_path):
+        # Machine sets sweeps_root + visible_gpus; project sets gpus.
+        # All three should appear in the merged result.
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"
+        self._write_yaml(
+            machine_path,
+            "local:\n  sweeps_root: /big-disk/sweeps\n  visible_gpus: [1, 2, 3]\n",
+        )
+        self._write_yaml(project_path, "local:\n  gpus: 1\n")
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=machine_path,
+        )
+        assert result is not None
+        assert result.get_local_sweeps_root() == "/big-disk/sweeps"
+        assert result.get_local_visible_gpus() == [1, 2, 3]
+        spec = result.get_local_spec()
+        assert spec is not None
+        assert spec.gpus == 1
+
+    def test_project_wins_on_local_field_collision(self, tmp_path):
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"
+        self._write_yaml(
+            machine_path,
+            "local:\n  visible_gpus: [1, 2, 3]\n  sweeps_root: /big-disk/m\n",
+        )
+        self._write_yaml(
+            project_path,
+            "local:\n  visible_gpus: [0]\n",
+        )
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=machine_path,
+        )
+        assert result is not None
+        # Project overrides the field it sets.
+        assert result.get_local_visible_gpus() == [0]
+        # But machine's untouched fields flow through.
+        assert result.get_local_sweeps_root() == "/big-disk/m"
+
+    def test_non_local_keys_in_machine_dropped_with_warning(self, tmp_path, caplog):
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        self._write_yaml(
+            machine_path,
+            "local:\n  sweeps_root: /m\n"
+            "slurm:\n  qos: bogus-from-machine\n"
+            "distributed:\n  enabled: true\n",
+        )
+        with caplog.at_level("WARNING"):
+            result = HSMConfig.load(
+                config_path=tmp_path / "no-project.yaml",
+                machine_config_path=machine_path,
+            )
+        assert result is not None
+        # local: survives.
+        assert result.get_local_sweeps_root() == "/m"
+        # slurm:/distributed: from machine are dropped.
+        assert result.get_slurm_spec() is None
+        assert "distributed" not in result.config_data
+        assert any("not honored" in r.message for r in caplog.records)
+
+    def test_project_distributed_block_unaffected_by_machine_keys(self, tmp_path):
+        # Even if the machine file (illegally) sets `distributed:`, the
+        # project's `distributed:` block survives intact.
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"
+        self._write_yaml(
+            machine_path,
+            "distributed:\n  enabled: true\n  remotes: {ghost: {}}\n",
+        )
+        self._write_yaml(
+            project_path,
+            "distributed:\n  enabled: true\n  remotes:\n    real:\n      backend: ssh\n",
+        )
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=machine_path,
+        )
+        assert result is not None
+        remotes = result.config_data["distributed"]["remotes"]
+        assert "real" in remotes
+        assert "ghost" not in remotes
+
+    def test_empty_machine_file_no_crash(self, tmp_path):
+        # Comment-only YAML loads as None; merge should treat it as {}.
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"
+        self._write_yaml(machine_path, "# just a comment\n")
+        project_path = tmp_path / "project" / ".hsm" / "config.yaml"
+        self._write_yaml(project_path, "local:\n  gpus: 1\n")
+        result = HSMConfig.load(
+            config_path=project_path,
+            machine_config_path=machine_path,
+        )
+        assert result is not None
+        spec = result.get_local_spec()
+        assert spec is not None and spec.gpus == 1
 
 
 # --------------------------------------------------------- existing-accessors smoke

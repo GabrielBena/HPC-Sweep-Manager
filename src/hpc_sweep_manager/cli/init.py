@@ -2,10 +2,13 @@
 
 from datetime import datetime
 import logging
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 from rich.console import Console
@@ -14,8 +17,12 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 import yaml
 
+from ..core.common.config import MACHINE_CONFIG_PATH
 from ..core.common.path_detector import PathDetector
 from .common import common_options
+
+
+_MIN_DISK_FREE_BYTES = 50 * 1024**3  # 50 GB — anything smaller isn't worth redirecting to.
 
 
 def _detect_local_gpus() -> List[int]:
@@ -34,6 +41,234 @@ def _detect_local_gpus() -> List[int]:
     if proc.returncode != 0:
         return []
     return [int(m.group(1)) for m in re.finditer(r"^GPU\s+(\d+):", proc.stdout, re.M)]
+
+
+def _detect_candidate_sweeps_roots() -> List[Tuple[Path, int]]:
+    """Find writable directories with > 50 GB free under ``/mnt``, ``/data``, ``/scratch``.
+
+    The common workstation pattern: a system disk that fills up under
+    ``/`` plus a fat secondary mount somewhere predictable (the user's
+    8 TB HDD, a /scratch share, etc.). For each parent we check every
+    immediate child:
+
+    - If the child itself is writable (e.g. ``/scratch/$USER``), use it.
+    - Else if ``<child>/<USER>`` is a writable subdirectory (the common
+      ``/mnt/8TB_HDD/$USER`` pattern where the mount root is owned by
+      root), use that subdir instead.
+
+    Returns ``(path, free_bytes)`` sorted by free space descending; empty
+    list when nothing qualifies. Read-only mounts, tiny disks, and the
+    current ``$HOME`` are all skipped.
+    """
+    candidates: List[Tuple[Path, int]] = []
+    user = os.environ.get("USER", "")
+    home = Path.home()
+
+    for parent in (Path("/mnt"), Path("/data"), Path("/scratch")):
+        if not parent.is_dir():
+            continue
+        try:
+            children = sorted(parent.iterdir())
+        except (PermissionError, OSError):
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            # Resolve to a writable path: the child itself, or <child>/<user>.
+            writable: Optional[Path] = None
+            try:
+                if os.access(child, os.W_OK):
+                    writable = child
+                elif user:
+                    user_subdir = child / user
+                    if user_subdir.is_dir() and os.access(user_subdir, os.W_OK):
+                        writable = user_subdir
+            except OSError:
+                continue
+            if writable is None:
+                continue
+            # Skip if it's actually $HOME (or under it) — redirecting back to
+            # home defeats the purpose of the prompt.
+            try:
+                writable.relative_to(home)
+                continue
+            except ValueError:
+                pass
+            try:
+                usage = shutil.disk_usage(writable)
+            except OSError:
+                continue
+            if usage.free < _MIN_DISK_FREE_BYTES:
+                continue
+            candidates.append((writable, usage.free))
+    candidates.sort(key=lambda item: -item[1])
+    return candidates
+
+
+def _format_size(n_bytes: int) -> str:
+    """Render a byte count as the largest sensible TB/GB/MB unit."""
+    for unit, divisor in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2)):
+        if n_bytes >= divisor:
+            return f"{n_bytes / divisor:.1f} {unit}"
+    return f"{n_bytes} B"
+
+
+def _prompt_sweeps_root(
+    candidates: List[Tuple[Path, int]], console: Console
+) -> Optional[str]:
+    """Interactive picker for ``local.sweeps_root``. Returns chosen path or ``None``.
+
+    ``None`` means "skip the redirect" — caller writes the commented stub.
+    The chosen path has ``/hsm-sweeps`` appended automatically (we don't
+    let the user type a full path on the standard options to avoid the
+    "wait, where did it land?" surprise).
+    """
+    console.print(
+        "\n[bold]Where should HSM store sweep outputs on this machine?[/bold]"
+    )
+    console.print(
+        "[dim]HSM creates a discovery symlink at "
+        "[cyan]<project>/sweeps/outputs/<sweep_id>[/cyan] so existing "
+        "tooling (status/report) keeps finding sweeps where it expects.[/dim]\n"
+    )
+
+    n_other = len(candidates) + 1
+    n_skip = len(candidates) + 2
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="cyan", justify="right")
+    table.add_column()
+    table.add_column(style="dim")
+    for i, (path, free) in enumerate(candidates, 1):
+        proposed = path / "hsm-sweeps"
+        table.add_row(f"{i}.", f"[green]{proposed}[/green]", f"({_format_size(free)} free on {path})")
+    table.add_row(f"{n_other}.", "Other (enter path)", "")
+    table.add_row(f"{n_skip}.", "[dim]Don't redirect — sweeps stay under each project[/dim]", "")
+    console.print(table)
+    console.print()
+
+    choice = Prompt.ask(
+        "Choice",
+        choices=[str(i) for i in range(1, n_skip + 1)],
+        default="1",
+    )
+    idx = int(choice)
+    if idx == n_skip:
+        return None
+    if idx == n_other:
+        custom = Prompt.ask("Enter sweeps_root path").strip()
+        return custom or None
+    path, _ = candidates[idx - 1]
+    return str(path / "hsm-sweeps")
+
+
+def _render_machine_config(sweeps_root: Optional[str]) -> str:
+    """Render ``~/.hsm/config.yaml`` content. Active if ``sweeps_root`` given, else commented stub."""
+    header = (
+        "# ~/.hsm/config.yaml — machine-wide HSM defaults\n"
+        "#\n"
+        "# This file holds settings that vary by MACHINE, not by project.\n"
+        "# It is loaded by every HSM invocation on this user account; values\n"
+        "# here are overridden by any matching field in a project's\n"
+        "# .hsm/config.yaml. Only the `local:` block is honored here\n"
+        "# (project-scoped blocks like `distributed:` or `slurm:` would\n"
+        "# silently affect every project — confusing — so they're dropped\n"
+        "# with a warning at load time).\n"
+    )
+    if sweeps_root:
+        return header + (
+            "\n"
+            "local:\n"
+            "  # Where sweep output dirs live on this machine. HSM creates a\n"
+            "  # discovery symlink at <project>/sweeps/outputs/<sweep_id>\n"
+            "  # pointing here so status/report tooling keeps working.\n"
+            f"  sweeps_root: {sweeps_root}\n"
+            "\n"
+            "  # Optional: which GPU indices --mode local may use.\n"
+            "  # Useful on shared boxes where (e.g.) GPU:0 is reserved.\n"
+            "  # visible_gpus: [1, 2, 3]\n"
+            "\n"
+            "  # Optional: default python interpreter for --mode local.\n"
+            "  # python_path: ~/miniconda3/envs/<env>/bin/python\n"
+        )
+    return header + (
+        "#\n"
+        "# Uncomment + edit what you want.\n"
+        "\n"
+        "# local:\n"
+        "#   # Where sweep output dirs live on this machine. HSM creates a\n"
+        "#   # discovery symlink at <project>/sweeps/outputs/<sweep_id>\n"
+        "#   # pointing here so status/report tooling keeps working.\n"
+        "#   sweeps_root: /mnt/big-drive/<user>/hsm-sweeps\n"
+        "#\n"
+        "#   # Which GPU indices --mode local may use.\n"
+        "#   visible_gpus: [1, 2, 3]\n"
+        "#\n"
+        "#   # Default python interpreter for --mode local.\n"
+        "#   python_path: ~/miniconda3/envs/<env>/bin/python\n"
+    )
+
+
+def _ensure_machine_config(console: Console) -> None:
+    """Create or acknowledge ``~/.hsm/config.yaml`` on this machine.
+
+    Side effects + user-facing prints — both branches are LOUD on purpose
+    so the user knows this file is load-bearing.
+    """
+    machine_path = MACHINE_CONFIG_PATH
+
+    if machine_path.exists():
+        console.print(
+            f"\n[green]✓[/green] Using existing machine config: "
+            f"[cyan]{machine_path}[/cyan]"
+        )
+        return
+
+    console.print("\n[bold cyan]Machine-wide HSM config setup[/bold cyan]")
+    console.print(
+        f"[dim]No [cyan]{machine_path}[/cyan] found — creating one. "
+        f"This file holds defaults that vary by machine (sweeps_root, "
+        f"visible_gpus, ...) and is shared across every project on this "
+        f"account.[/dim]"
+    )
+
+    sweeps_root: Optional[str] = None
+    if sys.stdin.isatty():
+        candidates = _detect_candidate_sweeps_roots()
+        if candidates:
+            sweeps_root = _prompt_sweeps_root(candidates, console)
+
+    machine_path.parent.mkdir(parents=True, exist_ok=True)
+    machine_path.write_text(_render_machine_config(sweeps_root))
+
+    console.print(
+        f"\n[green]✓[/green] Created machine config: [cyan]{machine_path}[/cyan]"
+    )
+
+    if sweeps_root:
+        # Pre-create the sweeps_root so the first sweep doesn't hit
+        # resolve_sweep_dir's hard-error.
+        target = Path(os.path.expandvars(os.path.expanduser(sweeps_root)))
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            console.print(
+                f"  [dim]sweeps_root = {sweeps_root} (created)[/dim]"
+            )
+        except OSError as e:
+            console.print(
+                f"  [yellow]⚠[/yellow]  sweeps_root = {sweeps_root} "
+                f"(could not create: {e})"
+            )
+            console.print(
+                f"     Create it before your first sweep, or edit "
+                f"[cyan]{machine_path}[/cyan] to disable the redirect."
+            )
+    else:
+        console.print(
+            "  [dim]Stub only — sweeps will land in each project's "
+            "sweeps/outputs/. Edit the file to set sweeps_root if you "
+            "want a single landing zone.[/dim]"
+        )
 
 
 def _render_typed_config_scaffold(gpu_count: int) -> str:
@@ -227,6 +462,17 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
             config = _interactive_configuration(project_info, console)
         else:
             config = _auto_configuration(project_info)
+
+    # Make sure the machine-wide ~/.hsm/config.yaml exists (creates or
+    # acknowledges; prompts for sweeps_root only on a TTY with candidates).
+    # Skipped when the project is $HOME itself (would collide path-wise).
+    if project_path.resolve() != Path.home().resolve():
+        _ensure_machine_config(console)
+    else:
+        console.print(
+            "\n[yellow]Project path is $HOME; skipping machine config setup "
+            "(would collide with the project's .hsm/config.yaml).[/yellow]"
+        )
 
     # Create sweep infrastructure
     console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")

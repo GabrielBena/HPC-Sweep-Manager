@@ -206,6 +206,24 @@ data lives at `<sweeps_root>/<sweep_id>/`, and HSM drops a symlink at
 status` / `hsm sweep report` and any project-local tooling keep working
 transparently.
 
+**Put it in `~/.hsm/config.yaml`, not the project's `.hsm/config.yaml`.**
+`sweeps_root` is a *machine* fact (the path `/mnt/8TB_HDD` exists on
+your workstation but not on your laptop), so the natural home is the
+machine-wide config:
+
+```yaml
+# ~/.hsm/config.yaml — machine-wide HSM defaults
+local:
+  sweeps_root: /mnt/8TB_HDD/gbena/hsm-sweeps
+```
+
+HSM merges this with each project's `.hsm/config.yaml` at load time
+(see [Machine vs project config](#machine-vs-project-config) below).
+The first time you run `hsm setup init` on a fresh machine, HSM offers
+to detect mount points with significant free space and writes the file
+for you; if none are found (or you're not on a TTY) it leaves a
+commented stub.
+
 Use cases:
 - Workstation with a small NVMe `/` but a large `/mnt/8TB_HDD` —
   keep `/` breathing without touching project tooling.
@@ -217,6 +235,39 @@ replaced. If a *real* directory squats there (e.g., from an earlier
 local-only run), HSM warns and leaves it alone — the data still lands
 at `<sweeps_root>/<sweep_id>/`, you'll just need to navigate there
 manually.
+
+**Hard error if the path is missing.** HSM refuses to silently
+`mkdir -p` `sweeps_root` if it doesn't exist on the current machine —
+that's almost always a sign that a config file written on one machine
+(where `/mnt/8TB_HDD` is mounted) was copied to another (where it
+isn't). Either `mkdir -p <sweeps_root>` ahead of time or remove the
+field. The error message names both possible config locations
+(`~/.hsm/config.yaml` and `<project>/.hsm/config.yaml`).
+
+### Machine vs project config
+
+HSM loads two YAML files and merges them per top-level block:
+
+| Layer | Path | Scope | When to use |
+|---|---|---|---|
+| Machine | `~/.hsm/config.yaml` | defaults for this user on this box | machine-specific facts: `sweeps_root`, `visible_gpus`, `python_path` |
+| Project | `<project>/.hsm/config.yaml` | per-project | everything else: remotes, slurm spec, paths |
+
+**Merge rule:**
+- `local:` — **deep-merged** field-by-field, project wins on collisions.
+  So the machine's `sweeps_root` flows through even when the project
+  sets `local: { gpus: 1 }`.
+- `slurm:`, `distributed:`, `paths:`, `project:`, `wandb:` — **only
+  honored from the project file**. If you put any of these in
+  `~/.hsm/config.yaml`, HSM drops them with a warning at load time
+  (rationale: a `distributed:` block in the machine file would
+  silently leak the same remotes into every project, which is
+  surprising; if you want the same remote everywhere, configure it
+  per-project).
+
+Both files are optional. With neither, HSM falls back to built-in
+defaults. The machine file is created on first `hsm setup init` if
+absent; it's safe to delete and re-create.
 
 ### `local.visible_gpus` — restrict which GPU indices the slot queue uses
 
