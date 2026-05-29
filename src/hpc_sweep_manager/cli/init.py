@@ -2,10 +2,13 @@
 
 from datetime import datetime
 import logging
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 from rich.console import Console
@@ -14,8 +17,12 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 import yaml
 
+from ..core.common.config import MACHINE_CONFIG_PATH
 from ..core.common.path_detector import PathDetector
 from .common import common_options
+
+
+_MIN_DISK_FREE_BYTES = 50 * 1024**3  # 50 GB — anything smaller isn't worth redirecting to.
 
 
 def _detect_local_gpus() -> List[int]:
@@ -34,6 +41,247 @@ def _detect_local_gpus() -> List[int]:
     if proc.returncode != 0:
         return []
     return [int(m.group(1)) for m in re.finditer(r"^GPU\s+(\d+):", proc.stdout, re.M)]
+
+
+def _detect_active_conda_env() -> Optional[str]:
+    """Return the currently-activated conda env name, or None.
+
+    Reads ``CONDA_DEFAULT_ENV`` from the parent shell — typical when the
+    user runs ``hsm setup init`` from inside an activated env. Skips
+    ``base`` (rarely the project's real env) and any unparseable value.
+    """
+    env = os.environ.get("CONDA_DEFAULT_ENV", "").strip()
+    if not env or env == "base":
+        return None
+    return env
+
+
+def _detect_candidate_sweeps_roots() -> List[Tuple[Path, int]]:
+    """Find writable directories with > 50 GB free under ``/mnt``, ``/data``, ``/scratch``.
+
+    The common workstation pattern: a system disk that fills up under
+    ``/`` plus a fat secondary mount somewhere predictable (the user's
+    8 TB HDD, a /scratch share, etc.). For each parent we check every
+    immediate child:
+
+    - If the child itself is writable (e.g. ``/scratch/$USER``), use it.
+    - Else if ``<child>/<USER>`` is a writable subdirectory (the common
+      ``/mnt/8TB_HDD/$USER`` pattern where the mount root is owned by
+      root), use that subdir instead.
+
+    Returns ``(path, free_bytes)`` sorted by free space descending; empty
+    list when nothing qualifies. Read-only mounts, tiny disks, and the
+    current ``$HOME`` are all skipped.
+    """
+    candidates: List[Tuple[Path, int]] = []
+    user = os.environ.get("USER", "")
+    home = Path.home()
+
+    for parent in (Path("/mnt"), Path("/data"), Path("/scratch")):
+        if not parent.is_dir():
+            continue
+        try:
+            children = sorted(parent.iterdir())
+        except (PermissionError, OSError):
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            # Resolve to a writable path: the child itself, or <child>/<user>.
+            writable: Optional[Path] = None
+            try:
+                if os.access(child, os.W_OK):
+                    writable = child
+                elif user:
+                    user_subdir = child / user
+                    if user_subdir.is_dir() and os.access(user_subdir, os.W_OK):
+                        writable = user_subdir
+            except OSError:
+                continue
+            if writable is None:
+                continue
+            # Skip if it's actually $HOME (or under it) — redirecting back to
+            # home defeats the purpose of the prompt.
+            try:
+                writable.relative_to(home)
+                continue
+            except ValueError:
+                pass
+            try:
+                usage = shutil.disk_usage(writable)
+            except OSError:
+                continue
+            if usage.free < _MIN_DISK_FREE_BYTES:
+                continue
+            candidates.append((writable, usage.free))
+    candidates.sort(key=lambda item: -item[1])
+    return candidates
+
+
+def _format_size(n_bytes: int) -> str:
+    """Render a byte count as the largest sensible TB/GB/MB unit."""
+    for unit, divisor in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2)):
+        if n_bytes >= divisor:
+            return f"{n_bytes / divisor:.1f} {unit}"
+    return f"{n_bytes} B"
+
+
+def _prompt_sweeps_root(
+    candidates: List[Tuple[Path, int]], console: Console
+) -> Optional[str]:
+    """Interactive picker for ``local.sweeps_root``. Returns chosen path or ``None``.
+
+    ``None`` means "skip the redirect" — caller writes the commented stub.
+    The chosen path has ``/hsm-sweeps`` appended automatically (we don't
+    let the user type a full path on the standard options to avoid the
+    "wait, where did it land?" surprise).
+    """
+    console.print(
+        "\n[bold]Where should HSM store sweep outputs on this machine?[/bold]"
+    )
+    console.print(
+        "[dim]HSM creates a discovery symlink at "
+        "[cyan]<project>/sweeps/outputs/<sweep_id>[/cyan] so existing "
+        "tooling (status/report) keeps finding sweeps where it expects.[/dim]\n"
+    )
+
+    n_other = len(candidates) + 1
+    n_skip = len(candidates) + 2
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="cyan", justify="right")
+    table.add_column()
+    table.add_column(style="dim")
+    for i, (path, free) in enumerate(candidates, 1):
+        proposed = path / "hsm-sweeps"
+        table.add_row(f"{i}.", f"[green]{proposed}[/green]", f"({_format_size(free)} free on {path})")
+    table.add_row(f"{n_other}.", "Other (enter path)", "")
+    table.add_row(f"{n_skip}.", "[dim]Don't redirect — sweeps stay under each project[/dim]", "")
+    console.print(table)
+    console.print()
+
+    choice = Prompt.ask(
+        "Choice",
+        choices=[str(i) for i in range(1, n_skip + 1)],
+        default="1",
+    )
+    idx = int(choice)
+    if idx == n_skip:
+        return None
+    if idx == n_other:
+        custom = Prompt.ask("Enter sweeps_root path").strip()
+        return custom or None
+    path, _ = candidates[idx - 1]
+    return str(path / "hsm-sweeps")
+
+
+def _render_machine_config(sweeps_root: Optional[str]) -> str:
+    """Render ``~/.hsm/config.yaml`` content. Active if ``sweeps_root`` given, else commented stub."""
+    header = (
+        "# ~/.hsm/config.yaml — machine-wide HSM defaults\n"
+        "#\n"
+        "# This file holds settings that vary by MACHINE, not by project.\n"
+        "# It is loaded by every HSM invocation on this user account; values\n"
+        "# here are overridden by any matching field in a project's\n"
+        "# .hsm/config.yaml. Only the `local:` block is honored here\n"
+        "# (project-scoped blocks like `distributed:` or `slurm:` would\n"
+        "# silently affect every project — confusing — so they're dropped\n"
+        "# with a warning at load time).\n"
+    )
+    if sweeps_root:
+        return header + (
+            "\n"
+            "local:\n"
+            "  # Where sweep output dirs live on this machine. HSM creates a\n"
+            "  # discovery symlink at <project>/sweeps/outputs/<sweep_id>\n"
+            "  # pointing here so status/report tooling keeps working.\n"
+            f"  sweeps_root: {sweeps_root}\n"
+            "\n"
+            "  # Optional: which GPU indices --mode local may use.\n"
+            "  # Useful on shared boxes where (e.g.) GPU:0 is reserved.\n"
+            "  # visible_gpus: [1, 2, 3]\n"
+            "\n"
+            "  # Optional: default python interpreter for --mode local.\n"
+            "  # python_path: ~/miniconda3/envs/<env>/bin/python\n"
+        )
+    return header + (
+        "#\n"
+        "# Uncomment + edit what you want.\n"
+        "\n"
+        "# local:\n"
+        "#   # Where sweep output dirs live on this machine. HSM creates a\n"
+        "#   # discovery symlink at <project>/sweeps/outputs/<sweep_id>\n"
+        "#   # pointing here so status/report tooling keeps working.\n"
+        "#   sweeps_root: /mnt/big-drive/<user>/hsm-sweeps\n"
+        "#\n"
+        "#   # Which GPU indices --mode local may use.\n"
+        "#   visible_gpus: [1, 2, 3]\n"
+        "#\n"
+        "#   # Default python interpreter for --mode local.\n"
+        "#   python_path: ~/miniconda3/envs/<env>/bin/python\n"
+    )
+
+
+def _ensure_machine_config(console: Console) -> None:
+    """Create or acknowledge ``~/.hsm/config.yaml`` on this machine.
+
+    Side effects + user-facing prints — both branches are LOUD on purpose
+    so the user knows this file is load-bearing.
+    """
+    machine_path = MACHINE_CONFIG_PATH
+
+    if machine_path.exists():
+        console.print(
+            f"\n[green]✓[/green] Using existing machine config: "
+            f"[cyan]{machine_path}[/cyan]"
+        )
+        return
+
+    console.print("\n[bold cyan]Machine-wide HSM config setup[/bold cyan]")
+    console.print(
+        f"[dim]No [cyan]{machine_path}[/cyan] found — creating one. "
+        f"This file holds defaults that vary by machine (sweeps_root, "
+        f"visible_gpus, ...) and is shared across every project on this "
+        f"account.[/dim]"
+    )
+
+    sweeps_root: Optional[str] = None
+    if sys.stdin.isatty():
+        candidates = _detect_candidate_sweeps_roots()
+        if candidates:
+            sweeps_root = _prompt_sweeps_root(candidates, console)
+
+    machine_path.parent.mkdir(parents=True, exist_ok=True)
+    machine_path.write_text(_render_machine_config(sweeps_root))
+
+    console.print(
+        f"\n[green]✓[/green] Created machine config: [cyan]{machine_path}[/cyan]"
+    )
+
+    if sweeps_root:
+        # Pre-create the sweeps_root so the first sweep doesn't hit
+        # resolve_sweep_dir's hard-error.
+        target = Path(os.path.expandvars(os.path.expanduser(sweeps_root)))
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            console.print(
+                f"  [dim]sweeps_root = {sweeps_root} (created)[/dim]"
+            )
+        except OSError as e:
+            console.print(
+                f"  [yellow]⚠[/yellow]  sweeps_root = {sweeps_root} "
+                f"(could not create: {e})"
+            )
+            console.print(
+                f"     Create it before your first sweep, or edit "
+                f"[cyan]{machine_path}[/cyan] to disable the redirect."
+            )
+    else:
+        console.print(
+            "  [dim]Stub only — sweeps will land in each project's "
+            "sweeps/outputs/. Edit the file to set sweeps_root if you "
+            "want a single landing zone.[/dim]"
+        )
 
 
 def _render_typed_config_scaffold(gpu_count: int) -> str:
@@ -228,6 +476,17 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
         else:
             config = _auto_configuration(project_info)
 
+    # Make sure the machine-wide ~/.hsm/config.yaml exists (creates or
+    # acknowledges; prompts for sweeps_root only on a TTY with candidates).
+    # Skipped when the project is $HOME itself (would collide path-wise).
+    if project_path.resolve() != Path.home().resolve():
+        _ensure_machine_config(console)
+    else:
+        console.print(
+            "\n[yellow]Project path is $HOME; skipping machine config setup "
+            "(would collide with the project's .hsm/config.yaml).[/yellow]"
+        )
+
     # Create sweep infrastructure
     console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
     success = _create_sweep_infrastructure(project_path, config, console, logger)
@@ -262,8 +521,11 @@ def _extract_config_from_existing(
     Preserves project / paths / wandb settings. The old ``hpc:`` block is
     intentionally dropped — its ``default_walltime`` / ``default_resources``
     fields silently overrode the typed ``slurm:`` / ``local:`` blocks (see
-    CLAUDE.md gotcha #5b). Users should re-express any such defaults in
-    the typed scaffolds at the bottom of the new ``.hsm/config.yaml``.
+    CLAUDE.md gotcha #5b). The legacy ``paths.python_interpreter`` is also
+    dropped — replaced by ``paths.conda_env`` (the single source of truth
+    HSM now uses to activate the env on every backend). Falls back to
+    detecting the active env from ``$CONDA_DEFAULT_ENV``; if neither
+    source has a value, the user fills it in manually post-migration.
     """
     config = {}
 
@@ -271,9 +533,12 @@ def _extract_config_from_existing(
     config["project_name"] = project_section.get("name", project_path.name)
 
     paths_section = existing_config.get("paths", {})
-    config["python_path"] = paths_section.get("python_interpreter", "python")
     config["train_script"] = paths_section.get("train_script", "scripts/train.py")
     config["config_dir"] = paths_section.get("config_dir", "configs")
+    # Prefer an existing paths.conda_env, then the active shell env, then None.
+    config["conda_env"] = (
+        paths_section.get("conda_env") or _detect_active_conda_env()
+    )
 
     wandb_section = existing_config.get("wandb", {})
     if wandb_section:
@@ -326,25 +591,40 @@ def _display_project_info(info: Dict[str, Any], console: Console):
 
 
 def _interactive_configuration(project_info: Dict[str, Any], console: Console) -> Dict[str, Any]:
-    """Interactive configuration prompts."""
-    config = {}
+    """Interactive configuration prompts.
 
-    # Project name
+    The conda/mamba env name is the single source of truth for which
+    python this project's sweeps use (across local / slurm / ssh / ssh-slurm
+    backends). We DON'T prompt for an absolute python_interpreter path —
+    HSM activates the env at submit time via `conda run -n <env> python`.
+    """
+    config: Dict[str, Any] = {}
+
     default_name = project_info["project_root"].name
     config["project_name"] = Prompt.ask("Project name", default=default_name)
 
-    # Python interpreter
-    if project_info["python_path"]:
-        use_detected = Confirm.ask(
-            f"Use detected Python interpreter: {project_info['python_path']}?",
+    # conda env — detect from the active shell first, fall back to a prompt.
+    detected_env = _detect_active_conda_env()
+    if detected_env:
+        if Confirm.ask(
+            f"Use active conda env [bold cyan]{detected_env}[/bold cyan] for this project?",
             default=True,
-        )
-        if use_detected:
-            config["python_path"] = str(project_info["python_path"])
+        ):
+            config["conda_env"] = detected_env
         else:
-            config["python_path"] = Prompt.ask("Python interpreter path")
+            entered = Prompt.ask(
+                "Conda env name (leave empty to add later)", default=""
+            ).strip()
+            config["conda_env"] = entered or None
     else:
-        config["python_path"] = Prompt.ask("Python interpreter path", default="python")
+        console.print(
+            "[yellow]⚠[/yellow]  No active conda env detected — `hsm setup init` "
+            "works best from inside your project's activated env."
+        )
+        entered = Prompt.ask(
+            "Conda env name (leave empty to add later)", default=""
+        ).strip()
+        config["conda_env"] = entered or None
 
     # Training script
     if project_info["train_script"]:
@@ -380,14 +660,14 @@ def _interactive_configuration(project_info: Dict[str, Any], console: Console) -
 def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
     """Automatic configuration based on detected information.
 
-    No HPC/resource defaults — the typed ``local:`` / ``slurm:`` scaffolds
-    appended to ``.hsm/config.yaml`` are the canonical home for those.
+    Captures `conda_env` from the active shell's `$CONDA_DEFAULT_ENV` when
+    present — this is the single source of truth for which python every
+    backend (local/slurm/ssh) will activate. No `python_interpreter` field
+    is written; see [[CLAUDE.md gotcha 9]] for the convention.
     """
     return {
         "project_name": project_info["project_root"].name,
-        "python_path": str(project_info["python_path"])
-        if project_info["python_path"]
-        else "python",
+        "conda_env": _detect_active_conda_env(),
         "train_script": str(project_info["train_script"])
         if project_info["train_script"]
         else "scripts/train.py",
@@ -425,17 +705,23 @@ def _create_sweep_infrastructure(
         # per-remote `spec:` scaffolds appended below. Each --mode reads only
         # its own block (see CLAUDE.md gotcha #5b).
         hsm_config_path = hsm_dir / "config.yaml"
+        paths_block: Dict[str, Any] = {
+            "train_script": config["train_script"],
+            "config_dir": config["config_dir"],
+            "output_dir": "outputs",
+        }
+        # paths.conda_env is the single source of truth for which python
+        # every backend activates. Only write it when we have a real value
+        # — otherwise leave it out so the user explicitly fills it in
+        # later (and `hsm sweep run` warns clearly if it's still missing).
+        if config.get("conda_env"):
+            paths_block["conda_env"] = config["conda_env"]
         hsm_config = {
             "project": {
                 "name": config["project_name"],
                 "root": str(project_path),
             },
-            "paths": {
-                "python_interpreter": config["python_path"],
-                "train_script": config["train_script"],
-                "config_dir": config["config_dir"],
-                "output_dir": "outputs",
-            },
+            "paths": paths_block,
             "metadata": {
                 "created_by": "HSM (HPC Sweep Manager)",
                 "created_at": datetime.now().isoformat(),
@@ -458,6 +744,24 @@ def _create_sweep_infrastructure(
         console.print(
             f"  ✅ Created HSM configuration file: {hsm_config_path.relative_to(project_path)}"
         )
+        if config.get("conda_env"):
+            console.print(
+                f"  🐍 paths.conda_env: [bold cyan]{config['conda_env']}[/bold cyan] "
+                "— every backend will activate this env"
+            )
+        else:
+            console.print(
+                "  [yellow]⚠[/yellow]  paths.conda_env is [bold]not set[/bold]; "
+                "sweeps will fail until you add it"
+            )
+            console.print(
+                "     Edit "
+                f"[cyan]{hsm_config_path.relative_to(project_path)}[/cyan] and add:"
+            )
+            console.print(
+                "       [dim]paths:[/dim]\n"
+                "       [dim]  conda_env: <your-env-name>[/dim]"
+            )
         if gpu_indices:
             console.print(
                 f"  🎯 Detected {len(gpu_indices)} GPU(s) — `local:` scaffold pre-seeded with `gpus: 1`"

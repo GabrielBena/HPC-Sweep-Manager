@@ -192,9 +192,16 @@ def build_compute_source(
         if not remote_alias:
             raise RuntimeError("--mode remote requires --remote <alias>")
         # Lookup precedence: registered remote → bare ssh-config alias (empty cfg).
-        distributed_cfg = (
+        distributed_cfg = dict(
             hsm_config.config_data.get("distributed", {}) if hsm_config else {}
         )
+        # paths.conda_env is the lowest-priority fallback for the SSH
+        # factories. Per-remote / distributed.conda_env still win because
+        # we only inject when absent.
+        if hsm_config is not None:
+            _proj_env = getattr(hsm_config, "get_conda_env", lambda: None)()
+            if _proj_env and "conda_env" not in distributed_cfg:
+                distributed_cfg["conda_env"] = _proj_env
         registered = distributed_cfg.get("remotes", {})
         remote_cfg = registered.get(remote_alias, {})
         if remote_alias not in registered:
@@ -249,6 +256,19 @@ def build_compute_source(
                 f"expected 'ssh' or 'slurm'"
             )
 
+    # Project-level conda env (from paths.conda_env). Single source of truth
+    # for local + native Slurm. Overridable per-source for SSH/SSH-Slurm via
+    # distributed.remotes.<alias>.conda_env (handled in build_ssh* factories).
+    # CLI --conda-env (conda_env_override) wins for --remote runs; for
+    # local/array/individual it also wins if passed.
+    project_conda_env: str | None = None
+    if hsm_config is not None:
+        # Defensive getattr — older config objects + FakeConfig in tests
+        # may not have the accessor.
+        project_conda_env = getattr(hsm_config, "get_conda_env", lambda: None)()
+    if conda_env_override is not None:
+        project_conda_env = conda_env_override
+
     if mode == "local":
         from ..local.local_compute_source import LocalComputeSource
 
@@ -268,6 +288,7 @@ def build_compute_source(
             project_dir=project_dir,
             default_spec=default_spec,
             visible_gpus=visible_gpus,
+            conda_env=project_conda_env,
         )
         return source, "local", "individual"
 
@@ -291,6 +312,7 @@ def build_compute_source(
             project_dir=project_dir,
             default_spec=default_spec,
             qos_whitelist=effective_qos_whitelist,
+            conda_env=project_conda_env,
         )
         submission_mode: SubmissionMode = "array" if mode == "array" else "individual"
         return source, mode, submission_mode

@@ -324,6 +324,7 @@ class SSHSlurmComputeSource(ComputeSource):
             script_path=self.script_path,
             params_hydra=params_to_hydra_args(params),
             wandb_group=wandb_group,
+            uses_conda=bool(self.conda_env),
         )
         remote_script_path = f"{self._remote_scripts_dir}/{job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)
@@ -423,6 +424,7 @@ class SSHSlurmComputeSource(ComputeSource):
             python_path=self._run_prefix,
             script_path=self.script_path,
             wandb_group=wandb_group,
+            uses_conda=bool(self.conda_env),
         )
         remote_script_path = f"{self._remote_scripts_dir}/{job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)

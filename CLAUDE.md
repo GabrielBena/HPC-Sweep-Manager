@@ -98,7 +98,7 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py) —
   `_build_ssh_children` dispatches per-remote on `backend:` (`ssh`/`slurm`) so a single distributed run can mix both.
 - [`core/common/config.py`](src/hpc_sweep_manager/core/common/config.py) —
-  `HSMConfig.get_local_sweeps_root()` + `resolve_sweep_dir(hsm_config, sweep_id, project_dir)` — when `local.sweeps_root` is set, sweep dirs land there with a discovery symlink in the project dir.
+  `HSMConfig.load()` merges `~/.hsm/config.yaml` (machine) with `<project>/.hsm/config.yaml` (project); `local:` is deep-merged field-by-field with project winning on collisions, other blocks only honored from the project file (machine-level `slurm:`/`distributed:` are dropped with a warning). `get_local_sweeps_root()` + `resolve_sweep_dir(hsm_config, sweep_id, project_dir)` — when `local.sweeps_root` is set, sweep dirs land there with a discovery symlink in the project dir; **hard-errors** if the path doesn't exist on the current machine (catches the "config copied to a machine where the mount isn't present" footgun).
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
@@ -168,11 +168,22 @@ These were deliberately removed; resist resurrecting them.
 These are real bugs that have been fixed; if you see code that looks like
 it's trying to reintroduce them, push back.
 
-1. **Non-interactive SSH shells skip `~/.bashrc` / `~/.zshrc`** → `conda`
-   is usually not on PATH. The wrapper template
-   ([`templates/ssh_compute_source.sh.j2`](src/hpc_sweep_manager/templates/ssh_compute_source.sh.j2))
-   sources `conda.sh` from `~/miniconda3`/`~/anaconda3`/`~/.miniconda3`/
-   `/opt/conda` automatically when `conda_env` is set.
+1. **Non-interactive SSH shells AND sbatch compute nodes skip `~/.bashrc`** →
+   `conda` / `MAMBA_EXE` is not on PATH. All three rendered-script templates
+   (`ssh_compute_source.sh.j2`, `slurm_array.sh.j2`, `slurm_single.sh.j2`)
+   include the shared partial
+   [`templates/_conda_init.sh.j2`](src/hpc_sweep_manager/templates/_conda_init.sh.j2)
+   when `uses_conda=True`. The partial probes standard conda paths
+   (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`), then falls back
+   to micromamba via `$MAMBA_EXE` + common locations (including
+   `~/code/packages/HPC-Sweep-Manager/bin/micromamba` for the S3IT layout
+   where the binary lives inside an HSM clone), sources the right
+   shell-hook, and defines `conda() { micromamba "$@"; }` so the rest of
+   the script can keep emitting `conda run -n <env> python ...` uniformly.
+   SSHComputeSource + SSHSlurmComputeSource pass `uses_conda` based on
+   `bool(self.conda_env)`; native SlurmComputeSource uses
+   `_python_needs_conda_init(python_path)` (`True` if `python_path`
+   starts with `conda `/`mamba `/`micromamba `).
 
 2. **`~` in `output.dir=~/path` does NOT tilde-expand** inside double-quoted
    COMMAND strings (bash only expands `~` in cd/mkdir tokens). `SSHComputeSource.setup()`
@@ -272,6 +283,42 @@ it's trying to reintroduce them, push back.
 8. **`params_to_hydra_args` quoting:** values with spaces/commas may render
    with nested quotes that bash collapses gracefully, but path-as-value
    params with spaces are fragile. Known limitation across all templates.
+
+9. **Two HSM configs, not one — machine + project.** `HSMConfig.load()` reads
+   `~/.hsm/config.yaml` (machine-wide) AND `<project>/.hsm/config.yaml`
+   (project) and merges them. Per-block rule: `local:` is deep-merged
+   field-by-field (project wins on collisions); every other block
+   (`slurm:`, `distributed:`, `paths:`, `project:`, `wandb:`) is only
+   honored from the project file — putting them in the machine config
+   warns and drops. Rationale: machine-specific facts like
+   `local.sweeps_root` belong in the machine file (the path
+   `/mnt/8TB_HDD` exists on the workstation but not the laptop);
+   `distributed.remotes.*` is project scope (different projects
+   target different clusters). The machine file is auto-created by
+   `hsm setup init` if absent — commented stub by default, or active
+   with `sweeps_root` set if the run was on a TTY with candidate disks
+   under `/mnt`/`/data`/`/scratch`. `resolve_sweep_dir` hard-errors if
+   `sweeps_root` resolves to a non-existent directory on the current
+   machine (catches "config copied across machines, mount isn't
+   present" — common when shared via git).
+
+10. **`paths.conda_env` is the single source of truth for the python env.**
+    Replaces the deprecated `paths.python_interpreter` (absolute python path).
+    `HSMConfig.get_conda_env()` reads it; the orchestrator forwards it to
+    LocalComputeSource and SlurmComputeSource constructors, and falls back
+    into `distributed.conda_env` for SSH/SSH-Slurm children that don't have
+    a per-remote override. Each compute source wraps the supplied
+    `python_path` in `conda run -n <env> python` via
+    `resolve_run_prefix(conda_env, None)` and renders the shared
+    `_conda_init.sh.j2` partial (uses_conda=True), so every backend
+    activates the env identically. `hsm setup init` detects
+    `$CONDA_DEFAULT_ENV` and writes the field automatically (skipping
+    `base`); if no env is active, the field is omitted and the console
+    prints a clear "add this before running a sweep" note. Convention:
+    pick one env name per project, create envs with that exact name on
+    every machine the project runs on. Don't rely on shell activation —
+    HSM enforces the env from config. `HSMConfig.load()` warns if a
+    legacy `paths.python_interpreter` is present.
 
 ## Known limitations
 

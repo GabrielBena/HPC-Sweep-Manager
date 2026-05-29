@@ -206,6 +206,24 @@ data lives at `<sweeps_root>/<sweep_id>/`, and HSM drops a symlink at
 status` / `hsm sweep report` and any project-local tooling keep working
 transparently.
 
+**Put it in `~/.hsm/config.yaml`, not the project's `.hsm/config.yaml`.**
+`sweeps_root` is a *machine* fact (the path `/mnt/8TB_HDD` exists on
+your workstation but not on your laptop), so the natural home is the
+machine-wide config:
+
+```yaml
+# ~/.hsm/config.yaml — machine-wide HSM defaults
+local:
+  sweeps_root: /mnt/8TB_HDD/gbena/hsm-sweeps
+```
+
+HSM merges this with each project's `.hsm/config.yaml` at load time
+(see [Machine vs project config](#machine-vs-project-config) below).
+The first time you run `hsm setup init` on a fresh machine, HSM offers
+to detect mount points with significant free space and writes the file
+for you; if none are found (or you're not on a TTY) it leaves a
+commented stub.
+
 Use cases:
 - Workstation with a small NVMe `/` but a large `/mnt/8TB_HDD` —
   keep `/` breathing without touching project tooling.
@@ -217,6 +235,94 @@ replaced. If a *real* directory squats there (e.g., from an earlier
 local-only run), HSM warns and leaves it alone — the data still lands
 at `<sweeps_root>/<sweep_id>/`, you'll just need to navigate there
 manually.
+
+**Hard error if the path is missing.** HSM refuses to silently
+`mkdir -p` `sweeps_root` if it doesn't exist on the current machine —
+that's almost always a sign that a config file written on one machine
+(where `/mnt/8TB_HDD` is mounted) was copied to another (where it
+isn't). Either `mkdir -p <sweeps_root>` ahead of time or remove the
+field. The error message names both possible config locations
+(`~/.hsm/config.yaml` and `<project>/.hsm/config.yaml`).
+
+### Project-level conda env — `paths.conda_env`
+
+HSM picks the python interpreter from a **conda/mamba env name** declared
+once per project:
+
+```yaml
+# <project>/.hsm/config.yaml
+paths:
+  train_script: train.py
+  conda_env: my-project       # the single source of truth
+```
+
+Every backend honors it:
+
+| Backend | Effective invocation |
+|---|---|
+| `--mode local` (LocalComputeSource) | `conda run -n my-project python train.py ...` |
+| `--mode array\|individual` (native SlurmComputeSource) | same — emitted inside the rendered sbatch script |
+| `--remote <alias>` (SSH or SSH-Slurm) | same — emitted in the wrapper that runs on the remote |
+| `--mode distributed` | same — every child source inherits |
+
+The rendered scripts source a shared conda/mamba init partial
+(`_conda_init.sh.j2`) before invoking python. It probes standard conda
+install paths and falls back to micromamba (including the binary in
+this repo's `bin/` for the S3IT layout), then defines a small
+`conda() { micromamba "$@"; }` bridge so the same `conda run -n <env>`
+syntax works regardless of which package manager is actually present.
+That means **non-interactive shells (sbatch, asyncssh) activate the
+env correctly without needing `~/.bashrc`**.
+
+**The convention:** pick one canonical env name per project, create it
+with that exact name on every machine the project will run on, set it
+once in `paths.conda_env`. Don't rely on shell activation before
+`hsm sweep run` — the env should be enforced from config, not from
+calling-shell state.
+
+**Per-source overrides** (rare): set
+`distributed.remotes.<alias>.conda_env` to use a different env on a
+specific remote (e.g., a CPU-only build of the env on one cluster).
+`distributed.conda_env` is a global default at the same precedence as
+per-remote. CLI `--conda-env <name>` wins over everything.
+
+**`hsm setup init`** detects the active shell env via
+`$CONDA_DEFAULT_ENV` and writes it into `paths.conda_env` automatically
+(skipping `base`). If no env is active when you run init, the field is
+left unset and the console prints a clear "add this field before
+running a sweep" note. Run init from inside your project's activated
+env and there's nothing else to do.
+
+**Deprecation note**: the older `paths.python_interpreter` field (an
+absolute path to a python binary) is deprecated. HSM still reads it
+for backward compat — but if both fields are set, `conda_env` wins
+silently. HSM logs a warning at load time when `python_interpreter` is
+present. Remove it from existing configs in favor of `conda_env`.
+
+### Machine vs project config
+
+HSM loads two YAML files and merges them per top-level block:
+
+| Layer | Path | Scope | When to use |
+|---|---|---|---|
+| Machine | `~/.hsm/config.yaml` | defaults for this user on this box | machine-specific facts: `sweeps_root`, `visible_gpus`, `python_path` |
+| Project | `<project>/.hsm/config.yaml` | per-project | everything else: remotes, slurm spec, paths |
+
+**Merge rule:**
+- `local:` — **deep-merged** field-by-field, project wins on collisions.
+  So the machine's `sweeps_root` flows through even when the project
+  sets `local: { gpus: 1 }`.
+- `slurm:`, `distributed:`, `paths:`, `project:`, `wandb:` — **only
+  honored from the project file**. If you put any of these in
+  `~/.hsm/config.yaml`, HSM drops them with a warning at load time
+  (rationale: a `distributed:` block in the machine file would
+  silently leak the same remotes into every project, which is
+  surprising; if you want the same remote everywhere, configure it
+  per-project).
+
+Both files are optional. With neither, HSM falls back to built-in
+defaults. The machine file is created on first `hsm setup init` if
+absent; it's safe to delete and re-create.
 
 ### `local.visible_gpus` — restrict which GPU indices the slot queue uses
 

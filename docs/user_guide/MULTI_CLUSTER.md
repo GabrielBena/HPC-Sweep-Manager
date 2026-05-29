@@ -104,14 +104,14 @@ project:
   root: /home/<user>/code/my-research-project
 
 paths:
-  python_interpreter: python
+  conda_env: my-project           # single source of truth for the python env
   train_script: scripts/train.py
   config_dir: configs
 
-# HQ-local config: where the sweep dir lands + HQ's own GPUs as a child
-# of distributed.
+# HQ-local config: HQ's own GPUs as a child of distributed.
+# (sweeps_root belongs in ~/.hsm/config.yaml — it's a machine fact, not
+# a project fact. See HPC_EXECUTION.md#machine-vs-project-config.)
 local:
-  sweeps_root: "/mnt/8TB_HDD/$USER/hsm-sweeps"   # optional: redirect off system disk
   gpus: all                                       # HQ's GPUs are visible by default
 
 # Multi-cluster fan-out
