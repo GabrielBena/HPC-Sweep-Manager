@@ -71,6 +71,7 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSou
             python_path=python_path,
             script_path=script_path,
             project_dir=project_dir,
+            conda_env=getattr(hsm_config, "get_conda_env", lambda: None)(),
         )
     except Exception as e:  # noqa: BLE001 - local source is optional
         logger.warning(f"Could not build local compute source: {e}")
@@ -94,7 +95,14 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
     detector = PathDetector()
     project_dir = hsm_config.get_project_root() or str(Path.cwd())
     script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
-    distributed_cfg = hsm_config.config_data.get("distributed", {})
+    distributed_cfg = dict(hsm_config.config_data.get("distributed", {}))
+    # Project-level conda_env (from paths.conda_env) is the lowest-priority
+    # fallback for SSH/SSH-Slurm children. Per-remote and `distributed.conda_env`
+    # still win because we only set it when absent. Defensive getattr handles
+    # FakeConfig in tests + older config objects without the accessor.
+    project_conda_env = getattr(hsm_config, "get_conda_env", lambda: None)()
+    if project_conda_env and "conda_env" not in distributed_cfg:
+        distributed_cfg["conda_env"] = project_conda_env
 
     sources: List[ComputeSource] = []
     for remote_name, remote_config in remotes.items():

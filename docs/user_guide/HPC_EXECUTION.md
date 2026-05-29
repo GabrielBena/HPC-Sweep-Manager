@@ -244,6 +244,61 @@ isn't). Either `mkdir -p <sweeps_root>` ahead of time or remove the
 field. The error message names both possible config locations
 (`~/.hsm/config.yaml` and `<project>/.hsm/config.yaml`).
 
+### Project-level conda env — `paths.conda_env`
+
+HSM picks the python interpreter from a **conda/mamba env name** declared
+once per project:
+
+```yaml
+# <project>/.hsm/config.yaml
+paths:
+  train_script: train.py
+  conda_env: my-project       # the single source of truth
+```
+
+Every backend honors it:
+
+| Backend | Effective invocation |
+|---|---|
+| `--mode local` (LocalComputeSource) | `conda run -n my-project python train.py ...` |
+| `--mode array\|individual` (native SlurmComputeSource) | same — emitted inside the rendered sbatch script |
+| `--remote <alias>` (SSH or SSH-Slurm) | same — emitted in the wrapper that runs on the remote |
+| `--mode distributed` | same — every child source inherits |
+
+The rendered scripts source a shared conda/mamba init partial
+(`_conda_init.sh.j2`) before invoking python. It probes standard conda
+install paths and falls back to micromamba (including the binary in
+this repo's `bin/` for the S3IT layout), then defines a small
+`conda() { micromamba "$@"; }` bridge so the same `conda run -n <env>`
+syntax works regardless of which package manager is actually present.
+That means **non-interactive shells (sbatch, asyncssh) activate the
+env correctly without needing `~/.bashrc`**.
+
+**The convention:** pick one canonical env name per project, create it
+with that exact name on every machine the project will run on, set it
+once in `paths.conda_env`. Don't rely on shell activation before
+`hsm sweep run` — the env should be enforced from config, not from
+calling-shell state.
+
+**Per-source overrides** (rare): set
+`distributed.remotes.<alias>.conda_env` to use a different env on a
+specific remote (e.g., a CPU-only build of the env on one cluster).
+`distributed.conda_env` is a global default at the same precedence as
+per-remote. CLI `--conda-env <name>` wins over everything.
+
+**`hsm setup init`** detects the active shell env via
+`$CONDA_DEFAULT_ENV` and writes it into `paths.conda_env` automatically
+(skipping `base`). If no env is active when you run init, the field is
+left unset and the console prints a clear "add this field before
+running a sweep" note. Run init from inside your project's activated
+env and there's nothing else to do.
+
+**Deprecation note**: the older `paths.python_interpreter` field (an
+absolute path to a python binary) is deprecated. HSM still reads it
+for backward compat — but if both fields are set, `conda_env` wins
+silently. HSM logs a warning at load time when `python_interpreter` is
+present. Remove it from existing configs in favor of `conda_env`.
+
 ### Machine vs project config
 
 HSM loads two YAML files and merges them per top-level block:

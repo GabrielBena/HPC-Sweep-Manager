@@ -8,6 +8,7 @@ export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% for mod in modules %}
 module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed (no module system?)" >&2
 {% endfor %}
+{% include "_conda_init.sh.j2" %}
 {% for line in pre_script %}
 {{ line }}
 {% endfor %}

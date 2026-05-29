@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, render_template
+from ..remote.push_exec import resolve_run_prefix
 from .slurm_protocol import SLURM_STATE_MAP, parse_sbatch_job_id, render_sbatch_directives
 
 logger = logging.getLogger(__name__)
@@ -55,10 +56,21 @@ class SlurmComputeSource(ComputeSource):
         project_dir: str = ".",
         default_spec: Optional[ResourceSpec] = None,
         qos_whitelist: Optional[frozenset[str]] = None,
+        conda_env: Optional[str] = None,
     ):
         # 0 means "no client-side cap" — the cluster's own scheduler decides.
         super().__init__(name, "slurm", max_parallel_jobs or 10_000)
-        self.python_path = python_path
+        # When conda_env is set, wrap the supplied python_path in
+        # `conda run -n <env> python` and emit the shared conda init
+        # partial. Matches SSHSlurmComputeSource's behavior, so a single
+        # `paths.conda_env: <name>` in the project config gives both
+        # local and remote Slurm runs the same env without per-source
+        # duplication.
+        self.conda_env = conda_env
+        if conda_env:
+            self.python_path = resolve_run_prefix(conda_env, None)
+        else:
+            self.python_path = python_path
         self.script_path = script_path
         self.project_dir = project_dir
         self.default_spec = default_spec or ResourceSpec()

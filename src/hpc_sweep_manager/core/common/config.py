@@ -294,11 +294,54 @@ class HSMConfig:
             return None
 
         merged = _merge_machine_and_project(machine_data or {}, project_data or {})
+
+        # Deprecation warning: paths.python_interpreter superseded by paths.conda_env.
+        paths = merged.get("paths") or {}
+        if isinstance(paths, dict) and paths.get("python_interpreter"):
+            if paths.get("conda_env"):
+                logger.warning(
+                    "paths.python_interpreter is set AND paths.conda_env is set — "
+                    "conda_env wins, python_interpreter is ignored. Remove "
+                    "python_interpreter from your config to silence this warning."
+                )
+            else:
+                logger.warning(
+                    "paths.python_interpreter is DEPRECATED — use paths.conda_env "
+                    "to name your project's conda/mamba env. HSM will activate it "
+                    "for every backend (local/slurm/ssh) via `conda run -n <env>`."
+                )
         return cls(merged)
 
     def get_default_python_path(self) -> Optional[str]:
         """Get default Python interpreter path from config."""
         return self.config_data.get("paths", {}).get("python_interpreter")
+
+    def get_conda_env(self) -> Optional[str]:
+        """Project-level conda/mamba env name. The single source of truth.
+
+        Read from ``paths.conda_env``. When set, every backend that runs
+        ``python`` for this project activates this env: local (via
+        ``conda run -n <env> python``), native Slurm (same), SSH and
+        SSH-Slurm (via the existing ``resolve_run_prefix`` path).
+        Per-remote ``distributed.remotes.<alias>.conda_env`` still
+        overrides for the remote that names it (rare).
+
+        Returns ``None`` when unset or set to an empty string.
+
+        Convention: pin one env name per project, create it with the
+        same name on every machine the project will run on. The whole
+        config stays portable across machines this way.
+        """
+        value = self.config_data.get("paths", {}).get("conda_env")
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            logger.warning(
+                f"`paths.conda_env` must be a non-empty string; "
+                f"got {type(value).__name__}. Ignoring."
+            )
+            return None
+        return value.strip()
 
     def get_default_script_path(self) -> Optional[str]:
         """Get default training script path from config."""

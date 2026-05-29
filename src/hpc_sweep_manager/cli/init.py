@@ -43,6 +43,19 @@ def _detect_local_gpus() -> List[int]:
     return [int(m.group(1)) for m in re.finditer(r"^GPU\s+(\d+):", proc.stdout, re.M)]
 
 
+def _detect_active_conda_env() -> Optional[str]:
+    """Return the currently-activated conda env name, or None.
+
+    Reads ``CONDA_DEFAULT_ENV`` from the parent shell — typical when the
+    user runs ``hsm setup init`` from inside an activated env. Skips
+    ``base`` (rarely the project's real env) and any unparseable value.
+    """
+    env = os.environ.get("CONDA_DEFAULT_ENV", "").strip()
+    if not env or env == "base":
+        return None
+    return env
+
+
 def _detect_candidate_sweeps_roots() -> List[Tuple[Path, int]]:
     """Find writable directories with > 50 GB free under ``/mnt``, ``/data``, ``/scratch``.
 
@@ -508,8 +521,11 @@ def _extract_config_from_existing(
     Preserves project / paths / wandb settings. The old ``hpc:`` block is
     intentionally dropped — its ``default_walltime`` / ``default_resources``
     fields silently overrode the typed ``slurm:`` / ``local:`` blocks (see
-    CLAUDE.md gotcha #5b). Users should re-express any such defaults in
-    the typed scaffolds at the bottom of the new ``.hsm/config.yaml``.
+    CLAUDE.md gotcha #5b). The legacy ``paths.python_interpreter`` is also
+    dropped — replaced by ``paths.conda_env`` (the single source of truth
+    HSM now uses to activate the env on every backend). Falls back to
+    detecting the active env from ``$CONDA_DEFAULT_ENV``; if neither
+    source has a value, the user fills it in manually post-migration.
     """
     config = {}
 
@@ -517,9 +533,12 @@ def _extract_config_from_existing(
     config["project_name"] = project_section.get("name", project_path.name)
 
     paths_section = existing_config.get("paths", {})
-    config["python_path"] = paths_section.get("python_interpreter", "python")
     config["train_script"] = paths_section.get("train_script", "scripts/train.py")
     config["config_dir"] = paths_section.get("config_dir", "configs")
+    # Prefer an existing paths.conda_env, then the active shell env, then None.
+    config["conda_env"] = (
+        paths_section.get("conda_env") or _detect_active_conda_env()
+    )
 
     wandb_section = existing_config.get("wandb", {})
     if wandb_section:
@@ -572,25 +591,40 @@ def _display_project_info(info: Dict[str, Any], console: Console):
 
 
 def _interactive_configuration(project_info: Dict[str, Any], console: Console) -> Dict[str, Any]:
-    """Interactive configuration prompts."""
-    config = {}
+    """Interactive configuration prompts.
 
-    # Project name
+    The conda/mamba env name is the single source of truth for which
+    python this project's sweeps use (across local / slurm / ssh / ssh-slurm
+    backends). We DON'T prompt for an absolute python_interpreter path —
+    HSM activates the env at submit time via `conda run -n <env> python`.
+    """
+    config: Dict[str, Any] = {}
+
     default_name = project_info["project_root"].name
     config["project_name"] = Prompt.ask("Project name", default=default_name)
 
-    # Python interpreter
-    if project_info["python_path"]:
-        use_detected = Confirm.ask(
-            f"Use detected Python interpreter: {project_info['python_path']}?",
+    # conda env — detect from the active shell first, fall back to a prompt.
+    detected_env = _detect_active_conda_env()
+    if detected_env:
+        if Confirm.ask(
+            f"Use active conda env [bold cyan]{detected_env}[/bold cyan] for this project?",
             default=True,
-        )
-        if use_detected:
-            config["python_path"] = str(project_info["python_path"])
+        ):
+            config["conda_env"] = detected_env
         else:
-            config["python_path"] = Prompt.ask("Python interpreter path")
+            entered = Prompt.ask(
+                "Conda env name (leave empty to add later)", default=""
+            ).strip()
+            config["conda_env"] = entered or None
     else:
-        config["python_path"] = Prompt.ask("Python interpreter path", default="python")
+        console.print(
+            "[yellow]⚠[/yellow]  No active conda env detected — `hsm setup init` "
+            "works best from inside your project's activated env."
+        )
+        entered = Prompt.ask(
+            "Conda env name (leave empty to add later)", default=""
+        ).strip()
+        config["conda_env"] = entered or None
 
     # Training script
     if project_info["train_script"]:
@@ -626,14 +660,14 @@ def _interactive_configuration(project_info: Dict[str, Any], console: Console) -
 def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
     """Automatic configuration based on detected information.
 
-    No HPC/resource defaults — the typed ``local:`` / ``slurm:`` scaffolds
-    appended to ``.hsm/config.yaml`` are the canonical home for those.
+    Captures `conda_env` from the active shell's `$CONDA_DEFAULT_ENV` when
+    present — this is the single source of truth for which python every
+    backend (local/slurm/ssh) will activate. No `python_interpreter` field
+    is written; see [[CLAUDE.md gotcha 9]] for the convention.
     """
     return {
         "project_name": project_info["project_root"].name,
-        "python_path": str(project_info["python_path"])
-        if project_info["python_path"]
-        else "python",
+        "conda_env": _detect_active_conda_env(),
         "train_script": str(project_info["train_script"])
         if project_info["train_script"]
         else "scripts/train.py",
@@ -671,17 +705,23 @@ def _create_sweep_infrastructure(
         # per-remote `spec:` scaffolds appended below. Each --mode reads only
         # its own block (see CLAUDE.md gotcha #5b).
         hsm_config_path = hsm_dir / "config.yaml"
+        paths_block: Dict[str, Any] = {
+            "train_script": config["train_script"],
+            "config_dir": config["config_dir"],
+            "output_dir": "outputs",
+        }
+        # paths.conda_env is the single source of truth for which python
+        # every backend activates. Only write it when we have a real value
+        # — otherwise leave it out so the user explicitly fills it in
+        # later (and `hsm sweep run` warns clearly if it's still missing).
+        if config.get("conda_env"):
+            paths_block["conda_env"] = config["conda_env"]
         hsm_config = {
             "project": {
                 "name": config["project_name"],
                 "root": str(project_path),
             },
-            "paths": {
-                "python_interpreter": config["python_path"],
-                "train_script": config["train_script"],
-                "config_dir": config["config_dir"],
-                "output_dir": "outputs",
-            },
+            "paths": paths_block,
             "metadata": {
                 "created_by": "HSM (HPC Sweep Manager)",
                 "created_at": datetime.now().isoformat(),
@@ -704,6 +744,24 @@ def _create_sweep_infrastructure(
         console.print(
             f"  ✅ Created HSM configuration file: {hsm_config_path.relative_to(project_path)}"
         )
+        if config.get("conda_env"):
+            console.print(
+                f"  🐍 paths.conda_env: [bold cyan]{config['conda_env']}[/bold cyan] "
+                "— every backend will activate this env"
+            )
+        else:
+            console.print(
+                "  [yellow]⚠[/yellow]  paths.conda_env is [bold]not set[/bold]; "
+                "sweeps will fail until you add it"
+            )
+            console.print(
+                "     Edit "
+                f"[cyan]{hsm_config_path.relative_to(project_path)}[/cyan] and add:"
+            )
+            console.print(
+                "       [dim]paths:[/dim]\n"
+                "       [dim]  conda_env: <your-env-name>[/dim]"
+            )
         if gpu_indices:
             console.print(
                 f"  🎯 Detected {len(gpu_indices)} GPU(s) — `local:` scaffold pre-seeded with `gpus: 1`"

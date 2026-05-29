@@ -302,6 +302,24 @@ it's trying to reintroduce them, push back.
    machine (catches "config copied across machines, mount isn't
    present" — common when shared via git).
 
+10. **`paths.conda_env` is the single source of truth for the python env.**
+    Replaces the deprecated `paths.python_interpreter` (absolute python path).
+    `HSMConfig.get_conda_env()` reads it; the orchestrator forwards it to
+    LocalComputeSource and SlurmComputeSource constructors, and falls back
+    into `distributed.conda_env` for SSH/SSH-Slurm children that don't have
+    a per-remote override. Each compute source wraps the supplied
+    `python_path` in `conda run -n <env> python` via
+    `resolve_run_prefix(conda_env, None)` and renders the shared
+    `_conda_init.sh.j2` partial (uses_conda=True), so every backend
+    activates the env identically. `hsm setup init` detects
+    `$CONDA_DEFAULT_ENV` and writes the field automatically (skipping
+    `base`); if no env is active, the field is omitted and the console
+    prints a clear "add this before running a sweep" note. Convention:
+    pick one env name per project, create envs with that exact name on
+    every machine the project runs on. Don't rely on shell activation —
+    HSM enforces the env from config. `HSMConfig.load()` warns if a
+    legacy `paths.python_interpreter` is present.
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1

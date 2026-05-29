@@ -367,6 +367,44 @@ class TestResolveSweepDir:
             resolve_sweep_dir(cfg, "sweep_x", project_dir=tmp_path)
 
 
+# ----------------------------------------------------------- get_conda_env
+
+
+class TestCondaEnvAccessor:
+    """`paths.conda_env` is the single source of truth for which conda env
+    every backend activates. Project-portable: same name on every machine."""
+
+    def test_no_paths_block_returns_none(self):
+        assert HSMConfig({}).get_conda_env() is None
+
+    def test_no_field_returns_none(self):
+        assert HSMConfig({"paths": {"python_interpreter": "python"}}).get_conda_env() is None
+
+    def test_set_returns_string(self):
+        assert (
+            HSMConfig({"paths": {"conda_env": "my-project-env"}}).get_conda_env()
+            == "my-project-env"
+        )
+
+    def test_whitespace_stripped(self):
+        # Defensive: yaml may surface trailing whitespace.
+        assert (
+            HSMConfig({"paths": {"conda_env": "  my-env  "}}).get_conda_env()
+            == "my-env"
+        )
+
+    def test_empty_string_returns_none_with_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = HSMConfig({"paths": {"conda_env": "   "}}).get_conda_env()
+        assert result is None
+        assert any("non-empty string" in r.message for r in caplog.records)
+
+    def test_non_string_returns_none_with_warning(self, caplog):
+        with caplog.at_level("WARNING"):
+            result = HSMConfig({"paths": {"conda_env": ["a", "b"]}}).get_conda_env()
+        assert result is None
+
+
 # ----------------------------------------------------------- get_slurm_qos_whitelist
 
 

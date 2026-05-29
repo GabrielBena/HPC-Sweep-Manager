@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, render_template
+from ..remote.push_exec import resolve_run_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ class LocalComputeSource(ComputeSource):
         project_dir: str = ".",
         default_spec: Optional[ResourceSpec] = None,
         visible_gpus: Union[None, int, Sequence[int]] = None,
+        conda_env: Optional[str] = None,
     ):
         """Build a local slot-queue compute source.
 
@@ -75,9 +77,21 @@ class LocalComputeSource(ComputeSource):
         Use case: shared GPU boxes where (e.g.) ``GPU:0`` is reserved for
         interactive work — set ``visible_gpus=[1, 2, 3]`` and the slot
         queue never schedules a task on GPU:0.
+
+        ``conda_env``: when set, every task runs as
+        ``conda run -n <env> python ...`` and the rendered wrapper
+        script sources the shared conda/mamba init partial. Defending
+        against "I forgot to activate my env before running hsm" — the
+        env is enforced from config, not from the calling shell's
+        state. Matches the SSH/Slurm semantics: a project-level
+        ``paths.conda_env`` covers every backend.
         """
         super().__init__(name, "local", max(max_parallel_jobs, 1))
-        self.python_path = python_path
+        self.conda_env = conda_env
+        if conda_env:
+            self.python_path = resolve_run_prefix(conda_env, None)
+        else:
+            self.python_path = python_path
         self.script_path = script_path
         self.project_dir = project_dir
         self.default_spec = default_spec or ResourceSpec()
@@ -222,6 +236,7 @@ class LocalComputeSource(ComputeSource):
             cuda_visible_devices=cuda_visible,
             modules=list(effective_spec.modules),
             pre_script=list(effective_spec.pre_script),
+            uses_conda=bool(self.conda_env),
         )
         script_path = scripts_dir / f"{job_name}.sh"
         script_path.write_text(script_content)

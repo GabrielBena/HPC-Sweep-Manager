@@ -104,7 +104,7 @@ project:
   root: /home/<user>/code/my-research-project
 
 paths:
-  python_interpreter: python
+  conda_env: my-project           # single source of truth for the python env
   train_script: scripts/train.py
   config_dir: configs
 

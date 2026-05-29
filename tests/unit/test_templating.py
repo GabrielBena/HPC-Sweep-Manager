@@ -177,3 +177,84 @@ class TestCondaInitPartialRenders:
             "slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS
         )
         assert "HPC-Sweep-Manager/bin/micromamba" in rendered
+
+    def test_local_template_emits_init_block_when_uses_conda(self):
+        # LocalComputeSource template must also support the partial so
+        # `paths.conda_env` is honored end-to-end for --mode local.
+        rendered = render_template(
+            "local_compute_source.sh.j2",
+            uses_conda=True,
+            job_name="j",
+            job_id="abc",
+            task_dir="/tmp/task",
+            project_dir="/tmp/project",
+            python_path="conda run -n env python",
+            script_path="train.py",
+            params_hydra='"seed=1"',
+            wandb_group="g",
+            cuda_visible_devices=None,
+            modules=[],
+            pre_script=[],
+        )
+        assert "MAMBA_EXE" in rendered
+        assert "miniconda3/etc/profile.d/conda.sh" in rendered
+        assert "conda() { micromamba" in rendered
+
+    def test_local_template_skips_init_block_when_not_uses_conda(self):
+        rendered = render_template(
+            "local_compute_source.sh.j2",
+            uses_conda=False,
+            job_name="j",
+            job_id="abc",
+            task_dir="/tmp/task",
+            project_dir="/tmp/project",
+            python_path="/abs/python",
+            script_path="train.py",
+            params_hydra='"seed=1"',
+            wandb_group="g",
+            cuda_visible_devices=None,
+            modules=[],
+            pre_script=[],
+        )
+        assert "MAMBA_EXE" not in rendered
+        assert "miniconda3/etc/profile.d/conda.sh" not in rendered
+
+
+class TestComputeSourceCondaEnvWrap:
+    """End-to-end at the compute-source construction boundary: setting
+    `conda_env=` flips `python_path` to `conda run -n <env> python` AND
+    makes the rendered script include the init block.
+
+    Doesn't actually submit anything — checks the rendered text only.
+    """
+
+    def test_local_conda_env_wraps_python_path(self):
+        from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
+
+        src = LocalComputeSource(
+            python_path="/abs/python",
+            conda_env="my-project",
+        )
+        # conda_env wins over explicit python_path — env is the intent.
+        assert src.python_path == "conda run -n my-project python"
+
+    def test_local_no_conda_env_keeps_explicit_python(self):
+        from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
+
+        src = LocalComputeSource(python_path="/abs/python")
+        assert src.python_path == "/abs/python"
+
+    def test_slurm_conda_env_wraps_python_path(self):
+        from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
+
+        src = SlurmComputeSource(
+            python_path="/abs/python",
+            conda_env="my-project",
+        )
+        assert src.python_path == "conda run -n my-project python"
+
+    def test_slurm_no_conda_env_keeps_explicit_python(self):
+        from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
+
+        src = SlurmComputeSource(python_path="/abs/python")
+        assert src.python_path == "/abs/python"
