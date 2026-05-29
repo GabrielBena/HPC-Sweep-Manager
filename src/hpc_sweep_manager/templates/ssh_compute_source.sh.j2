@@ -6,16 +6,7 @@ set -e
 {% if cuda_visible_devices is not none %}
 export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% endif %}
-{% if uses_conda %}
-# Non-interactive ssh shells skip ~/.bashrc / ~/.zshrc, so `conda` is usually
-# not on PATH. Source it from the common install locations.
-for _c in "$HOME/miniconda3/etc/profile.d/conda.sh" \
-         "$HOME/anaconda3/etc/profile.d/conda.sh" \
-         "$HOME/.miniconda3/etc/profile.d/conda.sh" \
-         "/opt/conda/etc/profile.d/conda.sh"; do
-    [ -f "$_c" ] && . "$_c" && break
-done
-{% endif %}
+{% include "_conda_init.sh.j2" %}
 {% for mod in modules %}
 module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed" >&2
 {% endfor %}

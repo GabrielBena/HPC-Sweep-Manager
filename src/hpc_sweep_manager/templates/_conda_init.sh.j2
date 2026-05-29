@@ -1,0 +1,59 @@
+{# Shared conda / micromamba init block for non-interactive shells.
+
+   Non-interactive sbatch + non-interactive SSH shells skip ~/.bashrc /
+   ~/.zshrc, so `conda` is usually not on PATH and `MAMBA_EXE` is
+   usually not set. This block probes the standard install locations,
+   sources whatever it finds, and defines a `conda` bash function that
+   delegates to `micromamba` on mamba-only systems — so the rest of the
+   rendered script can always invoke `conda run -n <env> python ...`
+   regardless of which package manager the user actually has.
+
+   Caller-supplied context: requires `uses_conda` to be truthy to emit
+   anything; emits a no-op when false (no conda env requested).
+#}
+{% if uses_conda %}
+# --- HSM conda / micromamba init (non-interactive shells skip .bashrc) -------
+_hsm_conda_loaded=0
+for _c in "$HOME/miniconda3/etc/profile.d/conda.sh" \
+         "$HOME/anaconda3/etc/profile.d/conda.sh" \
+         "$HOME/miniforge3/etc/profile.d/conda.sh" \
+         "$HOME/.miniconda3/etc/profile.d/conda.sh" \
+         "/opt/conda/etc/profile.d/conda.sh"; do
+    if [ -f "$_c" ]; then
+        # shellcheck disable=SC1090
+        . "$_c"
+        _hsm_conda_loaded=1
+        break
+    fi
+done
+if [ "$_hsm_conda_loaded" -eq 0 ]; then
+    # Conda not found; try micromamba. Probe MAMBA_EXE (if exported), then
+    # common install locations. The last entry catches users who keep the
+    # binary inside this repo's bin/ — Gabriel's S3IT layout.
+    for _m in "${MAMBA_EXE:-}" \
+             "$HOME/.local/bin/micromamba" \
+             "$HOME/bin/micromamba" \
+             "$HOME/micromamba/bin/micromamba" \
+             "$HOME/mambaforge/bin/micromamba" \
+             "/usr/local/bin/micromamba" \
+             "$HOME/code/packages/HPC-Sweep-Manager/bin/micromamba"; do
+        if [ -n "$_m" ] && [ -x "$_m" ]; then
+            export MAMBA_EXE="$_m"
+            export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
+            # shellcheck disable=SC2046
+            eval "$("$_m" shell hook --shell bash --root-prefix "$MAMBA_ROOT_PREFIX" 2>/dev/null)"
+            # Make `conda run -n <env> ...` work by routing it to micromamba.
+            # This function is visible to `eval "$COMMAND"` later in the same shell.
+            conda() { micromamba "$@"; }
+            _hsm_conda_loaded=1
+            break
+        fi
+    done
+fi
+if [ "$_hsm_conda_loaded" -eq 0 ]; then
+    echo "warning: neither conda nor micromamba found in standard locations." >&2
+    echo "         If \`conda run -n <env>\` fails below, install one or set" >&2
+    echo "         MAMBA_EXE in your shell rc to point at the binary." >&2
+fi
+# ----------------------------------------------------------------------------
+{% endif %}

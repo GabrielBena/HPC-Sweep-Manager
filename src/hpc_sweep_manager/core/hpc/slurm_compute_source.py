@@ -28,6 +28,23 @@ from .slurm_protocol import SLURM_STATE_MAP, parse_sbatch_job_id, render_sbatch_
 logger = logging.getLogger(__name__)
 
 
+def _python_needs_conda_init(python_path: str) -> bool:
+    """Heuristic: does this `python_path` need the conda/mamba init block?
+
+    Returns ``True`` when ``python_path`` looks like a conda/mamba invocation
+    (e.g. ``conda run -n env python``, ``micromamba run -n env python``) — in
+    that case the rendered sbatch script needs to source a conda/mamba init
+    file so the command actually resolves on the compute node, where
+    non-interactive shells skip ``~/.bashrc``.
+
+    Returns ``False`` for fully-qualified python paths (e.g.
+    ``/home/user/miniconda3/bin/python``) — those don't need shell-level
+    activation; the python binary already knows its own env.
+    """
+    p = str(python_path).lower().strip()
+    return p.startswith("conda ") or p.startswith("mamba ") or p.startswith("micromamba ")
+
+
 class SlurmComputeSource(ComputeSource):
     def __init__(
         self,
@@ -132,6 +149,7 @@ class SlurmComputeSource(ComputeSource):
             script_path=self.script_path,
             params_hydra=params_to_hydra_args(params),
             wandb_group=wandb_group,
+            uses_conda=_python_needs_conda_init(self.python_path),
         )
         script_path = scripts_dir / f"{job_name}.slurm"
         script_path.write_text(script_content)
@@ -219,6 +237,7 @@ class SlurmComputeSource(ComputeSource):
             python_path=self.python_path,
             script_path=self.script_path,
             wandb_group=wandb_group,
+            uses_conda=_python_needs_conda_init(self.python_path),
         )
         script_path = scripts_dir / f"{job_name}.slurm"
         script_path.write_text(script_content)

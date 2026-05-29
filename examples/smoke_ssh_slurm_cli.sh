@@ -11,7 +11,8 @@
 # Usage (REMOTE is required — set it to your ~/.ssh/config alias for a Slurm
 # login node):
 #     REMOTE=uzh bash examples/smoke_ssh_slurm_cli.sh
-#     REMOTE=uzh CONDA_ENV=cpvr bash examples/smoke_ssh_slurm_cli.sh
+#     REMOTE=uzh CONDA_ENV=jax-smoke GPUS_PER_TASK=1 GPU_TYPE=L4 \
+#         bash examples/smoke_ssh_slurm_cli.sh
 #     REMOTE=uzh WORKDIR=/scratch/$USER/hsm-runs ARCHIVE_DIR=/shares/payvand.ini.uzh/hsm-archive \
 #         bash examples/smoke_ssh_slurm_cli.sh
 #     REMOTE=uzh bash examples/smoke_ssh_slurm_cli.sh --dry-only
@@ -23,7 +24,14 @@
 #   - $REMOTE is a working `~/.ssh/config` alias for a Slurm login node;
 #     `ssh $REMOTE hostname` should succeed.
 #   - The interpreter on $REMOTE: bare `python` on PATH by default, or set
-#     CONDA_ENV=<name> to run via `conda run -n <name> python`.
+#     CONDA_ENV=<name> to run via `conda run -n <name> python`. The smoke
+#     train.py probes `jax.devices()` to verify two things: (a) the conda/
+#     mamba init in the rendered sbatch script actually loaded the env;
+#     (b) the GPU spec actually allocated a CUDA device. Tested with the
+#     `jax-smoke` env on S3IT (jax[cuda12], created via micromamba).
+#   - GPU spec (optional): set GPUS_PER_TASK=1 GPU_TYPE=L4 to ask for one
+#     L4. L4s schedule faster than H100s — preferred for quick smoke runs.
+#     Pick H100 only when you want to verify H100-specific behavior.
 #   - $WORKDIR (optional) is a writable path on $REMOTE — defaults to
 #     `~/.hsm/runs/$USER`. For S3IT users, set to `/scratch/$USER/hsm-runs`
 #     to land sweeps on the 20TB ephemeral scratch.
@@ -95,16 +103,20 @@ fi
 mkdir -p "$WORK/sweeps" "$WORK/.hsm"
 cd "$WORK"
 
-# Tiny stdlib-only train.py — writes a sentinel + the args we got, so we can
-# confirm the push→sbatch→squeue→pull cycle picked up the params correctly.
+# Smoke train.py — proves three things in the sentinel:
+#   1. The conda/mamba init in the rendered sbatch script worked (jax importable).
+#   2. The GPU spec actually allocated a GPU (jax.devices() returns >=1 cuda dev).
+#   3. The push→sbatch→squeue→pull cycle picked up the params (seed in sentinel).
+# If jax isn't installed in the active env, sentinel records `jax_import=FAIL`
+# rather than crashing — the cycle still produces a sentinel for verification.
 cat > train.py <<'PYEOF'
 #!/usr/bin/env python3
-"""Smoke train.py for SSH-driven Slurm — prints env, sleeps, writes sentinel."""
+"""Smoke train.py — confirms conda env loaded AND GPU visible to jax."""
 import argparse
 import os
 import socket
-import sys
 import time
+import traceback
 from pathlib import Path
 
 parser = argparse.ArgumentParser()
@@ -126,6 +138,30 @@ print(f"  SLURM_ARRAY_TASK_ID = {os.environ.get('SLURM_ARRAY_TASK_ID', '<unset>'
 print(f"  CUDA_VISIBLE_DEVICES = {os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}", flush=True)
 print(f"  PWD = {os.getcwd()}", flush=True)
 print(f"  args = {args.overrides}", flush=True)
+
+# --- jax probe ---------------------------------------------------------------
+# Records whether the conda env activated correctly AND whether the GPU
+# allocation actually surfaced a CUDA device. On a CPU-only allocation
+# jax.devices() returns [CpuDevice(id=0)] — the sentinel reflects that.
+jax_status = "FAIL"
+jax_version = "<unimported>"
+jax_devices_repr = "<not probed>"
+jax_default_backend = "<unknown>"
+try:
+    import jax
+    jax_version = jax.__version__
+    devices = jax.devices()
+    jax_devices_repr = repr(devices)
+    jax_default_backend = jax.default_backend()
+    jax_status = "OK"
+    print(f"  jax {jax_version} devices: {devices}", flush=True)
+    print(f"  jax default_backend: {jax_default_backend}", flush=True)
+except Exception as e:
+    print(f"  jax probe FAILED: {type(e).__name__}: {e}", flush=True)
+    jax_devices_repr = f"{type(e).__name__}: {e}"
+    traceback.print_exc()
+# -----------------------------------------------------------------------------
+
 print("sleeping 3s ...", flush=True)
 time.sleep(3)
 
@@ -138,6 +174,10 @@ if output_dir:
         f"slurm_job_id={os.environ.get('SLURM_JOB_ID', '<unset>')}\n"
         f"slurm_array_task_id={os.environ.get('SLURM_ARRAY_TASK_ID', '<unset>')}\n"
         f"cuda={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}\n"
+        f"jax_import={jax_status}\n"
+        f"jax_version={jax_version}\n"
+        f"jax_default_backend={jax_default_backend}\n"
+        f"jax_devices={jax_devices_repr}\n"
         f"params={kv}\n"
         f"finished={time.ctime()}\n"
     )
@@ -249,9 +289,31 @@ echo
 echo "Tasks rsync'd back:"
 ls -la "$LATEST/tasks/" 2>/dev/null || echo "  (no tasks/ dir?)"
 echo
-echo "Sentinel files (proves push→sbatch→squeue→pull):"
+echo "Sentinel files (proves push→sbatch→squeue→pull + conda init + GPU):"
 find "$LATEST/tasks" -name 'sentinel.txt' -exec cat {} +
 echo
+
+# Surface the jax + GPU verdict from each sentinel.
+if find "$LATEST/tasks" -name 'sentinel.txt' -print -quit | grep -q .; then
+  echo "Conda/GPU verdict (per task):"
+  for f in "$LATEST"/tasks/*/sentinel.txt; do
+    task=$(basename "$(dirname "$f")")
+    j_imp=$(grep '^jax_import=' "$f" | cut -d= -f2-)
+    j_back=$(grep '^jax_default_backend=' "$f" | cut -d= -f2-)
+    cuda=$(grep '^cuda=' "$f" | cut -d= -f2-)
+    j_dev=$(grep '^jax_devices=' "$f" | cut -d= -f2-)
+    case "$j_imp:$j_back" in
+      OK:gpu*) verdict="[PASS] env loaded + GPU visible" ;;
+      OK:cpu)  verdict="[WARN] env loaded but jax sees CPU only" ;;
+      OK:*)    verdict="[WARN] env loaded; default backend=$j_back" ;;
+      FAIL:*)  verdict="[FAIL] jax import failed — conda init / env probably wrong" ;;
+      *)       verdict="[?] could not parse" ;;
+    esac
+    echo "  $task: $verdict"
+    echo "    CUDA_VISIBLE_DEVICES=$cuda  jax_devices=$j_dev"
+  done
+  echo
+fi
 
 if [[ -n "$ARCHIVE_DIR" ]]; then
   echo "Archive sentinel on $REMOTE ($ARCHIVE_DIR/$SWEEP_ID/.archived):"
