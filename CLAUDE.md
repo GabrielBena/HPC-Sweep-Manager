@@ -168,11 +168,22 @@ These were deliberately removed; resist resurrecting them.
 These are real bugs that have been fixed; if you see code that looks like
 it's trying to reintroduce them, push back.
 
-1. **Non-interactive SSH shells skip `~/.bashrc` / `~/.zshrc`** → `conda`
-   is usually not on PATH. The wrapper template
-   ([`templates/ssh_compute_source.sh.j2`](src/hpc_sweep_manager/templates/ssh_compute_source.sh.j2))
-   sources `conda.sh` from `~/miniconda3`/`~/anaconda3`/`~/.miniconda3`/
-   `/opt/conda` automatically when `conda_env` is set.
+1. **Non-interactive SSH shells AND sbatch compute nodes skip `~/.bashrc`** →
+   `conda` / `MAMBA_EXE` is not on PATH. All three rendered-script templates
+   (`ssh_compute_source.sh.j2`, `slurm_array.sh.j2`, `slurm_single.sh.j2`)
+   include the shared partial
+   [`templates/_conda_init.sh.j2`](src/hpc_sweep_manager/templates/_conda_init.sh.j2)
+   when `uses_conda=True`. The partial probes standard conda paths
+   (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`), then falls back
+   to micromamba via `$MAMBA_EXE` + common locations (including
+   `~/code/packages/HPC-Sweep-Manager/bin/micromamba` for the S3IT layout
+   where the binary lives inside an HSM clone), sources the right
+   shell-hook, and defines `conda() { micromamba "$@"; }` so the rest of
+   the script can keep emitting `conda run -n <env> python ...` uniformly.
+   SSHComputeSource + SSHSlurmComputeSource pass `uses_conda` based on
+   `bool(self.conda_env)`; native SlurmComputeSource uses
+   `_python_needs_conda_init(python_path)` (`True` if `python_path`
+   starts with `conda `/`mamba `/`micromamba `).
 
 2. **`~` in `output.dir=~/path` does NOT tilde-expand** inside double-quoted
    COMMAND strings (bash only expands `~` in cd/mkdir tokens). `SSHComputeSource.setup()`
