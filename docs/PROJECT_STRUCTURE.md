@@ -41,7 +41,7 @@ project:
   root: /path/to/project
 
 paths:
-  python_interpreter: python
+  conda_env: my-env
   train_script: scripts/train.py
   config_dir: configs
   output_dir: outputs

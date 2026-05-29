@@ -53,7 +53,6 @@ hsm sweep run [OPTIONS]
   --group TEXT                       W&B group name for this sweep.
   --priority INTEGER                 Job priority (HPC schedulers that support it).
   -p, --parallel-jobs INTEGER        Max concurrent jobs (local / remote slot count).
-  --show-output                      Stream stdout/stderr live (local mode only).
   --no-progress                      Suppress progress callback prints.
 ```
 
