@@ -15,6 +15,11 @@
 # other's content. Run this BEFORE starting a session (to pull the
 # other machine's latest) and AFTER ending one (to push your edits).
 #
+# Direction: this is LAPTOP-INITIATED. The laptop is the hub (it always
+# reaches anahita over the VPN); anahita has no stable route back to the
+# roaming laptop. So run this ON THE LAPTOP with the default REMOTE=anahita.
+# A session that ran on anahita is synced when the laptop next runs this.
+#
 # Safe to re-run; safe to interrupt; idempotent.
 #
 # Usage:
@@ -48,6 +53,19 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# This sync is laptop-initiated: the laptop is the hub that reaches anahita
+# (the always-on HQ with a stable VPN alias). The laptop roams and has no
+# stable alias, so there is no supported anahita->laptop path. If we're sitting
+# ON the machine we'd sync to, ssh-to-self just fails with a confusing "cannot
+# reach" — catch that here with actionable guidance instead.
+if [ "$(hostname -s 2>/dev/null)" = "$REMOTE" ] || [ "$(hostname 2>/dev/null)" = "$REMOTE" ]; then
+  echo "[sync-claude] You're on '$REMOTE' itself — this sync runs FROM the laptop." >&2
+  echo "[sync-claude]   • Normal path: run it on the laptop (REMOTE=anahita, the default)." >&2
+  echo "[sync-claude]   • A session that ran here is picked up by the laptop's next sync." >&2
+  echo "[sync-claude]   • To force it from here you'd need a reachable target: REMOTE=<host> $0" >&2
+  exit 1
+fi
 
 if ! ssh -o ConnectTimeout=8 -o BatchMode=yes "$REMOTE" 'true' 2>/dev/null; then
   echo "[sync-claude] cannot reach $REMOTE (VPN down? key missing?). Skipping." >&2

@@ -14,9 +14,15 @@ To keep memory, plans, and session transcripts coherent across both:
 at the start of a session (pulls the other machine's edits) and once
 before ending a session that wrote anything worth preserving (pushes
 yours). The script is bidirectional `rsync --update`; safe to re-run;
-exits non-zero (with a clear message) if the remote is unreachable
-over the VPN. See the `dual-location-workflow` memory entry for the
-full rule + edge cases.
+exits non-zero (with a clear message) if the remote is unreachable.
+
+**It is laptop-initiated** (default `REMOTE=anahita`). The laptop is the
+sync hub: it always reaches anahita over the VPN, whereas anahita has no
+stable route back to the roaming laptop. So run it **from the laptop**.
+A session that runs *on anahita* can't push its own state from there — the
+laptop's next sync pulls it. The script refuses to run on anahita itself
+(prints guidance instead of failing obscurely). See the
+`dual-location-workflow` memory entry for the full rule + edge cases.
 
 If you skip this and edit memory, the next agent on the other machine
 will start from a stale snapshot and re-derive things that were
