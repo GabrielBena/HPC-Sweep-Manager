@@ -21,7 +21,11 @@ doesn't re-investigate.
   count); and a reference to a `--show-output` flag that doesn't exist.
 - `docs/cli/README.md`: the same phantom `--show-output` flag in the flag table.
 
-## Open — need a maintainer's design call (not patched here)
+## Resolved in this branch (docs/conda-env-drift)
+
+These three were filed as needing a maintainer's design call. They were
+addressed in this same branch after a maintainer-side review; the original
+descriptions are kept for context, each followed by **Fixed:** noting where.
 
 ### P0 — `train_script` auto-detect can pick the wrong entrypoint, silently
 
@@ -30,44 +34,62 @@ doesn't re-investigate.
 `config_name` and guard logic. Nothing warned that >1 `train*.py` candidate
 existed. A user who doesn't set a per-sweep `script:` then runs the wrong script
 against the wrong config and gets plausible-but-wrong results with no error.
-- Suggest: when detection finds >1 candidate, warn + list them (or prompt under
-  `-i`), and echo the chosen script at `hsm sweep run` time.
-- Code: `core/common/path_detector.detect_train_script()`, surfaced via
-  `cli/init.py`.
+
+**Fixed:** `core/common/path_detector.py` gained `detect_train_script_candidates()`
+(deterministic ordering; skips vendored/cache dirs and structurally-detected
+virtualenvs, but not legitimately-named source dirs like `env/`). `cli/init.py`
+now warns + lists every candidate in the detection table and forces an explicit
+choice (`IntPrompt`) under interactive init when more than one exists.
+`cli/sweep.py` echoes `Training script: …` on every run (dry or real).
 
 ### P1a — `--dry-run` shows a launch command that isn't the one that runs
 
 With `conda_env` set, local tasks execute `conda run -n <env> python …` via a
-wrapper that sources `_conda_init.sh.j2` (`local_compute_source.py:116` + the
-template include). But `--dry-run` prints `Python: /…/envs/<env>/bin/python` — a
-bare interpreter path that bypasses the conda activation the real run performs.
-Copy-paste it to reproduce a failure and you get different behavior.
-- Suggest: dry-run should render the actual command (run-prefix + GPU pinning +
-  script + args) for at least the first task.
+wrapper that sources `_conda_init.sh.j2`. But `--dry-run` printed
+`Python: /…/envs/<env>/bin/python` — a bare interpreter path that bypasses the
+conda activation the real run performs. Copy-paste it to reproduce a failure and
+you get different behavior.
+
+**Fixed:** the `--dry-run` block in `cli/sweep.py` recomputes the run-prefix via
+`resolve_run_prefix(conda_env, …)` and prints the full first-task command
+(`cd <project> && conda run -n <env> python <script> <args> wandb.group=… output.dir=…`),
+matching what the wrapper executes. For `--mode distributed` it notes that
+per-child commands differ instead of printing one misleading line.
 
 ### P1b — `--dry-run` preview is illegible for a real (≈30-key) config
 
-The "Sweep Information" table elides the parameter-name column and truncates
-values to `…`; the "First N combinations" block is a line-wrapped dict-repr
-interleaved with the `args:` string. The thing a user most needs to verify
-before a multi-hour launch — **did my `paired:` groups zip correctly?** — is not
-legibly answerable from it.
-- Suggest: render paired groups explicitly, e.g.
-  `paired 'dilation': rec_steps=1↔alpha=1.0 | rec_steps=4↔alpha=0.5`, and don't
-  truncate values under `--dry-run`.
+The "Sweep Information" table elided the parameter-name column and truncated
+values to `…`; the combinations block was a line-wrapped dict-repr. The thing a
+user most needs to verify before a multi-hour launch — **did my `paired:` groups
+zip correctly?** — wasn't legibly answerable.
 
-## Minor
+**Fixed:** `cli/sweep.py` stops truncating values (`_format_param_values`), adds
+an `N` count column plus the originating group name, and renders an explicit
+zipped view via `_render_paired_groups`:
 
-- `docs/cli/README.md`'s flag table has wider drift than the one line removed
-  here: it lists `--priority` (not seen in `hsm sweep run --help`) and omits
-  `--gpus`, `-q/--quiet`, `-v/--verbose`. Worth a full reconcile against
-  `--help` output.
-- `hsm --version` is hardcoded `0.1.0` in two places (`pyproject.toml`,
-  `__init__.py`); it didn't change across today's `init`-template fix, so users
-  can't distinguish builds during the active refactor. A `0.1.0+<gitsha>` dev
-  suffix would help bug reports.
+    Paired groups (zipped):
+      dilation — 3 pair(s):
+        [0] model.rec_steps=1 · model.alpha=1.0
+        [1] model.rec_steps=2 · model.alpha=0.75
+
+### Bonus — placement / GPU-visibility preview
+
+A follow-up request: every run (dry or real) now prints a **Placement** block —
+where jobs land, the GPU allowlist actually in effect, and the resulting
+concurrency (parallel slots → ≈ runs per GPU). See
+`cli/sweep.py:_render_placement` + `local_compute_source.compute_gpu_slots` /
+`plan_layout`.
+
+## Minor — also resolved here
+
+- **Flag-table reconcile:** `docs/cli/README.md` now matches `hsm sweep run`
+  exactly — dropped the phantom `--priority` / `--show-output`, added `--gpus`,
+  `-q/--quiet`, `-v/--verbose`.
+- **Version string:** `hsm --version` now reports `0.1.0+g<sha>` from a source
+  checkout (`__init__.py:_resolve_version` / `_git_short_sha`), so dev builds are
+  distinguishable in bug reports. `pyproject.toml` keeps the base `0.1.0`.
 
 ---
 
-Reported by an agent driving the Comp-PVR project. Happy to convert P0/P1 into
-separate issues if that fits the workflow better.
+Reported by an agent driving the Comp-PVR project; addressed in the same branch
+after a maintainer-side adversarial review.

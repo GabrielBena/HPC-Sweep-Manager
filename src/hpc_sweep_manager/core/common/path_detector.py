@@ -25,9 +25,59 @@ class PathDetector:
                     return path
         return None
 
-    def detect_train_script(self) -> Optional[Path]:
-        """Find training script."""
-        candidates = [
+    # Non-hidden directories that match the entrypoint patterns but never hold
+    # the user's training script — vendored deps and caches. (Hidden dirs like
+    # .venv/.git/.tox are already excluded by the leading-dot check.) We do NOT
+    # hard-code 'env'/'venv'/'build'/'dist': those collide with legitimate
+    # source dirs — e.g. RL repos keep gym environments under env/ — so a
+    # name-match there would silently hide a real entrypoint. Actual
+    # virtualenvs are recognized structurally instead (see _is_virtualenv_dir).
+    _SCRIPT_SKIP_DIRS = frozenset({"__pycache__", "node_modules", "site-packages"})
+
+    @staticmethod
+    def _is_virtualenv_dir(path: Path) -> bool:
+        """True if ``path`` looks like a Python virtualenv (regardless of name)."""
+        return (path / "pyvenv.cfg").exists() or (path / "bin" / "activate").exists()
+
+    def _is_skippable_script(self, match: Path) -> bool:
+        """Whether an rglob hit lives somewhere we should never auto-detect from.
+
+        Skips hidden dirs, vendored/cache dirs, and anything inside a detected
+        virtualenv — but not legitimately-named source dirs.
+        """
+        rel_parts = match.relative_to(self.project_root).parts
+        if any(p.startswith(".") for p in rel_parts):
+            return True
+        ancestor = self.project_root
+        for part in rel_parts[:-1]:
+            ancestor = ancestor / part
+            if part in self._SCRIPT_SKIP_DIRS or self._is_virtualenv_dir(ancestor):
+                return True
+        return False
+
+    def detect_train_script_candidates(self) -> List[Path]:
+        """Return all plausible training-script entrypoints, best guess first.
+
+        ``candidates[0]`` is exactly what :meth:`detect_train_script` returns.
+        Callers that drive setup (``hsm setup init``) should warn when more
+        than one candidate exists — otherwise a repo that ships both
+        ``scripts/train.py`` and ``scripts/train_2d.py`` silently points the
+        user at whichever sorts first, against the wrong Hydra config.
+        """
+        seen: set = set()
+        found: List[Path] = []
+
+        def _add(path: Path) -> None:
+            if not path.is_file():
+                return
+            resolved = path.resolve()
+            if resolved in seen:
+                return
+            seen.add(resolved)
+            found.append(path)
+
+        # Priority candidates in canonical locations (ordered).
+        for candidate in [
             "scripts/train.py",
             "src/train.py",
             "train.py",
@@ -35,23 +85,23 @@ class PathDetector:
             "run.py",
             "scripts/main.py",
             "src/main.py",
-        ]
+        ]:
+            _add(self.project_root / candidate)
 
-        for candidate in candidates:
-            path = self.project_root / candidate
-            if path.exists() and path.is_file():
-                return path
-
-        # Also search for any python files with common training script patterns
+        # Then anything else matching common entrypoint patterns. Sorted for
+        # determinism; vendored/cache/hidden paths and virtualenvs are skipped.
         for pattern in ["*train*.py", "*main*.py", "*run*.py"]:
-            matches = list(self.project_root.rglob(pattern))
-            if matches:
-                # Return the first match in a reasonable location
-                for match in matches:
-                    if not any(part.startswith(".") for part in match.parts):
-                        return match
+            for match in sorted(self.project_root.rglob(pattern)):
+                if self._is_skippable_script(match):
+                    continue
+                _add(match)
 
-        return None
+        return found
+
+    def detect_train_script(self) -> Optional[Path]:
+        """Find the single best-guess training script (first candidate)."""
+        candidates = self.detect_train_script_candidates()
+        return candidates[0] if candidates else None
 
     def detect_python_path(self) -> Optional[Path]:
         """Detect Python interpreter."""
@@ -161,6 +211,7 @@ class PathDetector:
             "project_root": self.project_root,
             "config_dir": self.detect_config_dir(),
             "train_script": self.detect_train_script(),
+            "train_script_candidates": self.detect_train_script_candidates(),
             "python_path": self.detect_python_path(),
             "output_dir": self.detect_output_dir(),
             "hpc_system": self.detect_hpc_system(),

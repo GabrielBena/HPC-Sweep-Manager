@@ -11,6 +11,7 @@ from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.local.local_compute_source import (
     LocalComputeSource,
     _detect_gpus,
+    compute_gpu_slots,
 )
 
 
@@ -230,3 +231,64 @@ class TestConstruction:
         # The base class respects available_slots which uses max_parallel_jobs.
         src = LocalComputeSource(max_parallel_jobs=0)
         assert src.max_parallel_jobs == 1
+
+
+class TestComputeGpuSlots:
+    """The pure slot-math helper shared by setup() and plan_layout()."""
+
+    def test_one_gpu_per_job(self):
+        slots, count, gpu_mode = compute_gpu_slots([0, 1, 2, 3], 1, 8)
+        assert (slots, count, gpu_mode) == ([[0], [1], [2], [3]], 4, True)
+
+    def test_two_gpus_per_job_drops_remainder(self):
+        slots, count, gpu_mode = compute_gpu_slots([0, 1, 2], 2, 8)
+        # GPU 2 can't form a full slot of 2 → dropped.
+        assert (slots, count, gpu_mode) == ([[0, 1]], 1, True)
+
+    def test_allowlist_indices_preserved(self):
+        slots, count, gpu_mode = compute_gpu_slots([1, 2, 3], 1, 8)
+        assert slots == [[1], [2], [3]] and gpu_mode is True
+
+    def test_no_gpus_is_cpu_with_max_parallel(self):
+        assert compute_gpu_slots([], 0, 5) == ([], 5, False)
+
+    def test_gpus_present_but_zero_per_job_is_cpu(self):
+        assert compute_gpu_slots([0, 1, 2, 3], 0, 5) == ([], 5, False)
+
+    def test_too_few_gpus_for_one_slot_falls_back_to_cpu(self):
+        assert compute_gpu_slots([0], 2, 4) == ([], 4, False)
+
+
+class TestPlanLayout:
+    """plan_layout() previews placement with no side effects."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_no_gpus_reports_cpu_workers(self, no_gpus):
+        src = LocalComputeSource(max_parallel_jobs=3)
+        plan = await src.plan_layout()
+        assert plan["gpu_mode"] is False
+        assert plan["slot_count"] == 3
+        assert plan["detected_gpus"] == []
+
+    async def test_gpu_allowlist_and_slots(self, fake_gpus):
+        fake_gpus.set_count(4)
+        src = LocalComputeSource(
+            max_parallel_jobs=10,
+            default_spec=ResourceSpec(gpus=1),
+            visible_gpus=[1, 2, 3],
+        )
+        plan = await src.plan_layout()
+        assert plan["detected_gpus"] == [0, 1, 2, 3]
+        assert plan["visible_gpus"] == [1, 2, 3]
+        assert plan["gpu_mode"] is True
+        assert plan["slot_count"] == 3
+
+    async def test_has_no_side_effects(self, tmp_path, fake_gpus):
+        fake_gpus.set_count(2)
+        src = LocalComputeSource(max_parallel_jobs=2, default_spec=ResourceSpec(gpus=1))
+        await src.plan_layout()
+        # No sweep dir touched, no slot queue built, no detection cached.
+        assert src.sweep_dir is None
+        assert src._slot_queue is None
+        assert src._gpu_indices == []

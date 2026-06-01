@@ -53,6 +53,28 @@ async def _detect_gpus() -> List[int]:
     return indices
 
 
+def compute_gpu_slots(
+    gpu_indices: Sequence[int], gpus_per_job: int, max_parallel_jobs: int
+) -> tuple[List[List[int]], int, bool]:
+    """Partition a GPU allowlist into per-job slots (pure: no detection, no I/O).
+
+    Returns ``(gpu_slots, slot_count, gpu_mode)``. ``gpu_mode`` is True only
+    when at least one full slot of ``gpus_per_job`` GPUs fits; otherwise the
+    source runs ``max_parallel_jobs`` CPU workers (the slot list is empty).
+    Shared by :meth:`LocalComputeSource.setup` and the side-effect-free preview
+    :meth:`LocalComputeSource.plan_layout`, so the slot math has one home.
+    """
+    if gpu_indices and gpus_per_job > 0:
+        slots = [
+            list(gpu_indices[i : i + gpus_per_job])
+            for i in range(0, len(gpu_indices), gpus_per_job)
+            if len(gpu_indices[i : i + gpus_per_job]) == gpus_per_job
+        ]
+        if slots:
+            return slots, len(slots), True
+    return [], max_parallel_jobs, False
+
+
 class LocalComputeSource(ComputeSource):
     def __init__(
         self,
@@ -142,33 +164,25 @@ class LocalComputeSource(ComputeSource):
         else:
             self._gpu_indices = detected
         gpus_per_job = self.default_spec.gpus or 0
+        gpu_slots, self._slot_count, gpu_mode = compute_gpu_slots(
+            self._gpu_indices, gpus_per_job, self.max_parallel_jobs
+        )
 
         self._slot_queue = asyncio.Queue()
-        if self._gpu_indices and gpus_per_job > 0:
-            slots: List[List[int]] = []
-            for i in range(0, len(self._gpu_indices), gpus_per_job):
-                chunk = self._gpu_indices[i : i + gpus_per_job]
-                if len(chunk) == gpus_per_job:
-                    slots.append(chunk)
-            if not slots:
+        if gpu_mode:
+            logger.info(
+                f"LocalComputeSource: {self._slot_count} GPU slot(s), "
+                f"{gpus_per_job} GPU(s) each, from {len(self._gpu_indices)} detected"
+            )
+            for slot in gpu_slots:
+                self._slot_queue.put_nowait(slot)
+        else:
+            if self._gpu_indices and gpus_per_job > 0:
                 logger.warning(
                     f"Detected {len(self._gpu_indices)} GPU(s) but gpus_per_job={gpus_per_job} > "
-                    f"available; falling back to {self.max_parallel_jobs} CPU worker(s)"
+                    f"available; falling back to {self._slot_count} CPU worker(s)"
                 )
-                self._slot_count = self.max_parallel_jobs
-                for _ in range(self._slot_count):
-                    self._slot_queue.put_nowait(None)
-            else:
-                self._slot_count = len(slots)
-                logger.info(
-                    f"LocalComputeSource: {self._slot_count} GPU slot(s), "
-                    f"{gpus_per_job} GPU(s) each, from {len(self._gpu_indices)} detected"
-                )
-                for slot in slots:
-                    self._slot_queue.put_nowait(slot)
-        else:
-            self._slot_count = self.max_parallel_jobs
-            if self._gpu_indices and gpus_per_job == 0:
+            elif self._gpu_indices and gpus_per_job == 0:
                 logger.info(
                     f"LocalComputeSource: {len(self._gpu_indices)} GPU(s) detected but "
                     f"gpus_per_job=0 — running CPU-only"
@@ -179,6 +193,34 @@ class LocalComputeSource(ComputeSource):
         self.stats.health_status = "healthy"
         self.stats.last_health_check = datetime.now()
         return True
+
+    async def plan_layout(self) -> Dict[str, Any]:
+        """Preview the GPU/slot layout with no side effects (no dirs, no queue).
+
+        Mirrors what :meth:`setup` computes — detects GPUs, applies the
+        ``visible_gpus`` allowlist, partitions into slots — so a preview
+        (``hsm sweep run --dry-run``) can report the real placement and
+        concurrency. Returns ``detected_gpus`` / ``visible_gpus`` /
+        ``gpus_per_job`` / ``gpu_mode`` / ``slot_count``.
+        """
+        detected = await _detect_gpus()
+        if self._visible_gpus is not None and detected:
+            from ..remote.push_exec import normalize_gpu_allowlist
+
+            visible = normalize_gpu_allowlist(self._visible_gpus, detected)
+        else:
+            visible = detected
+        gpus_per_job = self.default_spec.gpus or 0
+        _, slot_count, gpu_mode = compute_gpu_slots(
+            visible, gpus_per_job, self.max_parallel_jobs
+        )
+        return {
+            "detected_gpus": detected,
+            "visible_gpus": visible,
+            "gpus_per_job": gpus_per_job,
+            "gpu_mode": gpu_mode,
+            "slot_count": slot_count,
+        }
 
     # ----------------------------------------------------------------- submit
 

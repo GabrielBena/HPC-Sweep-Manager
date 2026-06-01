@@ -44,16 +44,17 @@ hsm sweep run [OPTIONS]
   --mode [auto|local|array|individual|distributed|remote]
                                      Default: 'remote' if --remote given, else 'auto'
   --remote TEXT                      ssh-config alias to push the sweep to. Implies --mode remote.
-  --gpus TEXT                        Allowlist on the remote: 'all' (default), 'cpu', int N, or '0,1,3'.
-  -d, --dry-run                      Render scripts + show resolved spec; no submission.
+  --gpus TEXT                        GPU allowlist (local or remote): 'all' (default), 'cpu', int N, or '0,1,3'.
+  -d, --dry-run                      Show resolved spec + the exact task-1 command; no submission.
   --count-only                       Count parameter combinations and exit.
   --max-runs INTEGER                 Cap N for testing.
   --walltime TEXT                    HH:MM:SS (overrides the typed `local:` / `slurm:` block walltime).
   --resources TEXT                   Scheduler resource string (slurm `--flag=value` or PBS `select=...`).
   --group TEXT                       W&B group name for this sweep.
-  --priority INTEGER                 Job priority (HPC schedulers that support it).
   -p, --parallel-jobs INTEGER        Max concurrent jobs (local / remote slot count).
   --no-progress                      Suppress progress callback prints.
+  -v, --verbose                      Enable verbose (DEBUG) logging.
+  -q, --quiet                        Suppress non-error output.
 ```
 
 Examples:

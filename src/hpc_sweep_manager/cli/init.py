@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 import yaml
 
@@ -589,6 +589,23 @@ def _display_project_info(info: Dict[str, Any], console: Console):
 
     console.print(table)
 
+    # Loud warning when train-script detection is ambiguous: silently picking
+    # the wrong entrypoint runs the wrong script against the wrong config and
+    # yields plausible-but-wrong results with no error.
+    candidates = info.get("train_script_candidates") or []
+    if len(candidates) > 1:
+        console.print(
+            f"\n[yellow]⚠  {len(candidates)} possible training scripts found — "
+            f"auto-picked [bold]{candidates[0]}[/bold].[/yellow]"
+        )
+        for cand in candidates:
+            marker = "→" if cand == candidates[0] else " "
+            console.print(f"   {marker} {cand}")
+        console.print(
+            "   [dim]If that's the wrong one, set the right path under "
+            "[bold]paths.train_script[/bold] (or per-sweep [bold]script:[/bold]).[/dim]"
+        )
+
 
 def _interactive_configuration(project_info: Dict[str, Any], console: Console) -> Dict[str, Any]:
     """Interactive configuration prompts.
@@ -626,8 +643,22 @@ def _interactive_configuration(project_info: Dict[str, Any], console: Console) -
         ).strip()
         config["conda_env"] = entered or None
 
-    # Training script
-    if project_info["train_script"]:
+    # Training script. When detection is ambiguous, make the user choose the
+    # entrypoint explicitly rather than rubber-stamping the auto-pick.
+    candidates = project_info.get("train_script_candidates") or []
+    if len(candidates) > 1:
+        console.print("\n[yellow]Multiple training scripts detected — pick one:[/yellow]")
+        for idx, cand in enumerate(candidates, 1):
+            console.print(f"  {idx}. {cand}")
+        console.print(f"  {len(candidates) + 1}. (enter a different path)")
+        choice = IntPrompt.ask(
+            "Training script", default=1, choices=[str(i) for i in range(1, len(candidates) + 2)]
+        )
+        if choice <= len(candidates):
+            config["train_script"] = str(candidates[choice - 1])
+        else:
+            config["train_script"] = Prompt.ask("Training script path")
+    elif project_info["train_script"]:
         use_detected = Confirm.ask(
             f"Use detected training script: {project_info['train_script']}?",
             default=True,

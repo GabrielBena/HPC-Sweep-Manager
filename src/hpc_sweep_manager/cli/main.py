@@ -3,6 +3,7 @@
 import click
 from rich.console import Console
 
+from .. import __version__
 from ..core.common.utils import setup_logging
 from .init import setup  # Project setup: init, configure
 from .queue import queue  # Cluster queue inspection
@@ -13,7 +14,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="hsm")
+@click.version_option(version=__version__, prog_name="hsm")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress non-error output")
 @click.pass_context
