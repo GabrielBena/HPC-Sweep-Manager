@@ -57,7 +57,7 @@ sweeps/
 └── README.md
 ```
 
-Edit `.hsm/config.yaml` to point at your interpreter + training script.
+Edit `.hsm/config.yaml` to point at your conda env + training script.
 HSM auto-detects most of this on first run.
 
 ## Step 1 — define your sweep
@@ -124,11 +124,10 @@ mode for testing).
 
 ```bash
 hsm sweep run --mode local --parallel-jobs 4
-# Or, with GPU pinning if you have N GPUs and want one per task:
-hsm sweep run --mode local --parallel-jobs 4 --resources "--gpus=1"
+# GPU pinning in local mode: `local.gpus` (config) = per-task GPU count;
+# `--gpus` = which indices to use (default 'all'). No `--resources` needed.
+hsm sweep run --mode local --gpus 0,1,2,3
 ```
-
-`--show-output` streams stdout/stderr live (handy for small runs).
 
 On a box where the system disk is tight but you have a larger secondary
 mount, redirect sweep outputs there via the `local:` block:

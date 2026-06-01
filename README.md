@@ -133,7 +133,7 @@ project:
   root: /path/to/your/project
 
 paths:
-  python_interpreter: /path/to/python
+  conda_env: your-env
   train_script: train.py
   config_dir: configs
   output_dir: outputs

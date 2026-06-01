@@ -57,6 +57,49 @@ def _load_and_validate_config(
         return None
 
 
+def _format_param_values(values, limit: int = 110) -> str:
+    """Render a parameter's value list, ellipsizing only when genuinely long.
+
+    The old preview did ``str(values)[:50] + "..."`` — it truncated mid-list
+    and appended "..." even to short lists, which was illegible for a real
+    (~30-key) config. Here we show the full list and only ellipsize when it
+    actually exceeds ``limit``.
+    """
+    text = str(list(values))
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _render_paired_groups(paired_parameters: dict, console: Console) -> None:
+    """Show ``paired:`` groups as explicit zipped rows.
+
+    The merged combinations flatten away which params were zipped together, so
+    from the combo list alone a user can't verify — before a multi-hour launch
+    — that their paired groups lined up as intended. Renders, e.g.::
+
+        dilation — 2 pair(s):
+          [0] rec_steps=1 · alpha=1.0
+          [1] rec_steps=4 · alpha=0.5
+    """
+    if not paired_parameters:
+        return
+
+    # Regroup the flattened {param: info} dict back into its paired groups.
+    groups: dict = {}
+    for name, pinfo in paired_parameters.items():
+        key = (pinfo["group"], pinfo["group_name"])
+        groups.setdefault(key, []).append((name, list(pinfo["values"])))
+
+    console.print("\n[bold]Paired groups (zipped):[/bold]")
+    for (_, group_name), members in sorted(groups.items(), key=lambda kv: kv[0]):
+        n = len(members[0][1]) if members else 0
+        console.print(f"  [cyan]{group_name}[/cyan] — {n} pair(s):")
+        for i in range(n):
+            cells = " · ".join(f"{pname}={vals[i]}" for pname, vals in members)
+            console.print(f"    [{i}] {cells}")
+
+
 def _generate_parameter_combinations(
     config: "SweepConfig", max_runs: Optional[int], count_only: bool, console: Console
 ) -> Optional[list]:
@@ -76,17 +119,32 @@ def _generate_parameter_combinations(
     info = generator.get_parameter_info()
 
     table = Table(title="Sweep Information")
-    table.add_column("Parameter", style="cyan")
+    table.add_column("Parameter", style="cyan", no_wrap=True)
     table.add_column("Type", style="magenta")
+    table.add_column("N", style="yellow", justify="right")
     table.add_column("Values", style="green")
 
     for param_name, param_info in info["grid_parameters"].items():
-        table.add_row(param_name, "Grid", str(param_info["values"])[:50] + "...")
+        table.add_row(
+            param_name,
+            "grid",
+            str(param_info["count"]),
+            _format_param_values(param_info["values"]),
+        )
 
     for param_name, param_info in info["paired_parameters"].items():
-        table.add_row(param_name, "Paired", str(param_info["values"])[:50] + "...")
+        table.add_row(
+            param_name,
+            f"paired ({param_info['group_name']})",
+            str(param_info["count"]),
+            _format_param_values(param_info["values"]),
+        )
 
     console.print(table)
+
+    # Explicit zip view so a user can verify paired-group alignment pre-launch.
+    _render_paired_groups(info["paired_parameters"], console)
+
     console.print(f"\n[bold]Total combinations to run: {len(combinations)}[/bold]")
 
     return combinations
@@ -122,6 +180,177 @@ def _detect_project_paths(
         script_path = detector.detect_train_script()
 
     return python_path, script_path, project_dir
+
+
+def _describe_gpu_allowlist(allow) -> str:
+    """Human description of a ``--gpus``-style allowlist value."""
+    if allow is None:
+        return "all detected GPUs"
+    if isinstance(allow, bool):  # bool is an int subclass — guard first
+        return "all detected GPUs" if allow else "CPU only"
+    if isinstance(allow, int):
+        return "CPU only" if allow == 0 else f"first {allow} GPU(s)"
+    if isinstance(allow, (list, tuple)):
+        return f"GPUs {list(allow)}" if allow else "CPU only"
+    return str(allow)
+
+
+def _render_placement(
+    *,
+    source,
+    resolved_mode: str,
+    spec,
+    num_tasks: int,
+    remote_alias: Optional[str],
+    hsm_config: Optional["HSMConfig"],
+    console: Console,
+) -> None:
+    """Show where jobs land, the GPU allowlist, and the resulting concurrency.
+
+    Surfaced on both ``--dry-run`` and real runs so it's clear up front which
+    GPUs are visible, where the work is sent, and roughly how many sequential
+    waves (≈ runs per GPU) that implies. Fully guarded — a preview hiccup must
+    never abort a real submission.
+    """
+    import math
+
+    try:
+        gpus_per_task = spec.gpus or 0
+        console.print("\n[bold]Placement:[/bold]")
+
+        def _waves(slots: int) -> int:
+            return math.ceil(num_tasks / slots) if slots and num_tasks else num_tasks
+
+        if resolved_mode == "local":
+            import socket
+
+            console.print(f"  Target: this machine ([cyan]{socket.gethostname()}[/cyan])")
+            try:
+                plan = asyncio.run(source.plan_layout())
+            except Exception:
+                console.print("  GPUs: (could not probe nvidia-smi; resolved at run time)")
+                return
+            detected = plan["detected_gpus"]
+            if plan["gpu_mode"]:
+                slots = plan["slot_count"]
+                console.print(
+                    f"  GPUs: using {plan['visible_gpus']} "
+                    f"(of {detected or '[]'} detected) — {gpus_per_task} GPU/task"
+                )
+                console.print(
+                    f"  Concurrency: {slots} parallel slot(s) · {num_tasks} task(s) "
+                    f"→ ≈{_waves(slots)} wave(s) (~{_waves(slots)} run(s) per GPU)"
+                )
+            else:
+                workers = plan["slot_count"]
+                if detected and gpus_per_task == 0:
+                    why = f"{len(detected)} GPU(s) present but spec.gpus=0 — set local.gpus"
+                elif detected and gpus_per_task:
+                    why = f"allowlist {plan['visible_gpus']} smaller than {gpus_per_task} GPU/task"
+                else:
+                    why = "no GPUs detected"
+                console.print(f"  GPUs: CPU-only ({why})")
+                console.print(
+                    f"  Concurrency: {workers} CPU worker(s) · {num_tasks} task(s) "
+                    f"→ ≈{_waves(workers)} wave(s)"
+                )
+
+        elif resolved_mode in ("array", "individual"):
+            console.print("  Target: Slurm on this machine (sbatch + squeue)")
+            if resolved_mode == "array":
+                console.print(f"  Submission: one array job of {num_tasks} task(s)")
+            else:
+                console.print(f"  Submission: {num_tasks} individual sbatch job(s)")
+            if gpus_per_task:
+                gtype = f"{spec.gpu_type}:" if getattr(spec, "gpu_type", None) else ""
+                console.print(
+                    f"  GPUs: --gres=gpu:{gtype}{gpus_per_task} per task "
+                    "(Slurm schedules across the partition)"
+                )
+            else:
+                console.print("  GPUs: none requested (spec.gpus=0)")
+
+        elif resolved_mode == "remote":
+            host = getattr(source, "host", remote_alias)
+            is_slurm = source.source_type == "ssh_slurm_remote"
+            backend = "slurm (sbatch over SSH)" if is_slurm else "ssh (bash over SSH)"
+            console.print(
+                f"  Target: remote '[cyan]{remote_alias}[/cyan]' "
+                f"([cyan]{host}[/cyan]) — backend: {backend}"
+            )
+            cap = source.max_parallel_jobs
+            if is_slurm:
+                # Slurm remotes schedule GPUs via --gres, not a visible-GPU
+                # allowlist, so a "GPU allowlist" line would be meaningless here.
+                bound = (
+                    f" (client cap {cap})" if cap and cap < 10_000 else " (no client-side cap)"
+                )
+                console.print(f"  Concurrency: bounded by the remote Slurm scheduler{bound}")
+                if gpus_per_task:
+                    gtype = f"{spec.gpu_type}:" if getattr(spec, "gpu_type", None) else ""
+                    console.print(f"  GPUs/task: --gres=gpu:{gtype}{gpus_per_task}")
+                else:
+                    console.print("  GPUs: none requested (spec.gpus=0)")
+            else:
+                console.print(
+                    f"  GPU allowlist on remote: "
+                    f"{_describe_gpu_allowlist(getattr(source, '_gpus_config', None))}"
+                )
+                console.print(
+                    f"  Concurrency: {cap} parallel slot(s) on the remote "
+                    f"→ ≈{_waves(cap)} wave(s)"
+                )
+                if gpus_per_task:
+                    console.print(
+                        f"  GPUs/task: {gpus_per_task} (slots partition the remote's visible GPUs)"
+                    )
+            console.print("  [dim]Remote GPU count is probed when the run connects.[/dim]")
+
+        elif resolved_mode == "distributed":
+            dcfg = (hsm_config.config_data.get("distributed", {}) if hsm_config else {}) or {}
+            console.print("  Target: distributed across —")
+            ssh_local_slots = 0
+            # Match the runtime default: the builder gates the local child on
+            # local_max_jobs defaulting to 1 (distributed_compute_source.py).
+            local_jobs = dcfg.get("local_max_jobs", 1) or 0
+            if local_jobs:
+                console.print(
+                    f"    • local ([cyan]this machine[/cyan]): up to {local_jobs} slot(s)"
+                )
+                ssh_local_slots += local_jobs
+            for rname, rcfg in (dcfg.get("remotes", {}) or {}).items():
+                if not rcfg.get("enabled", True):
+                    continue
+                rbackend = (rcfg.get("backend") or "ssh").lower()
+                host = rcfg.get("host") or rname
+                if rbackend == "slurm":
+                    # Slurm children: GPUs via --gres in their spec, not an allowlist.
+                    rspec = rcfg.get("spec", {}) or {}
+                    gres = rspec.get("gpus")
+                    if gres:
+                        gtype = rspec.get("gpu_type")
+                        gpu_desc = f"--gres=gpu:{gtype + ':' if gtype else ''}{gres}"
+                    else:
+                        gpu_desc = "scheduler-managed"
+                    console.print(
+                        f"    • [cyan]{rname}[/cyan] ({host}, backend=slurm): "
+                        f"scheduler-bound, GPUs: {gpu_desc}"
+                    )
+                else:
+                    cap = rcfg.get("max_parallel_jobs") or 1
+                    ssh_local_slots += cap
+                    console.print(
+                        f"    • [cyan]{rname}[/cyan] ({host}, backend=ssh): "
+                        f"{cap} slot(s), GPUs: {_describe_gpu_allowlist(rcfg.get('gpus'))}"
+                    )
+            if ssh_local_slots:
+                console.print(
+                    f"  Concurrency: ~{ssh_local_slots} parallel slot(s) across local/SSH "
+                    f"children · {num_tasks} task(s) → ≈{_waves(ssh_local_slots)} wave(s) "
+                    "(Slurm children add scheduler-bound capacity)"
+                )
+    except Exception as e:  # never let a preview break a submission
+        logger.debug(f"placement preview failed: {e}")
 
 
 def _run_sweep_via_orchestrator(
@@ -191,23 +420,79 @@ def _run_sweep_via_orchestrator(
     )
     if resolved_mode != mode:
         console.print(f"[cyan](mode auto-resolved from {mode!r} → {resolved_mode!r})[/cyan]")
+    # Echo the chosen entrypoint on every run — auto-detection can pick the
+    # wrong train*.py silently (see PathDetector.detect_train_script_candidates).
+    console.print(f"[green]Training script: {getattr(source, 'script_path', script_path)}[/green]")
+
+    # Where the work lands + GPU allowlist + resulting concurrency (≈ runs/GPU).
+    _render_placement(
+        source=source,
+        resolved_mode=resolved_mode,
+        spec=spec,
+        num_tasks=len(combinations),
+        remote_alias=remote_alias,
+        hsm_config=hsm_config,
+        console=console,
+    )
 
     if dry_run:
+        from ..core.remote.push_exec import resolve_run_prefix
+
         console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
         console.print("\n[bold]Effective ResourceSpec:[/bold]")
         for k, v in spec.to_dict().items():
             if v in (None, [], {}, ()):
                 continue
             console.print(f"  {k:18s} = {v!r}")
-        console.print(f"\n[bold]Python:[/bold] {python_path}")
-        console.print(f"[bold]Script:[/bold] {script_path}")
-        console.print(f"[bold]Project dir:[/bold] {project_dir}")
-        if group:
-            console.print(f"[bold]W&B group:[/bold] {group}")
+
+        # Render the command as the wrapper actually runs it — including the
+        # conda run-prefix. The bare interpreter path printed before bypassed
+        # the conda activation the real run performs (`conda run -n <env>
+        # python …`), so a copy-paste reproduced different behavior (P1a).
+        # Local/Slurm sources store the resolved prefix on .python_path; SSH
+        # sources keep a raw path + .conda_env and build the prefix only at
+        # setup() time, so recompute it here uniformly.
+        if resolved_mode == "distributed":
+            # Children differ per backend/host (each applies its own conda env),
+            # so a single concrete command would misrepresent the run — the
+            # Placement block above already enumerates the children.
+            console.print(f"\n[bold]Project dir:[/bold] {project_dir}")
+            console.print(
+                "[dim]Per-child commands differ by backend/host (each applies its own "
+                "conda env) — see Placement above.[/dim]"
+            )
+        else:
+            src_conda_env = getattr(source, "conda_env", None)
+            if src_conda_env:
+                run_prefix = resolve_run_prefix(src_conda_env, getattr(source, "python_path", None))
+            else:
+                run_prefix = getattr(source, "python_path", python_path) or python_path
+            src_script = getattr(source, "script_path", script_path)
+
+            console.print(f"\n[bold]Run prefix:[/bold]  {run_prefix}")
+            console.print(f"[bold]Project dir:[/bold] {project_dir}")
+            if group:
+                console.print(f"[bold]W&B group:[/bold]  {group}")
+
+            if combinations:
+                # The wrapper templates also append wandb.group=/output.dir= per
+                # task; mirror them (with placeholders) so the shown command
+                # matches what actually runs rather than just the param subset.
+                suffix = f"wandb.group={group or '<sweep_id>'} output.dir=<task_dir>"
+                console.print("\n[bold]Command (task 1, as the wrapper runs it):[/bold]")
+                console.print(f"  cd {project_dir} && \\")
+                console.print(
+                    f"  {run_prefix} {src_script} "
+                    f"{params_to_hydra_args(combinations[0])} {suffix}"
+                )
+                if spec.gpus and resolved_mode == "local":
+                    console.print(
+                        "  [dim]# CUDA_VISIBLE_DEVICES is assigned per slot at runtime[/dim]"
+                    )
+
         console.print("\n[bold]First 3 parameter combinations:[/bold]")
         for i, combo in enumerate(combinations[:3], 1):
             console.print(f"  {i}. {combo}")
-            console.print(f"     args: {params_to_hydra_args(combo)}")
         console.print(f"\nTotal combinations: {len(combinations)}")
         return
 
