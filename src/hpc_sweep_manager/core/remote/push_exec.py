@@ -39,7 +39,8 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 #   into each command). The asymmetry decides the default: an unanchored
 #   exclude breaking a config group has NO consumer workaround (per-remote
 #   excludes only extend), while anchoring merely re-pushes nested junk —
-#   the weight globs still catch the heavy files, and a per-remote
+#   the weight globs still catch the heavy *checkpoint* files (nested wandb
+#   logs/media are not weights and will ship), and a per-remote
 #   ``rsync_excludes: [wandb]`` can re-add the unanchored form on purpose.
 #   Same reasoning for ``/checkpoints`` and ``/multirun`` (common
 #   config-group names). Dot-dirs (``.hydra``) and env dirs (``venv``)

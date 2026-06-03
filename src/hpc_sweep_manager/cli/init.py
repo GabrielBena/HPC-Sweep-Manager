@@ -1021,8 +1021,9 @@ def _display_next_steps(console: Console):
    For driving a Slurm cluster (e.g., S3IT) over SSH from off-cluster,
    set `backend: slurm` + `workdir` + `archive_dir` per-remote (`hsm docs`
    → SSH_EXECUTION / MULTI_CLUSTER).
-3. **Create sweep config**: Run `hsm setup configure` or edit
-   `sweeps/example_sweep.yaml` directly.
+3. **Create sweep config**: Run `hsm setup configure`, or copy
+   `sweeps/example_sweep.yaml` to your own file and edit that (re-running
+   `hsm setup init` regenerates the example; your own files are never touched).
 4. **Dry-run**: `hsm sweep run --config sweeps/example_sweep.yaml --dry-run`
 5. **Submit**: `hsm sweep run --config sweeps/example_sweep.yaml --mode array`
    (or `--mode local`, `--remote <alias>`, `--mode distributed`)

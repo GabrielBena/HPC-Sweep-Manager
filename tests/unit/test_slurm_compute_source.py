@@ -511,9 +511,18 @@ class TestArrayParamsExtractionFunctional:
         proj.mkdir()
         tasks_dir = tmp_path / "tasks"
         params_file = tmp_path / "parameter_combinations.json"
+        # "note" carries a literal '|' — the tokens|index protocol must split
+        # on the LAST pipe, not the first, or values with pipes corrupt both
+        # the overrides and the parsed global index.
         params_file.write_text(
             json.dumps(
-                [{"index": 1, "global_index": 1, "params": {"lr": 0.01, "seed": 7}}]
+                [
+                    {
+                        "index": 1,
+                        "global_index": 1,
+                        "params": {"lr": 0.01, "seed": 7, "note": "a|b"},
+                    }
+                ]
             )
         )
         # Training stub: records its argv so we can assert the overrides
@@ -563,6 +572,7 @@ class TestArrayParamsExtractionFunctional:
         argv = args_out.read_text().splitlines()
         assert "lr=0.01" in argv
         assert "seed=7" in argv
+        assert "note=a|b" in argv  # pipe in a VALUE survives the index split
         # The tempfile snippet also dropped the self-describing params.yaml.
         assert (tasks_dir / "task_1" / "params.yaml").is_file()
 
