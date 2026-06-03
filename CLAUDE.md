@@ -417,7 +417,8 @@ has the per-feature reference.
 ## Recently landed (2026-06-03) — S3IT first-use field-report fixes
 
 Eight issues from the first real SSH-Slurm → S3IT run
-(`FIRST_USE_FEEDBACK_S3IT.md`), landed in 3 commits. Plan:
+([`docs/dev/field-reports/2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md)),
+landed in 3 commits. Plan:
 `/home/gbena/.claude/plans/we-have-been-running-silly-pine.md`.
 
 | # | Fix | Where |
