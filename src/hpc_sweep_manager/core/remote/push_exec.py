@@ -23,19 +23,34 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
     "*.ckpt",
     "*.pt",
     "*.pth",
-    "checkpoints",
-    "multirun",
+    "/checkpoints",
+    "/multirun",
     ".hydra",
-    "wandb",
+    "/wandb",
 )
 # Per-remote ``rsync_excludes:`` is layered ON TOP of these (extends, doesn't
 # replace — see SSHComputeSource.__init__). Scope notes:
+# - Output-DIR names are anchored to the transfer root (leading ``/`` =
+#   ``<project>/`` since the push is ``rsync … <local>/ host:<remote>/``).
+#   An unanchored ``wandb`` also matches ``configs/wandb/`` — a Hydra config
+#   GROUP — and silently strips it from the push; every task then dies with
+#   ``MissingConfigException`` (field report 2026-06-03, and *guaranteed*
+#   load-bearing for ``wandb`` because the templates inject ``wandb.group=``
+#   into each command). The asymmetry decides the default: an unanchored
+#   exclude breaking a config group has NO consumer workaround (per-remote
+#   excludes only extend), while anchoring merely re-pushes nested junk —
+#   the weight globs still catch the heavy files, and a per-remote
+#   ``rsync_excludes: [wandb]`` can re-add the unanchored form on purpose.
+#   Same reasoning for ``/checkpoints`` and ``/multirun`` (common
+#   config-group names). Dot-dirs (``.hydra``) and env dirs (``venv``)
+#   stay unanchored — they legitimately appear nested and are never
+#   config-group names.
 # - NOT excluding a bare ``outputs`` (too easy to clobber a legit source dir of
 #   that name); only ``sweeps/outputs`` is. Add ``outputs/`` per-remote if your
 #   project dumps artifacts there.
 # - NOT excluding ``*.pkl`` — pickle is as often INPUT data as output, and a
 #   default exclude can't be un-set per-remote. The field report's bloat was
-#   ``.pkl`` *checkpoints*, already covered by the ``checkpoints`` dir exclude.
+#   ``.pkl`` *checkpoints*, already covered by the ``/checkpoints`` dir exclude.
 # - Weight globs (``*.pt``/``*.pth``/``*.ckpt``) + artifact dirs assume the
 #   output convention; if your repo commits one as a training INPUT it won't
 #   ship — rename it (no un-exclude mechanism yet).

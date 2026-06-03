@@ -148,13 +148,20 @@ config overrides global `distributed.*`; global overrides defaults.
 
 `DEFAULT_RSYNC_EXCLUDES` already skips the usual ML artifacts from the code
 push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.ckpt`,
-`checkpoints/`, `multirun/`, `.hydra`, `wandb`. Your `rsync_excludes` is
-**layered on top** of these (it extends, doesn't replace — so you keep `.git`
-etc. for free). A bare `outputs/` and `*.pkl` are **not** excluded by default
-(an `outputs/` source dir is easy to clobber, and `.pkl` is as often input data
-as output); add them to `rsync_excludes` as shown above if they're artifacts in
-your project. There's no way yet to *un-exclude* a default, so if you commit a
-pretrained `checkpoints/` as a training INPUT, rename it.
+`/checkpoints`, `/multirun`, `.hydra`, `/wandb`. The output-dir names are
+**anchored to the project root** (the leading `/`): an unanchored `wandb`
+would also match a `configs/wandb/` Hydra config *group* and silently strip
+it from the push — every task then fails with `MissingConfigException`.
+Nested same-name dirs (`sub/wandb/`) therefore *do* ship; the weight globs
+still catch the heavy files, and you can add an unanchored `wandb` to your
+per-remote `rsync_excludes` if you want the broader match back. Your
+`rsync_excludes` is **layered on top** of the defaults (it extends, doesn't
+replace — so you keep `.git` etc. for free). A bare `outputs/` and `*.pkl`
+are **not** excluded by default (an `outputs/` source dir is easy to clobber,
+and `.pkl` is as often input data as output); add them to `rsync_excludes` as
+shown above if they're artifacts in your project. There's no way yet to
+*un-exclude* a default, so if you commit a pretrained `/checkpoints` as a
+training INPUT, rename it.
 
 ## Driving Slurm over SSH (`backend: slurm`)
 
