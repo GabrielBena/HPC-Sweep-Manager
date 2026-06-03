@@ -160,7 +160,7 @@ class TestBuildSshSource:
         )
         assert "my_artifacts/" in src.rsync_excludes
         assert ".git" in src.rsync_excludes  # defaults preserved
-        assert "wandb" in src.rsync_excludes
+        assert "/wandb" in src.rsync_excludes  # anchored since B2 (2026-06-03)
         # No duplicates introduced by the extend.
         assert len(src.rsync_excludes) == len(set(src.rsync_excludes))
 
