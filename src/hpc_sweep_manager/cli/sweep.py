@@ -842,8 +842,10 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     No dependence on the original launcher's in-memory state: the manifest
     carries the source-reconstruction fields + resolved remote paths + job ids.
     Idempotent — rsync only transfers new task dirs; re-running picks up tasks
-    that finished since.
+    that finished since (and is a no-op once the remote dir is cleaned).
     """
+    import shlex
+
     from ..core.common.compute_source import TERMINAL_STATES, JobInfo
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
@@ -853,8 +855,29 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         console.print(f"[red]Could not connect to {source.host} to collect.[/red]")
         return
     try:
+        # Idempotency: if the remote sweep dir is gone, a prior successful
+        # collect already pulled + archived + cleaned it. Re-running is a no-op.
+        exists = await source._ssh_run(
+            f"test -d {shlex.quote(source._remote_sweep_dir)}", check=False
+        )
+        if (exists.returncode or 0) != 0:
+            console.print(
+                f"[green]Remote sweep dir already cleaned on {source.host} — "
+                f"nothing left to collect (a prior collect finished it).[/green]"
+            )
+            return
+
         job_ids = manifest.get("job_ids", [])
-        statuses = {jid: await source._terminal_state_via_sacct(jid) for jid in job_ids}
+        num_tasks = manifest.get("num_tasks", len(job_ids))
+        # For an array submission job_ids is one parent id covering num_tasks.
+        task_hint = f" ({num_tasks} tasks)" if num_tasks != len(job_ids) else ""
+        # Classify via get_job_status (squeue FIRST, then sacct) — NOT
+        # _terminal_state_via_sacct directly. A still-queued task (e.g. held
+        # behind a maintenance reservation) is in squeue → RUNNING → routed to
+        # the pull-only branch below. Going straight to sacct would hit its
+        # optimistic "empty → COMPLETED" fallback (accounting lags PENDING jobs)
+        # and then archive/`rm -rf` the remote dir of a task that never ran.
+        statuses = {jid: await source.get_job_status(jid) for jid in job_ids}
         terminal = {j: s for j, s in statuses.items() if s in TERMINAL_STATES}
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
         # Seed completed_jobs so collect_results computes any_failed correctly.
@@ -866,7 +889,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             # Partial: pull what's done; keep remote + skip archive (not done yet).
             rc = await source._pull_tasks()
             console.print(
-                f"[yellow]{len(terminal)}/{len(job_ids)} job(s) terminal; "
+                f"[yellow]{len(terminal)}/{len(job_ids)} job(s){task_hint} terminal; "
                 f"{len(running)} still running.[/yellow]"
             )
             console.print(
@@ -878,7 +901,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             failed = sum(1 for s in terminal.values() if s == "FAILED")
             colour = "red" if failed else "green"
             console.print(
-                f"[{colour}]All {len(job_ids)} job(s) terminal: "
+                f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal: "
                 f"{len(terminal) - failed} COMPLETED, {failed} FAILED.[/{colour}]"
             )
             archived = " + archived" if source.archive_dir else ""
@@ -925,6 +948,13 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
         console.print(
             f"[red]collect supports backend=slurm sweeps only "
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
+        )
+        return
+    missing = [k for k in ("remote_sweep_dir", "host", "job_ids") if not manifest.get(k)]
+    if missing:
+        console.print(
+            f"[red]Manifest {manifest_path} is missing required field(s): "
+            f"{', '.join(missing)} — can't re-attach.[/red]"
         )
         return
     try:

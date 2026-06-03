@@ -118,6 +118,45 @@ class TestCollectViaManifest:
         assert not any(c.startswith("rm -rf") for c in conn.run_calls)
 
     @pytest.mark.asyncio
+    async def test_pending_in_squeue_is_not_deleted(self, tmp_path, patched):
+        # BLOCKER regression: a task still PENDING in squeue (e.g. held behind a
+        # maintenance reservation, not yet in sacct) must be treated as running —
+        # NEVER classified COMPLETED via the sacct fallback and then deleted.
+        conn, rsync_calls = patched
+        conn.add("squeue -j 1", _Result(0, stdout=""))  # job 1 gone → sacct
+        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))  # job 1 done
+        conn.add("squeue -j 2", _Result(0, stdout="PENDING\n"))  # job 2 queued
+        buf = io.StringIO()
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1",
+            _manifest(tmp_path, job_ids=["1", "2"]),
+            Console(file=buf, width=200),
+        )
+        out = buf.getvalue()
+        assert "still running" in out
+        assert "1/2" in out
+        assert rsync_calls  # pulled the finished task
+        # The remote must NOT be deleted while a task is still queued.
+        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+
+    @pytest.mark.asyncio
+    async def test_already_cleaned_remote_is_noop(self, tmp_path, patched):
+        # Re-running after a successful collect (remote dir gone) is a clean no-op,
+        # not a "pull reported an error".
+        conn, rsync_calls = patched
+        conn.add("test -d", _Result(1, stdout=""))  # remote sweep dir gone
+        buf = io.StringIO()
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1",
+            _manifest(tmp_path, job_ids=["1", "2"]),
+            Console(file=buf, width=200),
+        )
+        out = buf.getvalue()
+        assert "already cleaned" in out.lower() or "nothing left" in out.lower()
+        assert rsync_calls == []  # nothing pulled
+        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+
+    @pytest.mark.asyncio
     async def test_partial_running_pulls_only(self, tmp_path, patched):
         conn, rsync_calls = patched
         conn.add("sacct", _Result(0, stdout="COMPLETED\n"))

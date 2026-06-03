@@ -23,16 +23,22 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
     "*.ckpt",
     "*.pt",
     "*.pth",
-    "*.pkl",
     "checkpoints",
     "multirun",
     ".hydra",
     "wandb",
 )
-# NOTE: deliberately NOT excluding a bare ``outputs`` — too easy to clobber a
-# legit source dir named ``outputs``. Only ``sweeps/outputs`` is excluded. A
-# project that keeps artifacts under ``outputs/`` should add it to the
-# per-remote ``rsync_excludes:`` list (see docs/user_guide/SSH_EXECUTION.md).
+# Per-remote ``rsync_excludes:`` is layered ON TOP of these (extends, doesn't
+# replace — see SSHComputeSource.__init__). Scope notes:
+# - NOT excluding a bare ``outputs`` (too easy to clobber a legit source dir of
+#   that name); only ``sweeps/outputs`` is. Add ``outputs/`` per-remote if your
+#   project dumps artifacts there.
+# - NOT excluding ``*.pkl`` — pickle is as often INPUT data as output, and a
+#   default exclude can't be un-set per-remote. The field report's bloat was
+#   ``.pkl`` *checkpoints*, already covered by the ``checkpoints`` dir exclude.
+# - Weight globs (``*.pt``/``*.pth``/``*.ckpt``) + artifact dirs assume the
+#   output convention; if your repo commits one as a training INPUT it won't
+#   ship — rename it (no un-exclude mechanism yet).
 
 
 def normalize_gpu_allowlist(

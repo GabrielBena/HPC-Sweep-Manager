@@ -306,13 +306,20 @@ class SlurmComputeSource(ComputeSource):
         except (FileNotFoundError, OSError) as e:
             logger.debug(f"sacct unavailable for job {job_id}: {e}; assuming COMPLETED")
             return "COMPLETED"
-        if result.returncode == 0:
-            state = parse_sacct_state(result.stdout or "")
+        rc = result.returncode
+        state = parse_sacct_state(result.stdout or "") if rc == 0 else None
         if state is None:
-            logger.debug(
-                f"sacct returned no state for job {job_id}; assuming COMPLETED "
-                f"(accounting may be disabled)"
-            )
+            if rc != 0:
+                stderr = (result.stderr or "").strip() or "no stderr"
+                logger.warning(
+                    f"sacct failed for job {job_id} (rc={rc}): {stderr} — "
+                    f"assuming COMPLETED; verify it didn't fail."
+                )
+            else:
+                logger.debug(
+                    f"sacct returned no state for job {job_id}; assuming COMPLETED "
+                    f"(accounting may be disabled)"
+                )
             return "COMPLETED"
         return state
 

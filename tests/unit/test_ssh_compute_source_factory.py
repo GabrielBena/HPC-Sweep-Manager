@@ -148,6 +148,22 @@ class TestBuildSshSource:
         )
         assert "only_global" in src.rsync_excludes
 
+    def test_rsync_excludes_extends_defaults(self):
+        # Per-remote excludes are layered ON TOP of DEFAULT_RSYNC_EXCLUDES, not
+        # a replacement — otherwise adding `outputs/` would silently push `.git`.
+        from hpc_sweep_manager.core.remote.push_exec import DEFAULT_RSYNC_EXCLUDES
+
+        src = build_ssh_source(
+            name="anahita",
+            remote_cfg={"rsync_excludes": ["my_artifacts/"]},
+            **self.DEFAULTS,
+        )
+        assert "my_artifacts/" in src.rsync_excludes
+        assert ".git" in src.rsync_excludes  # defaults preserved
+        assert "wandb" in src.rsync_excludes
+        # No duplicates introduced by the extend.
+        assert len(src.rsync_excludes) == len(set(src.rsync_excludes))
+
     def test_default_spec_passed_through(self):
         spec = ResourceSpec(gpus=2, modules=("foo",))
         src = build_ssh_source(

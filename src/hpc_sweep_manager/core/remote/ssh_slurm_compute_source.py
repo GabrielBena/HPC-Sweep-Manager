@@ -139,7 +139,11 @@ class SSHSlurmComputeSource(ComputeSource):
         self.archive_on = archive_on
         self.default_spec = default_spec or ResourceSpec()
         self.rsync_excludes = (
-            tuple(rsync_excludes) if rsync_excludes is not None else DEFAULT_RSYNC_EXCLUDES
+            # Extend the defaults (dedup, order-preserving) rather than replace —
+            # so a user adding `outputs/` doesn't silently start pushing `.git`.
+            tuple(dict.fromkeys((*DEFAULT_RSYNC_EXCLUDES, *rsync_excludes)))
+            if rsync_excludes is not None
+            else DEFAULT_RSYNC_EXCLUDES
         )
         self.keep_remote_on_success = keep_remote_on_success
         self.qos_whitelist = qos_whitelist
@@ -213,6 +217,11 @@ class SSHSlurmComputeSource(ComputeSource):
         paths; paths containing spaces or glob metacharacters are unsupported
         (and don't occur in practice).
         """
+        # Only round-trip when there's something a shell would expand. Plain
+        # absolute paths pass through (no wasted SSH call; a literal glob isn't
+        # silently multi-expanded into a corrupted dest).
+        if "~" not in path and "$" not in path:
+            return path
         result = await self._ssh_run(f"echo {path}", check=False)
         lines = (result.stdout or "").strip().splitlines()
         first = lines[0].strip() if lines else ""
@@ -629,14 +638,22 @@ class SSHSlurmComputeSource(ComputeSource):
         result = await self._ssh_run(
             f"sacct -j {shlex.quote(job_id)} -n -X -o State", check=False
         )
-        state = None
-        if (result.returncode or 0) == 0:
-            state = parse_sacct_state(result.stdout or "")
+        rc = result.returncode or 0
+        state = parse_sacct_state(result.stdout or "") if rc == 0 else None
         if state is None:
-            logger.debug(
-                f"sacct returned no state for job {job_id} on {self.host}; "
-                f"assuming COMPLETED (accounting may be disabled)"
-            )
+            if rc != 0:
+                # sacct errored (not just "no rows") — surface it: this is the
+                # rare window where a real FAILED could be missed.
+                stderr = (result.stderr or "").strip() or "no stderr"
+                logger.warning(
+                    f"sacct failed for job {job_id} on {self.host} (rc={rc}): "
+                    f"{stderr} — assuming COMPLETED; verify it didn't fail."
+                )
+            else:
+                logger.debug(
+                    f"sacct returned no state for job {job_id} on {self.host}; "
+                    f"assuming COMPLETED (accounting may be disabled)"
+                )
             return "COMPLETED"
         return state
 

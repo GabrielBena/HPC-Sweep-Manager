@@ -97,7 +97,9 @@ class SSHComputeSource(ComputeSource):
         self._gpus_config = gpus
         self.default_spec = default_spec or ResourceSpec()
         self.rsync_excludes = (
-            tuple(rsync_excludes)
+            # Extend the defaults (dedup, order-preserving) rather than replace —
+            # so a user adding `outputs/` doesn't silently start pushing `.git`.
+            tuple(dict.fromkeys((*DEFAULT_RSYNC_EXCLUDES, *rsync_excludes)))
             if rsync_excludes is not None
             else DEFAULT_RSYNC_EXCLUDES
         )
@@ -152,6 +154,9 @@ class SSHComputeSource(ComputeSource):
         literal ``$USER`` dir. A remote-shell ``echo`` (unquoted) expands both
         ``~`` and ``$VAR`` in one shot.
         """
+        # Only round-trip when there's something a shell would expand.
+        if "~" not in path and "$" not in path:
+            return path
         result = await self._conn.run(f"echo {path}", check=False)
         lines = (result.stdout or "").strip().splitlines()
         first = lines[0].strip() if lines else ""

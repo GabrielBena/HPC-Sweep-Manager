@@ -147,11 +147,14 @@ CLI flags (`--gpus`, `--conda-env`) override per-remote config; per-remote
 config overrides global `distributed.*`; global overrides defaults.
 
 `DEFAULT_RSYNC_EXCLUDES` already skips the usual ML artifacts from the code
-push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.pkl`/`*.ckpt`,
-`checkpoints/`, `multirun/`, `.hydra`, `wandb`. A bare `outputs/` is **not**
-excluded by default (it's too easy to clobber a legit source dir of that name);
-if your project dumps artifacts under `outputs/`, add it to `rsync_excludes`
-as shown above to keep the push lean.
+push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.ckpt`,
+`checkpoints/`, `multirun/`, `.hydra`, `wandb`. Your `rsync_excludes` is
+**layered on top** of these (it extends, doesn't replace — so you keep `.git`
+etc. for free). A bare `outputs/` and `*.pkl` are **not** excluded by default
+(an `outputs/` source dir is easy to clobber, and `.pkl` is as often input data
+as output); add them to `rsync_excludes` as shown above if they're artifacts in
+your project. There's no way yet to *un-exclude* a default, so if you commit a
+pretrained `checkpoints/` as a training INPUT, rename it.
 
 ## Driving Slurm over SSH (`backend: slurm`)
 
