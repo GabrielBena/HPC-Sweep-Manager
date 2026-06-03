@@ -143,6 +143,20 @@ class SSHComputeSource(ComputeSource):
             )
         return proc.returncode or 0
 
+    async def _resolve_remote_path(self, path: str) -> str:
+        """Expand ~ / $USER / $HOME on the remote, once at setup.
+
+        The rsync destination (built locally) and ``output.dir=<path>`` (passed
+        inside a quoted COMMAND) get a literal path with no shell to expand env
+        vars — so ``remote_root: /scratch/$USER/...`` would otherwise create a
+        literal ``$USER`` dir. A remote-shell ``echo`` (unquoted) expands both
+        ``~`` and ``$VAR`` in one shot.
+        """
+        result = await self._conn.run(f"echo {path}", check=False)
+        lines = (result.stdout or "").strip().splitlines()
+        first = lines[0].strip() if lines else ""
+        return first or path
+
     # ------------------------------------------------------------------ setup
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         sweep_dir.mkdir(parents=True, exist_ok=True)
@@ -159,21 +173,12 @@ class SSHComputeSource(ComputeSource):
             self.stats.health_status = "unhealthy"
             return False
 
-        # Resolve any leading ~ in remote_root to an absolute path.
+        # Resolve ~ / $USER / $HOME in remote_root to an absolute path.
         # `cd ~/path` and `mkdir -p ~/path` expand tilde, but values like
-        # `output.dir=~/path` passed to python (inside quoted COMMAND strings)
-        # do NOT — python's Path() doesn't expand tilde either. Probing $HOME
-        # once at setup gives us a single absolute path used everywhere.
-        resolved_root = self.remote_root
-        if resolved_root.startswith("~"):
-            home_result = await self._conn.run("echo $HOME", check=False)
-            home = (home_result.stdout or "").strip()
-            if home:
-                resolved_root = home + resolved_root[1:]
-            else:
-                logger.warning(
-                    f"Could not resolve $HOME on {self.host}; leaving remote_root as {resolved_root!r}"
-                )
+        # `output.dir=~/path` (or `/scratch/$USER/...`) passed to python inside
+        # quoted COMMAND strings do NOT — nor does the locally-run rsync. One
+        # remote-shell echo at setup gives a single absolute path used everywhere.
+        resolved_root = await self._resolve_remote_path(self.remote_root)
         self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
         self._remote_sweep_dir = (
             f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"

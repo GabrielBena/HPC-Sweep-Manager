@@ -24,7 +24,12 @@ from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, render_template
 from ..remote.push_exec import resolve_run_prefix
-from .slurm_protocol import SLURM_STATE_MAP, parse_sbatch_job_id, render_sbatch_directives
+from .slurm_protocol import (
+    SLURM_STATE_MAP,
+    parse_sacct_state,
+    parse_sbatch_job_id,
+    render_sbatch_directives,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +286,30 @@ class SlurmComputeSource(ComputeSource):
         )
         return job_id
 
+    async def _terminal_state_via_sacct(self, job_id: str) -> str:
+        """Classify a job that's gone from ``squeue`` via ``sacct``.
+
+        Queue-absence is not a completion signal — query the accounting DB for
+        the real terminal state. Falls back to ``"COMPLETED"`` only when sacct
+        is unavailable / returns nothing (accounting disabled).
+        """
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["sacct", "-j", job_id, "-n", "-X", "-o", "State"],
+            capture_output=True,
+            text=True,
+        )
+        state = None
+        if result.returncode == 0:
+            state = parse_sacct_state(result.stdout or "")
+        if state is None:
+            logger.debug(
+                f"sacct returned no state for job {job_id}; assuming COMPLETED "
+                f"(accounting may be disabled)"
+            )
+            return "COMPLETED"
+        return state
+
     async def get_job_status(self, job_id: str) -> str:
         result = await asyncio.to_thread(
             subprocess.run,
@@ -289,8 +318,9 @@ class SlurmComputeSource(ComputeSource):
             text=True,
         )
         if result.returncode != 0 or not result.stdout.strip():
-            # Job no longer in queue → assume it finished.
-            status = "COMPLETED"
+            # Gone from the queue — ask sacct for the actual terminal state
+            # rather than assuming success (queue-absence ≠ completion).
+            status = await self._terminal_state_via_sacct(job_id)
         else:
             raw = result.stdout.strip().splitlines()[0].strip()
             status = SLURM_STATE_MAP.get(raw, "RUNNING")

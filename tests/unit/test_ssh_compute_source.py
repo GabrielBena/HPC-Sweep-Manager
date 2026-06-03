@@ -232,12 +232,17 @@ class TestSetup:
         assert "/sweeps/test_sweep/scripts" in layout
 
     async def test_setup_resolves_tilde_via_remote_home(self, tmp_path):
-        # FakeConn returns `Mon Jan 1 …` for `date`; teach it to answer `echo $HOME`.
+        # setup() resolves remote_root via `echo <path>`; simulate the remote
+        # shell expanding ~ / $USER / $HOME.
         class HomeyConn(FakeConn):
             async def run(self, cmd, *, input=None, check=False):
                 self.run_calls.append({"cmd": cmd, "input": input, "check": check})
-                if cmd == "echo $HOME":
-                    return _Result(returncode=0, stdout="/home/gbena\n")
+                if cmd.startswith("echo "):
+                    arg = cmd[len("echo "):].strip()
+                    if arg.startswith("~"):
+                        arg = "/home/gbena" + arg[1:]
+                    arg = arg.replace("$HOME", "/home/gbena").replace("$USER", "gbena")
+                    return _Result(returncode=0, stdout=arg + "\n")
                 if "nvidia-smi" in cmd:
                     return _Result(returncode=self._nvidia_smi_rc, stdout=self._gpu_csv)
                 return _Result(returncode=0, stdout="")

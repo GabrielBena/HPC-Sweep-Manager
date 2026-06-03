@@ -52,6 +52,7 @@ from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, render_template
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
+    parse_sacct_state,
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
@@ -144,6 +145,8 @@ class SSHSlurmComputeSource(ComputeSource):
         self._remote_tasks_dir: Optional[str] = None
         self._remote_logs_dir: Optional[str] = None
         self._remote_scripts_dir: Optional[str] = None
+        # archive_dir with $USER/$HOME/~ expanded on the remote (set in setup()).
+        self._resolved_archive_dir: Optional[str] = None
         self.sweep_dir: Optional[Path] = None
         self.sweep_id: Optional[str] = None
         self._run_prefix: str = "python"
@@ -190,6 +193,23 @@ class SSHSlurmComputeSource(ComputeSource):
                 f"SSHSlurmComputeSource {self.name!r} not connected; call setup() first"
             )
         return await self._conn.run(cmd, check=check)
+
+    async def _resolve_remote_path(self, path: str) -> str:
+        """Expand ``~`` / ``$USER`` / ``$HOME`` / ``$SCRATCH`` etc. on the remote.
+
+        The rsync *destination* is handed to a LOCAL rsync process (no remote
+        shell), and the server-side archive rsync ``shlex.quote``s its path — so
+        neither expands env vars the way the docs promise (``$USER`` lands as a
+        literal directory name). We resolve once here via a remote-shell
+        ``echo`` (unquoted, so the remote shell expands both ``~`` and ``$VAR``)
+        and use the literal result everywhere downstream. Safe for normal HPC
+        paths; paths containing spaces or glob metacharacters are unsupported
+        (and don't occur in practice).
+        """
+        result = await self._ssh_run(f"echo {path}", check=False)
+        lines = (result.stdout or "").strip().splitlines()
+        first = lines[0].strip() if lines else ""
+        return first or path
 
     async def _write_remote_file(self, remote_path: str, content: str) -> None:
         # ``cat > path`` is sufficient since asyncssh's ``.run(..., input=...)``
@@ -241,17 +261,15 @@ class SSHSlurmComputeSource(ComputeSource):
         # (ephemeral) and gets archived to /shares (permanent) afterward.
         # When unset, fall back to the (persistent) `remote_root`.
         active_root = self.workdir or self.remote_root
-        resolved_root = active_root
-        if resolved_root.startswith("~"):
-            home_result = await self._ssh_run("echo $HOME", check=False)
-            home = (home_result.stdout or "").strip()
-            if home:
-                resolved_root = home + resolved_root[1:]
-            else:
-                logger.warning(
-                    f"Could not resolve $HOME on {self.host}; leaving "
-                    f"active_root as {resolved_root!r}"
-                )
+        # Expand ~ / $USER / $HOME on the remote so the rsync destination (built
+        # locally) and the archive target (shlex-quoted) point at real paths —
+        # the docs promise this expansion (HPC_EXECUTION.md).
+        resolved_root = await self._resolve_remote_path(active_root)
+        self._resolved_archive_dir = (
+            await self._resolve_remote_path(self.archive_dir)
+            if self.archive_dir
+            else None
+        )
         self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
         self._remote_sweep_dir = (
             f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
@@ -459,12 +477,37 @@ class SSHSlurmComputeSource(ComputeSource):
         return job_id
 
     # ----------------------------------------------------------------- status
+    async def _terminal_state_via_sacct(self, job_id: str) -> str:
+        """Classify a job that's no longer in ``squeue`` via ``sacct``.
+
+        Leaving the queue is NOT success — query the accounting DB for the real
+        terminal state (COMPLETED vs FAILED/TIMEOUT/OOM/CANCELLED). Falls back
+        to ``"COMPLETED"`` only when sacct returns nothing (accounting disabled
+        or job unknown), preserving the old optimistic behavior on clusters
+        that genuinely can't tell us better.
+        """
+        result = await self._ssh_run(
+            f"sacct -j {shlex.quote(job_id)} -n -X -o State", check=False
+        )
+        state = None
+        if (result.returncode or 0) == 0:
+            state = parse_sacct_state(result.stdout or "")
+        if state is None:
+            logger.debug(
+                f"sacct returned no state for job {job_id} on {self.host}; "
+                f"assuming COMPLETED (accounting may be disabled)"
+            )
+            return "COMPLETED"
+        return state
+
     async def get_job_status(self, job_id: str) -> str:
         result = await self._ssh_run(
             f"squeue -j {shlex.quote(job_id)} -h -o '%T'", check=False
         )
         if (result.returncode or 0) != 0 or not (result.stdout or "").strip():
-            status = "COMPLETED"
+            # Gone from the queue — ask sacct for the actual terminal state
+            # rather than assuming success (queue-absence ≠ completion).
+            status = await self._terminal_state_via_sacct(job_id)
         else:
             raw = (result.stdout or "").strip().splitlines()[0].strip()
             status = SLURM_STATE_MAP.get(raw, "RUNNING")
@@ -475,9 +518,12 @@ class SSHSlurmComputeSource(ComputeSource):
     async def update_all_job_statuses(self) -> None:
         """Refresh every live job's status in a single ``squeue`` call.
 
-        N round-trips → 1 round-trip per poll cycle. Jobs that aren't in
-        the response (because they're no longer in the queue) are
-        assumed COMPLETED.
+        N round-trips → 1 round-trip per poll cycle for jobs still queued.
+        Jobs absent from the response have left the queue; we then ask
+        ``sacct`` for each one's terminal state — queue-absence is not a
+        completion signal. Array parents whose tasks are still queued (squeue
+        reports ``<id>_<task>`` rows) are recognized as still RUNNING so we
+        don't hit sacct every poll while they run.
         """
         live = list(self.active_jobs.keys())
         if not live:
@@ -496,7 +542,12 @@ class SSHSlurmComputeSource(ComputeSource):
                 continue
             seen[parts[0]] = SLURM_STATE_MAP.get(parts[1], "RUNNING")
         for jid in live:
-            status = seen.get(jid, "COMPLETED")  # absent from squeue → done
+            if jid in seen:
+                status = seen[jid]
+            elif any(k.startswith(f"{jid}_") for k in seen):
+                status = "RUNNING"  # array parent: some tasks still queued
+            else:
+                status = await self._terminal_state_via_sacct(jid)
             if jid in self.active_jobs:
                 self.update_job_status(jid, status)
 
@@ -582,7 +633,9 @@ class SSHSlurmComputeSource(ComputeSource):
         snapshot, not the live sweep dir."
         """
         assert self.archive_dir is not None  # _should_archive gates this
-        archive_target = f"{self.archive_dir}/{self.sweep_id}"
+        # Use the remote-expanded archive_dir ($USER/~ resolved in setup()).
+        archive_base = self._resolved_archive_dir or self.archive_dir
+        archive_target = f"{archive_base}/{self.sweep_id}"
         cmd = (
             f"mkdir -p {shlex.quote(archive_target)} && "
             f"rsync -a {shlex.quote(self._remote_sweep_dir + '/')} "

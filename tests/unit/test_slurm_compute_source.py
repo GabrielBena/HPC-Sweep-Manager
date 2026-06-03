@@ -158,6 +158,50 @@ class TestEffectiveSpec:
         assert eff.qos == "custom"
 
 
+class TestNativeJobStatus:
+    """get_job_status: squeue-absence triggers a sacct terminal-state query
+    instead of optimistically assuming COMPLETED."""
+
+    @staticmethod
+    def _patch_run(monkeypatch, *, squeue_out: str, sacct_out: str):
+        from hpc_sweep_manager.core.hpc import slurm_compute_source as mod
+
+        def fake_run(argv, capture_output=True, text=True):
+            r = type("R", (), {})()
+            r.returncode = 0
+            r.stderr = ""
+            if "squeue" in argv:
+                r.stdout = squeue_out
+            elif "sacct" in argv:
+                r.stdout = sacct_out
+            else:
+                r.stdout = ""
+            return r
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+
+    @pytest.mark.asyncio
+    async def test_absent_failed_via_sacct(self, monkeypatch):
+        self._patch_run(monkeypatch, squeue_out="", sacct_out="FAILED\n")
+        assert await SlurmComputeSource().get_job_status("123") == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_absent_completed_via_sacct(self, monkeypatch):
+        self._patch_run(monkeypatch, squeue_out="", sacct_out="COMPLETED\n")
+        assert await SlurmComputeSource().get_job_status("123") == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_absent_empty_sacct_falls_back_completed(self, monkeypatch):
+        self._patch_run(monkeypatch, squeue_out="", sacct_out="")
+        assert await SlurmComputeSource().get_job_status("123") == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_running_in_squeue_unchanged(self, monkeypatch):
+        self._patch_run(monkeypatch, squeue_out="RUNNING\n", sacct_out="FAILED\n")
+        # Still in the queue → trust squeue, never consult sacct.
+        assert await SlurmComputeSource().get_job_status("123") == "RUNNING"
+
+
 class TestTemplatesExist:
     """Sanity check: the templates SlurmComputeSource references actually exist."""
 
@@ -234,3 +278,83 @@ class TestTemplateRendering:
         assert "module load l4" in rendered
         assert "$SLURM_ARRAY_TASK_ID" in rendered
         assert "WANDB_GROUP=\"my_group\"" in rendered
+
+
+class TestCondaInitOrdering:
+    """The conda-init partial must render AFTER modules + pre_script, and must
+    guard the micromamba bridge behind `command -v conda` so a module-provided
+    conda (loaded by pre_script) is never shadowed → no silent CPU fallback."""
+
+    GUARD = "command -v conda >/dev/null 2>&1"
+    BRIDGE = "conda() { micromamba"
+
+    def _render(self, name, **extra):
+        from hpc_sweep_manager.core.common.templating import render_template
+
+        ctx = dict(
+            job_name="j",
+            job_id="1",
+            sweep_id="sw",
+            logs_dir="/tmp/logs",
+            tasks_dir="/tmp/tasks",
+            task_dir="/tmp/tasks/j",
+            remote_task_dir="/tmp/tasks/j",
+            remote_code_dir="/remote/code",
+            num_jobs=1,
+            params_file="/tmp/p.json",
+            sbatch_directives="",
+            project_dir="/proj",
+            python_path="python",
+            run_prefix="conda run -n env python",
+            script_path="train.py",
+            params_hydra='"lr=1"',
+            wandb_group=None,
+            cuda_visible_devices=None,
+        )
+        ctx.update(extra)
+        return render_template(name, **ctx)
+
+    def test_single_pre_script_before_conda_init(self):
+        r = self._render(
+            "slurm_single.sh.j2",
+            modules=["gcc"],
+            pre_script=["module load miniforge3"],
+            uses_conda=True,
+        )
+        assert self.GUARD in r  # guard present
+        assert r.index("module load miniforge3") < r.index(self.GUARD)
+        assert r.index("module load gcc") < r.index(self.GUARD)
+        # The micromamba bridge is gated behind the guard.
+        assert r.index(self.GUARD) < r.index(self.BRIDGE)
+
+    def test_array_pre_script_before_conda_init(self):
+        r = self._render(
+            "slurm_array.sh.j2",
+            modules=["miniforge3"],
+            pre_script=["export FOO=bar"],
+            uses_conda=True,
+        )
+        assert self.GUARD in r
+        assert r.index("module load miniforge3") < r.index(self.GUARD)
+        assert r.index("export FOO=bar") < r.index(self.GUARD)
+
+    def test_ssh_pre_script_before_conda_init(self):
+        r = self._render(
+            "ssh_compute_source.sh.j2",
+            modules=["miniforge3"],
+            pre_script=["module load cuda"],
+            uses_conda=True,
+        )
+        assert self.GUARD in r
+        assert r.index("module load miniforge3") < r.index(self.GUARD)
+        assert r.index("module load cuda") < r.index(self.GUARD)
+
+    def test_no_conda_block_when_uses_conda_false(self):
+        r = self._render(
+            "slurm_single.sh.j2",
+            modules=[],
+            pre_script=[],
+            uses_conda=False,
+        )
+        assert self.GUARD not in r
+        assert "HSM conda" not in r

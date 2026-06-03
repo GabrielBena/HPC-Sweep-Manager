@@ -6,13 +6,15 @@ set -e
 {% if cuda_visible_devices is not none %}
 export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% endif %}
-{% include "_conda_init.sh.j2" %}
 {% for mod in modules %}
 module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed" >&2
 {% endfor %}
 {% for line in pre_script %}
 {{ line }}
 {% endfor %}
+{# conda-init AFTER modules + pre_script so a module-provided conda is on PATH
+   first and the probe defers to it (never shadows it with micromamba). #}
+{% include "_conda_init.sh.j2" %}
 
 cd {{ remote_code_dir }}
 

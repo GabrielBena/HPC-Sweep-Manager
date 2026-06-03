@@ -53,13 +53,31 @@ class FakeConn:
     back to ``_Result(returncode=0, stdout="")`` when no entry matches.
     """
 
-    def __init__(self, responder: Optional[List[tuple[str, _Result]]] = None):
+    def __init__(
+        self,
+        responder: Optional[List[tuple[str, _Result]]] = None,
+        home: str = "/u/home/gbena",
+        user: Optional[str] = None,
+    ):
         self.run_calls: List[Dict[str, Any]] = []
         self.closed = False
         self._responder = responder or []
+        # Used to simulate remote-shell expansion of `echo <path>` (the seam
+        # _resolve_remote_path uses for ~ / $USER / $HOME). Unexplicit `echo`
+        # commands get expanded the way a real shell would.
+        self._home = home.rstrip("/")
+        self._user = user or (self._home.split("/")[-1] or "gbena")
 
     def add(self, substring: str, result: _Result) -> None:
         self._responder.append((substring, result))
+
+    def _expand_echo(self, cmd: str) -> str:
+        arg = cmd[len("echo "):].strip().strip('"').strip("'")
+        if arg.startswith("~"):
+            arg = self._home + arg[1:]
+        arg = arg.replace("${HOME}", self._home).replace("$HOME", self._home)
+        arg = arg.replace("${USER}", self._user).replace("$USER", self._user)
+        return arg
 
     async def run(
         self,
@@ -73,6 +91,9 @@ class FakeConn:
             if sub in cmd:
                 del self._responder[i]
                 return res
+        # Simulate the remote shell expanding `echo <path>` (~, $USER, $HOME).
+        if cmd.startswith("echo "):
+            return _Result(returncode=0, stdout=self._expand_echo(cmd) + "\n")
         return _Result(returncode=0, stdout="")
 
     def close(self) -> None:
@@ -106,10 +127,14 @@ class _StubSrc(SSHSlurmComputeSource):
 
 
 def _setup_ok_responder(home: str = "/u/home/gbena") -> List[tuple[str, _Result]]:
-    """Default responder for a successful setup() lifecycle."""
+    """Default responder for a successful setup() lifecycle.
+
+    Path expansion (`echo <path>`) is handled generically by FakeConn now —
+    set the home/user there. ``home`` is accepted for call-site compatibility
+    but no longer drives an explicit ``echo $HOME`` response.
+    """
     return [
         ("command -v sbatch", _Result(0, stdout="/usr/bin/sbatch\n")),
-        ("echo $HOME", _Result(0, stdout=f"{home}\n")),
         ("mkdir -p", _Result(0)),
     ]
 
@@ -120,7 +145,7 @@ def _setup_ok_responder(home: str = "/u/home/gbena") -> List[tuple[str, _Result]
 class TestSetup:
     @pytest.mark.asyncio
     async def test_happy_path(self, tmp_path):
-        conn = FakeConn(responder=_setup_ok_responder("/home/gbena"))
+        conn = FakeConn(responder=_setup_ok_responder(), home="/home/gbena")
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -317,6 +342,74 @@ class TestStatus:
         assert status == "COMPLETED"
 
     @pytest.mark.asyncio
+    async def test_get_job_status_absent_failed_via_sacct(self, tmp_path):
+        # THE bug fix: gone from squeue + sacct=FAILED must NOT report COMPLETED.
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout="FAILED\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        assert await src.get_job_status("777") == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_absent_completed_via_sacct(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        assert await src.get_job_status("778") == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_sacct_empty_falls_back_completed(self, tmp_path):
+        # No accounting / unknown job → preserve the old optimistic fallback.
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout=""))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        assert await src.get_job_status("779") == "COMPLETED"
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_sacct_running_keeps_waiting(self, tmp_path):
+        # Left squeue but sacct not yet settled → RUNNING (poll again), never
+        # a premature terminal state.
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout="RUNNING\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        assert await src.get_job_status("780") == "RUNNING"
+
+    @pytest.mark.asyncio
+    async def test_update_all_absent_failed_via_sacct(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 200\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        jid = await src.submit_job({"s": 0}, "task_0", "sweep_1")
+        # Batched squeue shows nothing (job gone); sacct says FAILED.
+        conn._responder.append(("squeue -j", _Result(0, stdout="")))
+        conn._responder.append(("sacct", _Result(0, stdout="FAILED\n")))
+        await src.update_all_job_statuses()
+        assert src.completed_jobs[jid].status == "FAILED"
+
+    @pytest.mark.asyncio
     async def test_update_all_uses_single_squeue_call(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         # Two sbatch submissions, then one batched squeue response.
@@ -454,6 +547,58 @@ class TestStorageTier:
             src._remote_sweep_dir
             == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
         )
+
+    @pytest.mark.asyncio
+    async def test_workdir_user_var_expanded(self, tmp_path):
+        # #1 fix: $USER in workdir must expand on the remote, not land as a
+        # literal "$USER" directory in the rsync destination.
+        conn = FakeConn(
+            responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena"
+        )
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            workdir="/scratch/$USER/hsm-runs",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_w")
+        project_name = tmp_path.name
+        assert (
+            src._remote_sweep_dir
+            == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
+        )
+        # The rsync push destination is the expanded path (no literal $USER).
+        push = src._rsync_calls[0]
+        assert any("/scratch/gbena/hsm-runs" in a for a in push)
+        assert not any("$USER" in a for a in push)
+
+    @pytest.mark.asyncio
+    async def test_archive_dir_user_var_expanded(self, tmp_path):
+        conn = FakeConn(
+            responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena"
+        )
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            workdir="/scratch/$USER/hsm-runs",
+            archive_dir="/shares/$USER/hsm-archive",
+            archive_on="always",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sw1")
+        assert src._resolved_archive_dir == "/shares/gbena/hsm-archive"
+        jid = await src.submit_job({"s": 0}, "task_0", "sw1")
+        src.update_job_status(jid, "COMPLETED")
+        await src.collect_results()
+        # The archive command targets the expanded path, never literal $USER.
+        arch = [
+            c for c in conn.run_calls
+            if "rsync -a" in c["cmd"] and "/shares/gbena/hsm-archive/sw1" in c["cmd"]
+        ]
+        assert len(arch) == 1
+        assert not any("$USER" in c["cmd"] for c in conn.run_calls if "rsync -a" in c["cmd"])
 
     @pytest.mark.asyncio
     async def test_workdir_tilde_expanded(self, tmp_path):

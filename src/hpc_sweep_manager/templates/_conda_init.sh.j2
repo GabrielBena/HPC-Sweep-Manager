@@ -14,18 +14,28 @@
 {% if uses_conda %}
 # --- HSM conda / micromamba init (non-interactive shells skip .bashrc) -------
 _hsm_conda_loaded=0
-for _c in "$HOME/miniconda3/etc/profile.d/conda.sh" \
-         "$HOME/anaconda3/etc/profile.d/conda.sh" \
-         "$HOME/miniforge3/etc/profile.d/conda.sh" \
-         "$HOME/.miniconda3/etc/profile.d/conda.sh" \
-         "/opt/conda/etc/profile.d/conda.sh"; do
-    if [ -f "$_c" ]; then
-        # shellcheck disable=SC1090
-        . "$_c"
-        _hsm_conda_loaded=1
-        break
-    fi
-done
+# A real conda already on PATH wins — e.g. `module load miniforge3` ran in
+# `pre_script` / `modules`, which now render BEFORE this block. NEVER shadow it
+# with the micromamba bridge below: that would resolve a different env and
+# silently drop GPU jobs to CPU (cuInit: CUDA_ERROR_NO_DEVICE). This also
+# catches a module-provided conda whose prefix isn't in the fixed list below.
+if command -v conda >/dev/null 2>&1; then
+    _hsm_conda_loaded=1
+fi
+if [ "$_hsm_conda_loaded" -eq 0 ]; then
+    for _c in "$HOME/miniconda3/etc/profile.d/conda.sh" \
+             "$HOME/anaconda3/etc/profile.d/conda.sh" \
+             "$HOME/miniforge3/etc/profile.d/conda.sh" \
+             "$HOME/.miniconda3/etc/profile.d/conda.sh" \
+             "/opt/conda/etc/profile.d/conda.sh"; do
+        if [ -f "$_c" ]; then
+            # shellcheck disable=SC1090
+            . "$_c"
+            _hsm_conda_loaded=1
+            break
+        fi
+    done
+fi
 if [ "$_hsm_conda_loaded" -eq 0 ]; then
     # Conda not found; try micromamba. Probe MAMBA_EXE (if exported), then
     # common install locations. The last entry catches users who keep the

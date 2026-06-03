@@ -7,10 +7,12 @@
 {% for mod in modules %}
 module load {{ mod }}
 {% endfor %}
-{% include "_conda_init.sh.j2" %}
 {% for line in pre_script %}
 {{ line }}
 {% endfor %}
+{# conda-init AFTER modules + pre_script so a module-provided conda is on PATH
+   first and the probe defers to it (never shadows it with micromamba). #}
+{% include "_conda_init.sh.j2" %}
 
 set -e
 

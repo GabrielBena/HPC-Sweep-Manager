@@ -539,14 +539,44 @@ def _run_sweep_via_orchestrator(
         f"in {sub_mode} mode: {', '.join(result.job_ids)}[/green]"
     )
 
+    failed = 0
     if result.final_statuses:
         completed = sum(1 for s in result.final_statuses.values() if s == "COMPLETED")
         failed = sum(1 for s in result.final_statuses.values() if s == "FAILED")
         cancelled = sum(1 for s in result.final_statuses.values() if s == "CANCELLED")
+        colour = "red bold" if (failed or cancelled) else "bold"
         console.print(
-            f"[bold]Final: {completed} COMPLETED, "
-            f"{failed} FAILED, {cancelled} CANCELLED[/bold]"
+            f"[{colour}]Final: {completed} COMPLETED, "
+            f"{failed} FAILED, {cancelled} CANCELLED[/{colour}]"
         )
+        if failed or cancelled:
+            # Point the user at the failing task dirs + logs. tasks/ is local
+            # after collect_results(), so the wrapper-written task_info.txt
+            # (Status: FAILED) is on disk for every backend.
+            tasks_dir = sweep_dir / "tasks"
+            failing = []
+            if tasks_dir.exists():
+                for ti in sorted(tasks_dir.glob("*/task_info.txt")):
+                    try:
+                        status_lines = [
+                            ln
+                            for ln in ti.read_text().splitlines()
+                            if ln.startswith("Status: ")
+                        ]
+                    except OSError:
+                        continue
+                    if status_lines and "FAILED" in status_lines[-1]:
+                        failing.append(ti.parent)
+            console.print("[red]Some jobs did not complete. Inspect:[/red]")
+            for d in failing[:10]:
+                console.print(f"  [yellow]{d}[/yellow]")
+            if len(failing) > 10:
+                console.print(f"  … and {len(failing) - 10} more")
+            console.print(f"  logs: [yellow]{sweep_dir / 'logs'}[/yellow]")
+            console.print(
+                f"  [dim]hsm sweep report {sweep_id} --scan-tasks · "
+                f"hsm sweep errors {sweep_id}[/dim]"
+            )
 
     summary_file = sweep_dir / "submission_summary.txt"
     with open(summary_file, "w") as f:
@@ -574,6 +604,12 @@ def _run_sweep_via_orchestrator(
         f"Sweep {sweep_id} via orchestrator ({source.source_type}) "
         f"submitted {len(result.job_ids)} job(s) with {len(combinations)} combinations"
     )
+
+    # Exit non-zero when any job failed so scripts / CI don't treat a failed
+    # sweep as success (pairs with the sacct-backed terminal-state detection —
+    # a wholly-failed sweep used to print "COMPLETED" and exit 0).
+    if failed:
+        raise SystemExit(1)
 
 
 def run_sweep(
