@@ -6,9 +6,10 @@ remote Linux boxes over SSH — same CLI, same sweep config, four
 execution modes.
 
 > **Status:** alpha. Active refactor; semantics stable for the modes
-> documented below. See [ARCHITECTURE.md](ARCHITECTURE.md) for what's
-> live vs legacy and [CLAUDE.md](CLAUDE.md) if you're an AI agent
-> landing here cold.
+> documented below. **`main` is the canonical branch** — the `v2` branch
+> is an abandoned 2025 experiment; ignore it. See
+> [ARCHITECTURE.md](ARCHITECTURE.md) for what's live vs legacy and
+> [CLAUDE.md](CLAUDE.md) if you're an AI agent landing here cold.
 
 ## Why HSM
 

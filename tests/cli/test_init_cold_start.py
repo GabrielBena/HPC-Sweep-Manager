@@ -111,3 +111,36 @@ class TestDocsCommand:
         monkeypatch.setattr(docs_mod, "_local_docs_dir", lambda: None)
         _res, out = _invoke_docs()
         assert "No local docs" in out
+
+    def test_urls_never_hard_wrapped_at_narrow_width(self):
+        # U3 (field report 2026-06-03): rich used to fold long GitHub URLs at
+        # terminal width, breaking copy/paste. soft_wrap leaves them intact.
+        buf = io.StringIO()
+        obj = {"console": Console(file=buf, width=60), "logger": logging.getLogger("t")}
+        res = CliRunner().invoke(docs_cmd, [], obj=obj, catch_exceptions=False)
+        assert res.exit_code == 0
+        out = buf.getvalue()
+        for fname, _desc in docs_mod._PAGES:
+            assert f"{docs_mod._DOCS_BASE}/{fname}" in out, fname
+
+    def test_canonical_branch_note(self):
+        # U2: nothing used to signal that `main` (not the stale v2 branch)
+        # is the source of truth.
+        _res, out = _invoke_docs()
+        assert "Canonical branch: main" in out
+
+
+class TestTopLevelInitAlias:
+    """U1: `hsm init` should work — muscle memory puts init at top level."""
+
+    def test_alias_is_registered_and_same_command(self):
+        from hpc_sweep_manager.cli.main import cli
+
+        assert cli.commands.get("init") is init_mod.init_cmd
+
+    def test_help_shows_rerun_contract(self):
+        from hpc_sweep_manager.cli.main import cli
+
+        res = CliRunner().invoke(cli, ["init", "--help"])
+        assert res.exit_code == 0
+        assert "Safe to re-run" in res.output
