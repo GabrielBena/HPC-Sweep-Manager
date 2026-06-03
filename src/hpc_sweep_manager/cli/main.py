@@ -5,6 +5,7 @@ from rich.console import Console
 
 from .. import __version__
 from ..core.common.utils import setup_logging
+from .docs import docs  # `hsm docs`: where the documentation lives
 from .init import setup  # Project setup: init, configure
 from .queue import queue  # Cluster queue inspection
 from .remote import remote  # Remote management
@@ -41,6 +42,7 @@ cli.add_command(setup)  # hsm setup init, hsm setup configure
 cli.add_command(sweep_cmd)  # hsm sweep run/status/report/errors/watch/recent/queue/cancel/cleanup
 cli.add_command(remote)  # hsm remote add/list/test/health/gpus/clean/remove
 cli.add_command(queue)  # hsm queue mine/position/gpus/reservations
+cli.add_command(docs)  # hsm docs — pointers to the documentation
 
 
 def main():

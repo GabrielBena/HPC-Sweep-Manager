@@ -315,8 +315,8 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
         local_block = (
             "# Auto-detected {n} GPU(s) on this box via `nvidia-smi -L` at init time.\n"
             "# To toggle off: set `gpus: 0` or comment the block out.\n"
-            "# Other fields (walltime/cpus_per_task/mem/pre_script) are optional — see\n"
-            "# docs/user_guide/HPC_EXECUTION.md for the full schema.\n"
+            "# Other fields (walltime/cpus_per_task/mem/pre_script) are optional —\n"
+            "# run `hsm docs` (HPC_EXECUTION) for the full schema.\n"
             "local:\n"
             "  gpus: 1                  # per-task GPU count; LocalComputeSource partitions\n"
             "                           #   the {n} detected GPU(s) into slots of this size\n"
@@ -357,7 +357,7 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 # --- Optional: defaults for `--mode array|individual` (Slurm) -----------------
 # Read ONLY when --mode is array or individual. Reaches fields the opaque
 # --resources CLI string can't express (gpu_type / modules / qos / account).
-# See docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block
+# Run `hsm docs` (HPC_EXECUTION → the typed slurm block) for the full schema.
 # slurm:
 #   walltime: "01:00:00"
 #   cpus_per_task: 4
@@ -416,6 +416,151 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 #         gpus: 1
 #         gpu_type: H100           # GRES casing is case-sensitive on S3IT
 """
+
+
+def _render_project_readme(project_name: str) -> str:
+    """Self-contained quickstart written into the consumer's `sweeps/README.md`.
+
+    Designed so a human OR a coding agent can drive HSM from this file alone —
+    no need to read the installed package source or docs that aren't shipped
+    with a `pip install`. Points at `hsm docs` / `hsm --help` for depth.
+    """
+    return f"""# {project_name} — HPC sweeps (HSM)
+
+This project runs hyperparameter sweeps with **HPC-Sweep-Manager** (`hsm`): it
+expands a sweep config into runs and dispatches them locally, to Slurm, or to a
+remote over SSH. This file is self-contained — you shouldn't need to read HSM's
+source. For the full docs run **`hsm docs`**; for any command, `hsm <cmd> --help`.
+
+## Layout
+
+```
+.hsm/config.yaml          # project config (paths, typed slurm:/local:, remotes)
+sweeps/
+├── example_sweep.yaml    # a sweep config (grid + paired axes, metadata, tags)
+├── outputs/<sweep_id>/    # one dir per sweep
+│   ├── tasks/<task>/      # per task: task_info.txt, params.yaml, command.txt, results
+│   └── logs/              # scheduler stdout/stderr
+└── README.md             # this file
+```
+
+Each task dir carries a `params.yaml` with that task's exact overrides, so a
+checkpoint is self-describing.
+
+## Execution modes (`--mode`, or `--remote <alias>`)
+
+| Mode | Where it runs |
+|---|---|
+| `local` | this machine (slot queue across CPUs/GPUs) |
+| `array` | one Slurm `sbatch --array` (submitted locally) |
+| `individual` | one local `sbatch` per parameter combo |
+| `--remote <alias>` | push over SSH to one host — bash, or `sbatch` if that remote is `backend: slurm` |
+| `distributed` | fan across mixed children (local + SSH + SSH-Slurm) |
+| `auto` (default) | `array` if `sbatch` is on PATH, else `local` |
+
+`--remote <alias>` implies remote execution; add `--mode array` to pack a
+remote Slurm sweep into one `sbatch --array`.
+
+## Common commands
+
+```bash
+hsm sweep run -c sweeps/example_sweep.yaml --count-only   # how many runs?
+hsm sweep run -c sweeps/example_sweep.yaml --dry-run      # preview spec + command
+hsm sweep run -c sweeps/example_sweep.yaml --mode local   # run here
+hsm sweep run -c sweeps/example_sweep.yaml --mode array   # one Slurm array
+hsm sweep run -c sweeps/example_sweep.yaml --remote uzh   # push to an SSH remote
+
+hsm sweep status <sweep_id>        # completion summary
+hsm sweep report <sweep_id> --scan-tasks
+hsm sweep errors <sweep_id>        # collect failures' messages
+```
+
+**Failure handling:** terminal state comes from `sacct` (a job leaving the queue
+is not "success"), so a failed sweep is reported FAILED and `hsm sweep run`
+**exits non-zero** — safe to gate scripts/CI on it. Failing task dirs + the logs
+dir are printed.
+
+**Recovery (SSH-Slurm):** if the launching `hsm sweep run` dies before all tasks
+finish (long run / overnight / a maintenance reservation), re-attach later:
+
+```bash
+hsm sweep collect <sweep_id>       # pull + archive whatever's terminal; idempotent
+```
+
+## Configuration
+
+- **`.hsm/config.yaml`** (this project): `paths.conda_env` (the env every backend
+  activates), an optional typed `slurm:` block for reach fields
+  (`gpu_type`/`modules`/`qos`/`account`/`pre_script`), a `local:` block, and
+  `distributed.remotes.<alias>` for SSH/SSH-Slurm targets (per-remote `spec:`).
+- **`~/.hsm/config.yaml`** (machine): machine-specific facts like
+  `local.sweeps_root` (redirect sweep dirs to another filesystem).
+
+Register a remote with `hsm remote add <alias>` (uses your `~/.ssh/config`;
+nothing to install remotely). Full reference: **`hsm docs`**.
+"""
+
+
+def _render_agents_stub(project_name: str) -> str:
+    """A minimal AGENTS.md so a consumer's coding agent orients to HSM cold."""
+    return f"""# AGENTS.md — {project_name}
+
+## Running HPC hyperparameter sweeps (HSM)
+
+This project uses **HPC-Sweep-Manager** (`hsm`) to run sweeps over the training
+script across local / Slurm / SSH backends.
+
+- **Start here:** [`sweeps/README.md`](sweeps/README.md) — self-contained: the
+  execution modes, the exact commands, where outputs land
+  (`sweeps/outputs/<id>/tasks/<task>/`), failure semantics, and how to recover
+  an interrupted sweep (`hsm sweep collect <id>`).
+- **Full docs + CLI:** run `hsm docs` (prints URLs + local path) and
+  `hsm <cmd> --help`.
+- **Config:** `.hsm/config.yaml` (this project) and `~/.hsm/config.yaml` (machine).
+
+You do not need to read HSM's installed source to use it — the above cover the
+usage surface.
+"""
+
+
+def _offer_agent_pointer(
+    project_path: Path, project_name: str, interactive: bool, console: Console
+) -> None:
+    """Help a consumer's coding agent discover HSM — conservatively.
+
+    ``CLAUDE.md`` / ``AGENTS.md`` are high-authority, user-owned instruction
+    files, so this:
+      * NEVER modifies an existing one (only prints a paste-able pointer);
+      * only CREATES a new ``AGENTS.md`` with explicit interactive consent
+        (prompt defaults to No);
+      * in non-interactive runs writes nothing and just prints the pointer.
+    """
+    agents_path = project_path / "AGENTS.md"
+    claude_path = project_path / "CLAUDE.md"
+    pointer = (
+        "## Running HPC sweeps (HSM)\n"
+        "Sweeps run via `hsm`. Orientation + commands: `sweeps/README.md`. "
+        "Full docs: `hsm docs`. Config: `.hsm/config.yaml`."
+    )
+    if agents_path.exists() or claude_path.exists():
+        existing = "AGENTS.md" if agents_path.exists() else "CLAUDE.md"
+        console.print(
+            f"  ℹ️  {existing} exists — [bold]left untouched[/bold]. To let "
+            f"agents pick up HSM, add this yourself:"
+        )
+        console.print(f"[dim]{pointer}[/dim]")
+    elif interactive and Confirm.ask(
+        "Create an AGENTS.md pointing coding agents at sweeps/README.md?",
+        default=False,
+    ):
+        agents_path.write_text(_render_agents_stub(project_name))
+        console.print("  ✅ Created AGENTS.md")
+    else:
+        console.print(
+            "  ℹ️  No AGENTS.md/CLAUDE.md written. To orient coding agents to "
+            "HSM, add this to one:"
+        )
+        console.print(f"[dim]{pointer}[/dim]")
 
 
 def init_project(project_path: Path, interactive: bool, console: Console, logger: logging.Logger):
@@ -821,61 +966,15 @@ def _create_sweep_infrastructure(
 
         console.print("  ✅ Created example sweep configuration")
 
-        # Create README
+        # Create README — self-contained quickstart (human + agent readable).
         readme_path = sweeps_dir / "README.md"
         project_name = config["project_name"]
-        readme_content = f"""# {project_name} - HPC Sweeps
-
-This directory contains HPC sweep configurations and outputs for the {project_name} project.
-
-## Directory Structure
-
-```
-.hsm/
-└── config.yaml          # HSM project configuration
-
-sweeps/
-├── example_sweep.yaml   # Example sweep configuration
-├── outputs/             # Sweep results and logs
-└── logs/                # HPC job logs
-```
-
-## Usage
-
-```bash
-# Count combinations (no submission)
-hsm sweep run --config sweeps/example_sweep.yaml --count-only
-
-# Preview without submitting
-hsm sweep run --config sweeps/example_sweep.yaml --dry-run
-
-# Run locally with N parallel processes
-hsm sweep run --config sweeps/example_sweep.yaml --mode local
-
-# Submit as a single Slurm array job
-hsm sweep run --config sweeps/example_sweep.yaml --mode array
-
-# Push to an SSH remote (rsync up, run, rsync results back)
-hsm sweep run --config sweeps/example_sweep.yaml --remote my-box
-```
-
-## Configuration
-
-- **HSM config**: `.hsm/config.yaml` — paths, defaults, optional typed
-  `slurm:` block (for `gpu_type`, `modules`, `qos`, `account`, etc.) and
-  `distributed:` block (SSH remotes, populated by `hsm remote add`).
-- **Sweep configs**: YAML files in `sweeps/` (grid + paired axes,
-  metadata, tags).
-
-See the HSM documentation for details.
-
-Generated by HSM on {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-"""
-
         with open(readme_path, "w") as f:
-            f.write(readme_content)
+            f.write(_render_project_readme(project_name))
 
-        console.print("  ✅ Created README documentation")
+        console.print("  ✅ Created sweeps/README.md (self-contained quickstart)")
+
+        _offer_agent_pointer(project_path, project_name, interactive, console)
 
         logger.info(f"Successfully initialized sweep infrastructure at {project_path}")
         return True
@@ -891,17 +990,17 @@ def _display_next_steps(console: Console):
     next_steps = """
 [bold]Next Steps:[/bold]
 
+0. **Read** `sweeps/README.md` — self-contained quickstart (modes, commands,
+   output layout, recovery). Run `hsm docs` for the full guides.
 1. **Review HSM configuration**: Edit `.hsm/config.yaml`. For Slurm reach
    fields (`gpu_type`, `modules`, `qos`, `account`, `pre_script`), uncomment
-   the typed `slurm:` scaffold at the bottom of the file — see
-   `docs/user_guide/HPC_EXECUTION.md`.
+   the typed `slurm:` scaffold at the bottom of the file (`hsm docs` →
+   HPC_EXECUTION).
 2. **(Optional) Register an SSH remote**: `hsm remote add <alias>` — uses
    your `~/.ssh/config` alias; nothing needs installing on the remote.
    For driving a Slurm cluster (e.g., S3IT) over SSH from off-cluster,
-   set `backend: slurm` + `workdir` + `archive_dir` per-remote — see
-   `docs/user_guide/SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm`.
-   For fanning a sweep across local + SSH workstation + SSH-Slurm cluster
-   in one run, see `docs/user_guide/MULTI_CLUSTER.md`.
+   set `backend: slurm` + `workdir` + `archive_dir` per-remote (`hsm docs`
+   → SSH_EXECUTION / MULTI_CLUSTER).
 3. **Create sweep config**: Run `hsm setup configure` or edit
    `sweeps/example_sweep.yaml` directly.
 4. **Dry-run**: `hsm sweep run --config sweeps/example_sweep.yaml --dry-run`
