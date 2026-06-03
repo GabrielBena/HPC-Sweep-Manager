@@ -563,8 +563,10 @@ def _offer_agent_pointer(
         console.print(f"[dim]{pointer}[/dim]")
 
 
-def init_project(project_path: Path, interactive: bool, console: Console, logger: logging.Logger):
-    """Initialize sweep infrastructure in a project."""
+def init_project(
+    project_path: Path, interactive: bool, console: Console, logger: logging.Logger
+) -> bool:
+    """Initialize sweep infrastructure in a project. Returns True on success."""
     console.print(
         Panel.fit(
             "[bold blue]HPC Sweep Manager - Project Initialization[/bold blue]",
@@ -634,7 +636,7 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
 
     # Create sweep infrastructure
     console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
-    success = _create_sweep_infrastructure(project_path, config, console, logger)
+    success = _create_sweep_infrastructure(project_path, config, interactive, console, logger)
 
     if success:
         # If we migrated, offer to clean up old file
@@ -644,7 +646,11 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
                 console.print(
                     "\n[green]✅ Successfully migrated config to .hsm/config.yaml[/green]"
                 )
-                if Confirm.ask("Remove old config at sweeps/hsm_config.yaml?", default=False):
+                # Only prompt when interactive — non-interactive runs must
+                # never block on stdin (agents / CI drive this path).
+                if interactive and Confirm.ask(
+                    "Remove old config at sweeps/hsm_config.yaml?", default=False
+                ):
                     old_config_path.unlink()
                     console.print("  ✅ Removed old config file")
                 else:
@@ -656,6 +662,7 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
         _display_next_steps(console)
     else:
         console.print("\n[red]❌ Project initialization failed![/red]")
+    return success
 
 
 def _extract_config_from_existing(
@@ -853,7 +860,11 @@ def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _create_sweep_infrastructure(
-    project_path: Path, config: Dict[str, Any], console: Console, logger: logging.Logger
+    project_path: Path,
+    config: Dict[str, Any],
+    interactive: bool,
+    console: Console,
+    logger: logging.Logger,
 ) -> bool:
     """Create sweep directories and configuration files."""
     try:
@@ -913,6 +924,15 @@ def _create_sweep_infrastructure(
             }
 
         gpu_indices = _detect_local_gpus()
+        # Re-runs regenerate this file; don't silently clobber hand edits
+        # (train_script, conda_env, slurm: block, ...) — keep a one-level
+        # backup so the previous config is always recoverable.
+        if hsm_config_path.exists():
+            backup_path = hsm_config_path.with_name("config.yaml.bak")
+            shutil.copy2(hsm_config_path, backup_path)
+            console.print(
+                f"  💾 Existing config backed up to {backup_path.relative_to(project_path)}"
+            )
         with open(hsm_config_path, "w") as f:
             yaml.dump(hsm_config, f, default_flow_style=False, indent=2)
             f.write(_render_typed_config_scaffold(len(gpu_indices)))
@@ -1032,9 +1052,17 @@ def setup():
 @common_options
 @click.pass_context
 def init_cmd(ctx, interactive: bool, project_root: str, verbose: bool, quiet: bool):
-    """Initialize sweep infrastructure in a project."""
+    """Initialize sweep infrastructure in a project.
+
+    Safe to re-run: regenerates .hsm/config.yaml (the previous copy is
+    saved to .hsm/config.yaml.bak), sweeps/README.md and
+    sweeps/example_sweep.yaml; never touches other files in sweeps/.
+    Non-interactive runs (the default) never prompt.
+    """
     project_path = Path(project_root) if project_root else Path.cwd()
-    init_project(project_path, interactive, ctx.obj["console"], ctx.obj["logger"])
+    ok = init_project(project_path, interactive, ctx.obj["console"], ctx.obj["logger"])
+    if not ok:
+        ctx.exit(1)
 
 
 @setup.command("configure")

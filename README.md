@@ -31,6 +31,9 @@ pip install -e ".[dev]"
 # 2. Initialize HSM in YOUR ML project.
 cd /path/to/your/project
 hsm setup init                # creates .hsm/config.yaml + sweeps/example_sweep.yaml
+# Safe to re-run: regenerates .hsm/config.yaml (previous copy saved to
+# .hsm/config.yaml.bak), sweeps/README.md and sweeps/example_sweep.yaml;
+# never touches your other sweep configs, never prompts unless -i.
 
 # 3. Edit sweeps/example_sweep.yaml — a simple grid:
 #    sweep:
