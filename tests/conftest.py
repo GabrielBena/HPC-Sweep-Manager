@@ -249,7 +249,7 @@ def anyio_backend():
 
 
 _FAKE_SLURM_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "fake_slurm"
-_FAKE_SLURM_STUBS = ("sbatch", "squeue", "scancel", "sinfo")
+_FAKE_SLURM_STUBS = ("sbatch", "squeue", "scancel", "sinfo", "sacct")
 
 
 @dataclass
@@ -282,6 +282,22 @@ class FakeSlurm:
     def set_running_seconds(self, seconds: float) -> None:
         """Tune the RUNNING duration for state transitions in this test."""
         os.environ["HSM_FAKE_RUNNING_S"] = str(seconds)
+
+    def mark_failed(self, job_id: str) -> None:
+        """Force a submitted job to a sticky FAILED state.
+
+        Rewrites its jobs.jsonl record so the fake squeue drops it from the
+        queue (terminal) and the fake sacct reports FAILED — reproducing the
+        field-report scenario where a job leaves the queue having failed.
+        """
+        path = self.state_dir / "jobs.jsonl"
+        if not path.exists():
+            return
+        records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        for r in records:
+            if r["id"] == str(job_id):
+                r["state"] = "FAILED"
+        path.write_text("".join(json.dumps(r) + "\n" for r in records))
 
 
 @pytest.fixture

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
-from ..common.templating import params_to_hydra_args, render_template
+from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.push_exec import resolve_run_prefix
 from .slurm_protocol import (
     SLURM_STATE_MAP,
@@ -165,6 +165,7 @@ class SlurmComputeSource(ComputeSource):
             python_path=self.python_path,
             script_path=self.script_path,
             params_hydra=params_to_hydra_args(params),
+            params_yaml=params_to_yaml(params),
             wandb_group=wandb_group,
             uses_conda=_python_needs_conda_init(self.python_path),
         )
@@ -291,15 +292,20 @@ class SlurmComputeSource(ComputeSource):
 
         Queue-absence is not a completion signal — query the accounting DB for
         the real terminal state. Falls back to ``"COMPLETED"`` only when sacct
-        is unavailable / returns nothing (accounting disabled).
+        is unavailable / returns nothing (sacct not installed, accounting
+        disabled).
         """
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["sacct", "-j", job_id, "-n", "-X", "-o", "State"],
-            capture_output=True,
-            text=True,
-        )
         state = None
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["sacct", "-j", job_id, "-n", "-X", "-o", "State"],
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, OSError) as e:
+            logger.debug(f"sacct unavailable for job {job_id}: {e}; assuming COMPLETED")
+            return "COMPLETED"
         if result.returncode == 0:
             state = parse_sacct_state(result.stdout or "")
         if state is None:

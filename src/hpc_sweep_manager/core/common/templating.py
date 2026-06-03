@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 try:
     from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -44,6 +46,20 @@ def params_to_hydra_args(params: dict[str, Any]) -> str:
         else:
             tokens.append(f'"{key}={value}"')
     return " ".join(tokens)
+
+
+def params_to_yaml(params: dict[str, Any]) -> str:
+    """Serialize a task's parameter dict to YAML for a self-describing
+    ``params.yaml`` dropped into each task dir.
+
+    After a ``tasks/``-only pull, a synced checkpoint would otherwise be
+    orphaned from the overrides that produced it (Hydra's ``.hydra/config.yaml``
+    lands in the job cwd, outside ``tasks/``). Writing the exact per-task
+    overrides next to the checkpoint makes it self-describing — pair it with the
+    project code to rebuild the model. Always ends with a trailing newline so it
+    drops cleanly into a heredoc.
+    """
+    return yaml.safe_dump(params, default_flow_style=False, sort_keys=True)
 
 
 def strftime_filter(value, format="%Y-%m-%d %H:%M:%S"):

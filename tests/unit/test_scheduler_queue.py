@@ -18,6 +18,7 @@ from hpc_sweep_manager.core.hpc.scheduler_queue import (
     SlurmQueue,
     _parse_gpu_from_tres,
     _parse_priority,
+    parse_reservations_output,
 )
 
 
@@ -227,3 +228,21 @@ class TestReservations:
         assert [r.name for r in reservations] == ["a", "b"]
         assert reservations[0].node_count == 2
         assert reservations[1].node_count == 1
+
+
+class TestParseReservationsOutput:
+    """The pure parser SSH-driven sources reuse over their own transport."""
+
+    def test_empty_and_none(self):
+        assert parse_reservations_output("") == []
+        assert parse_reservations_output("No reservations in the system\n") == []
+
+    def test_parses_window(self):
+        out = parse_reservations_output(
+            "ReservationName=maint StartTime=2026-06-04T06:00:00 "
+            "EndTime=2026-06-04T18:00:00 Duration=12:00:00 Nodes=n[1-2] NodeCnt=2\n"
+        )
+        assert len(out) == 1
+        assert out[0].name == "maint"
+        assert out[0].start_time == "2026-06-04T06:00:00"
+        assert out[0].node_count == 2

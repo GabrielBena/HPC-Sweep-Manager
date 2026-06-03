@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
-from ..common.templating import params_to_hydra_args, render_template
+from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from .gpu_probe import NVIDIA_SMI_QUERY, parse_nvidia_smi_csv
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
@@ -287,6 +287,7 @@ class SSHComputeSource(ComputeSource):
             job_name=job_name,
             job_id=job_id,
             params_hydra=params_to_hydra_args(params),
+            params_yaml=params_to_yaml(params),
             wandb_group=wandb_group or sweep_id,
             cuda_visible_devices=cuda_visible,
             modules=list(effective_spec.modules),

@@ -443,6 +443,156 @@ class TestStatus:
         assert "101" in squeue_calls[0]["cmd"]
 
 
+class TestReservationWarning:
+    @pytest.mark.asyncio
+    async def test_setup_warns_on_reservation(self, tmp_path, caplog):
+        import logging
+
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add(
+            "scontrol show reservations",
+            _Result(
+                0,
+                stdout=(
+                    "ReservationName=maint StartTime=2026-06-04T06:00:00 "
+                    "EndTime=2026-06-04T18:00:00 Duration=12:00:00 "
+                    "Nodes=n[1-2] NodeCnt=2\n"
+                ),
+            ),
+        )
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        with caplog.at_level(logging.WARNING):
+            await src.setup(tmp_path / "sweep", "sw1")
+        assert any("reservation" in r.message.lower() for r in caplog.records)
+        assert any("collect" in r.message.lower() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_setup_quiet_without_reservation(self, tmp_path, caplog):
+        import logging
+
+        # Default responder → scontrol returns empty → no warning.
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        with caplog.at_level(logging.WARNING):
+            await src.setup(tmp_path / "sweep", "sw1")
+        assert not any("reservation" in r.message.lower() for r in caplog.records)
+
+
+class TestManifest:
+    @pytest.mark.asyncio
+    async def test_submit_batch_writes_local_and_remote_manifest(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena")
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 5\n"))
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sw1"
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            workdir="/scratch/$USER/hsm-runs",
+            archive_dir="/shares/$USER/arch",
+            fake_conn=conn,
+        )
+        await src.setup(sweep_dir, "sw1")
+        await src.submit_batch([{"s": 0}], "sw1", mode="individual", job_name_prefix="sw1")
+        # Local manifest written with the re-attach fields.
+        local = sweep_dir / ".hsm_manifest.json"
+        assert local.exists()
+        m = json.loads(local.read_text())
+        assert m["sweep_id"] == "sw1"
+        assert m["backend"] == "slurm"
+        assert m["host"] == "uzh"
+        assert m["job_ids"] == ["5"]
+        assert "/scratch/gbena/hsm-runs" in m["remote_sweep_dir"]
+        assert m["resolved_archive_dir"] == "/shares/gbena/arch"
+        # Remote manifest cat-piped too.
+        remote_manifest = [
+            c for c in conn.run_calls
+            if c["cmd"].startswith("cat > ") and ".hsm_manifest.json" in c["cmd"]
+        ]
+        assert len(remote_manifest) == 1
+
+    def test_from_manifest_reconstructs_source(self, tmp_path):
+        m = {
+            "name": "uzh", "host": "uzh", "ssh_key": "/k", "ssh_port": 2222,
+            "conda_env": "cpvr", "project_dir": str(tmp_path),
+            "remote_root": "~/.hsm/runs", "workdir": "/scratch/gbena/hsm-runs",
+            "archive_dir": "/shares/gbena/arch", "archive_on": "always",
+            "keep_remote_on_success": True,
+        }
+        src = SSHSlurmComputeSource.from_manifest(m)
+        assert src.host == "uzh"
+        assert src.conda_env == "cpvr"
+        assert src.workdir == "/scratch/gbena/hsm-runs"
+        assert src.archive_on == "always"
+        assert src.keep_remote_on_success is True
+
+    @pytest.mark.asyncio
+    async def test_reattach_sets_paths_without_pushing(self, tmp_path):
+        conn = FakeConn(responder=[])
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="",
+            fake_conn=conn,
+        )
+        m = {
+            "remote_sweep_dir": "/scratch/gbena/hsm-runs/proj/sweeps/sw1",
+            "remote_tasks_dir": "/scratch/gbena/hsm-runs/proj/sweeps/sw1/tasks",
+            "resolved_archive_dir": "/shares/gbena/arch",
+        }
+        ok = await src.reattach(tmp_path / "sweeps" / "outputs" / "sw1", "sw1", m)
+        assert ok is True
+        assert src._remote_sweep_dir == m["remote_sweep_dir"]
+        assert src._resolved_archive_dir == "/shares/gbena/arch"
+        # reattach must NOT rsync-push the code mirror.
+        assert src._rsync_calls == []
+
+
+class TestContinuousPull:
+    @pytest.mark.asyncio
+    async def test_wait_for_all_pulls_incrementally(self, tmp_path):
+        # T1: a task reaching terminal mid-flight triggers a tasks/ pull, so a
+        # later stuck task / launcher death can't strand it.
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        await src.submit_job({"s": 0}, "task_0", "sweep_1")
+        pulls_before = len(src._rsync_calls)  # 1 (the setup push)
+        # Cycle 1: still RUNNING. Cycle 2: gone from squeue, sacct=COMPLETED.
+        conn.add("squeue -j", _Result(0, stdout="RUNNING\n"))
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
+        final = await src.wait_for_all(poll_interval=0)
+        assert final == {"1": "COMPLETED"}
+        # An incremental pull fired during the wait (before collect_results).
+        assert len(src._rsync_calls) > pulls_before
+
+    @pytest.mark.asyncio
+    async def test_wait_for_all_no_pull_while_running(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        await src.submit_job({"s": 0}, "task_0", "sweep_1")
+        pulls_before = len(src._rsync_calls)
+        # Still running, then done — only ONE incremental pull (on completion).
+        conn.add("squeue -j", _Result(0, stdout="RUNNING\n"))
+        conn.add("squeue -j", _Result(0, stdout="RUNNING\n"))
+        conn.add("squeue -j", _Result(0, stdout="\n"))
+        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
+        await src.wait_for_all(poll_interval=0)
+        assert len(src._rsync_calls) - pulls_before == 1
+
+
 # --------------------------------------------------------------------- cancel
 
 

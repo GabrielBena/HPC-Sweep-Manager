@@ -358,3 +358,98 @@ class TestCondaInitOrdering:
         )
         assert self.GUARD not in r
         assert "HSM conda" not in r
+
+
+class TestSelfDescribingParams:
+    """Each task dir gets a params.yaml with the exact overrides (Tier 2), so a
+    synced checkpoint is never orphaned from its parameters."""
+
+    def test_params_to_yaml_roundtrips(self):
+        import yaml
+
+        from hpc_sweep_manager.core.common.templating import params_to_yaml
+
+        params = {"lr": 0.1, "seed": 42, "layers": [2, 4], "name": "a b"}
+        loaded = yaml.safe_load(params_to_yaml(params))
+        assert loaded == params
+
+    @staticmethod
+    def _heredoc_body(rendered, path_marker="params.yaml"):
+        """Extract the body of the params.yaml heredoc."""
+        lines = rendered.splitlines()
+        start = next(
+            i
+            for i, ln in enumerate(lines)
+            if path_marker in ln and "HSM_PARAMS_EOF" in ln
+        )
+        end = next(
+            i for i in range(start + 1, len(lines)) if lines[i] == "HSM_PARAMS_EOF"
+        )
+        return "\n".join(lines[start + 1 : end])
+
+    @pytest.mark.parametrize(
+        "template,dir_kw",
+        [
+            ("slurm_single.sh.j2", "task_dir"),
+            ("ssh_compute_source.sh.j2", "remote_task_dir"),
+            ("local_compute_source.sh.j2", "task_dir"),
+        ],
+    )
+    def test_single_job_templates_write_params_yaml(self, template, dir_kw):
+        import yaml
+
+        from hpc_sweep_manager.core.common.templating import (
+            params_to_yaml,
+            render_template,
+        )
+
+        params = {"lr": 0.1, "seed": 42}
+        ctx = dict(
+            job_name="j",
+            job_id="1",
+            sweep_id="sw",
+            logs_dir="/l",
+            sbatch_directives="",
+            modules=[],
+            pre_script=[],
+            project_dir="/p",
+            remote_code_dir="/p",
+            python_path="python",
+            run_prefix="conda run -n e python",
+            script_path="train.py",
+            params_hydra='"lr=0.1" "seed=42"',
+            params_yaml=params_to_yaml(params),
+            wandb_group=None,
+            cuda_visible_devices=None,
+            uses_conda=False,
+            **{dir_kw: "/t"},
+        )
+        r = render_template(template, **ctx)
+        assert "cat > /t/params.yaml" in r
+        assert yaml.safe_load(self._heredoc_body(r)) == params
+
+    def test_array_template_python_writes_params_yaml(self):
+        from hpc_sweep_manager.core.common.templating import render_template
+
+        r = render_template(
+            "slurm_array.sh.j2",
+            job_name="a",
+            sweep_id="sw",
+            num_jobs=2,
+            logs_dir="/l",
+            tasks_dir="/t",
+            params_file="/p.json",
+            sbatch_directives="",
+            modules=[],
+            pre_script=[],
+            project_dir="/p",
+            python_path="python",
+            script_path="train.py",
+            wandb_group=None,
+            uses_conda=False,
+        )
+        # The inline python creates the task dir + dumps params.yaml (JSON is
+        # valid YAML, so no PyYAML needed on the compute node).
+        assert "os.makedirs(_task_dir" in r
+        assert 'params.yaml' in r
+        assert "json.dump(params" in r

@@ -47,9 +47,16 @@ from pathlib import Path
 import shlex
 from typing import Any, Dict, List, Optional, Sequence
 
-from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
+from ..common.compute_source import (
+    TERMINAL_STATES,
+    ComputeSource,
+    JobInfo,
+    ProgressCallback,
+    SubmissionMode,
+)
 from ..common.resource_spec import ResourceSpec
-from ..common.templating import params_to_hydra_args, render_template
+from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
+from ..hpc.scheduler_queue import parse_reservations_output
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
     parse_sacct_state,
@@ -305,7 +312,39 @@ class SSHSlurmComputeSource(ComputeSource):
             f"(remote_sweep_dir={self._remote_sweep_dir}, "
             f"run_prefix={self._run_prefix!r})"
         )
+        await self._check_reservations()
         return True
+
+    async def _check_reservations(self) -> None:
+        """Warn at submit if the cluster has any Slurm reservation.
+
+        The field-report trap: a task held behind a maintenance reservation
+        (e.g. 06:00–18:00) outlived the launcher and stranded the sweep. Best-
+        effort — never fails setup; just surfaces the window + the recovery path
+        (``hsm sweep collect``, now that T0/T1 keep partial progress).
+        """
+        try:
+            result = await self._ssh_run(
+                "scontrol show reservations", check=False
+            )
+        except Exception:  # noqa: BLE001
+            return
+        if (result.returncode or 0) != 0:
+            return
+        reservations = parse_reservations_output(result.stdout or "")
+        if not reservations:
+            return
+        names = "; ".join(
+            f"{r.name} ({r.start_time}→{r.end_time})" for r in reservations[:3]
+        )
+        more = "" if len(reservations) <= 3 else f" (+{len(reservations) - 3} more)"
+        logger.warning(
+            f"{len(reservations)} Slurm reservation(s) on {self.host}: {names}"
+            f"{more}. A task held behind a reservation can outlive this "
+            f"launcher; if `hsm sweep run` exits before everything finishes, "
+            f"run `hsm sweep collect {self.sweep_id}` later to pull/archive "
+            f"the rest."
+        )
 
     # ----------------------------------------------------------------- submit
     async def submit_job(
@@ -341,6 +380,7 @@ class SSHSlurmComputeSource(ComputeSource):
             python_path=self._run_prefix,
             script_path=self.script_path,
             params_hydra=params_to_hydra_args(params),
+            params_yaml=params_to_yaml(params),
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
         )
@@ -387,13 +427,113 @@ class SSHSlurmComputeSource(ComputeSource):
         job_name_prefix: Optional[str] = None,
     ) -> List[str]:
         if mode == "array":
-            return [
+            job_ids = [
                 await self._submit_array(
                     params_list, sweep_id, spec, wandb_group, job_name_prefix
                 )
             ]
-        return await super().submit_batch(
-            params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
+        else:
+            job_ids = await super().submit_batch(
+                params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
+            )
+        # Drop a re-attach manifest (local + remote) so `hsm sweep collect <id>`
+        # can pull/archive after the launching process dies (T0).
+        await self._write_manifest(job_ids, mode, len(params_list))
+        return job_ids
+
+    async def _write_manifest(
+        self, job_ids: List[str], submission_mode: str, num_tasks: int
+    ) -> None:
+        """Persist everything a fresh client needs to re-attach this sweep.
+
+        Written to BOTH the local sweep dir and the remote sweep dir. Holds the
+        source-reconstruction fields + resolved remote paths + job ids, so
+        ``hsm sweep collect <id>`` works with no dependence on the original
+        process's in-memory state (or even the current ``.hsm/config.yaml``).
+        """
+        manifest = {
+            "sweep_id": self.sweep_id,
+            "backend": "slurm",
+            "name": self.name,
+            "host": self.host,
+            "ssh_key": self.ssh_key,
+            "ssh_port": self.ssh_port,
+            "conda_env": self.conda_env,
+            "python_path": self.python_path,
+            "project_dir": self.project_dir,
+            "remote_root": self.remote_root,
+            "workdir": self.workdir,
+            "archive_dir": self.archive_dir,
+            "resolved_archive_dir": self._resolved_archive_dir,
+            "archive_on": self.archive_on,
+            "keep_remote_on_success": self.keep_remote_on_success,
+            "remote_sweep_dir": self._remote_sweep_dir,
+            "remote_tasks_dir": self._remote_tasks_dir,
+            "submission_mode": submission_mode,
+            "job_ids": list(job_ids),
+            "num_tasks": num_tasks,
+            "submitted_at": datetime.now().isoformat(),
+        }
+        content = json.dumps(manifest, indent=2, default=str)
+        if self.sweep_dir is not None:
+            try:
+                (self.sweep_dir / ".hsm_manifest.json").write_text(content)
+            except OSError as e:  # noqa: BLE001
+                logger.warning(f"could not write local manifest: {e}")
+        if self._remote_sweep_dir is not None:
+            try:
+                await self._write_remote_file(
+                    f"{self._remote_sweep_dir}/.hsm_manifest.json", content
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"could not write remote manifest: {e}")
+
+    async def reattach(self, sweep_dir: Path, sweep_id: str, manifest: Dict[str, Any]) -> bool:
+        """Reconnect to an already-submitted sweep WITHOUT re-pushing code.
+
+        Used by ``hsm sweep collect`` after the launcher died: trusts the
+        manifest's resolved remote paths instead of re-deriving (and crucially
+        skips the rsync push that :meth:`setup` does). Returns False if the SSH
+        connection can't be opened.
+        """
+        sweep_dir.mkdir(parents=True, exist_ok=True)
+        (sweep_dir / "tasks").mkdir(parents=True, exist_ok=True)
+        self.sweep_dir = sweep_dir
+        self.sweep_id = sweep_id
+        try:
+            self._conn = await self._open_connection()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"SSH connection to {self.host} failed: {e}")
+            return False
+        self._remote_sweep_dir = manifest["remote_sweep_dir"]
+        self._remote_tasks_dir = manifest.get(
+            "remote_tasks_dir", f"{self._remote_sweep_dir}/tasks"
+        )
+        self._resolved_archive_dir = manifest.get("resolved_archive_dir")
+        return True
+
+    @classmethod
+    def from_manifest(cls, manifest: Dict[str, Any]) -> "SSHSlurmComputeSource":
+        """Reconstruct a source from a ``.hsm_manifest.json`` for re-attach.
+
+        Carries no dependence on the current ``.hsm/config.yaml`` — the manifest
+        captured everything at submit time. ``script_path`` is irrelevant for
+        collection (we never re-submit), so it's left empty.
+        """
+        return cls(
+            name=manifest.get("name") or manifest.get("host") or "remote",
+            host=manifest.get("host"),
+            ssh_key=manifest.get("ssh_key"),
+            ssh_port=manifest.get("ssh_port"),
+            conda_env=manifest.get("conda_env"),
+            python_path=manifest.get("python_path"),
+            project_dir=manifest.get("project_dir", "."),
+            script_path="",
+            remote_root=manifest.get("remote_root", "~/.hsm/runs"),
+            workdir=manifest.get("workdir"),
+            archive_dir=manifest.get("archive_dir"),
+            archive_on=manifest.get("archive_on", "completed"),
+            keep_remote_on_success=manifest.get("keep_remote_on_success", False),
         )
 
     async def _submit_array(
@@ -561,6 +701,66 @@ class SSHSlurmComputeSource(ComputeSource):
         return success
 
     # ----------------------------------------------------------- collection
+    async def _pull_tasks(self) -> int:
+        """rsync-pull the remote ``tasks/`` dir down (additive, no ``--delete``).
+
+        Idempotent and cheap to call repeatedly: rsync only transfers new /
+        changed task dirs. Used both for the final pull in ``collect_results``
+        and for the mid-flight incremental pulls in ``wait_for_all`` (T1), so a
+        stuck task or a dead launcher can't strand the tasks that DID finish.
+        """
+        remote_tasks = f"{self._remote_sweep_dir}/tasks"
+        local_tasks = str(self.sweep_dir / "tasks")
+        pull_cmd = build_rsync_pull_cmd(self.host, remote_tasks, local_tasks)
+        logger.info(f"rsync pull from {self.host}:{remote_tasks}")
+        return await self._run_rsync(pull_cmd)
+
+    async def wait_for_all(
+        self,
+        poll_interval: float = 5.0,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> Dict[str, str]:
+        """Poll like the base loop, but rsync-pull ``tasks/`` whenever a job
+        newly reaches a terminal state (T1).
+
+        Partial progress then survives a single stuck task (a 12h maintenance
+        hold no longer holds the other N-1 hostage) and a launcher death loses
+        at most the last poll interval. The final ``collect_results()`` still
+        runs the authoritative archive → pull → cleanup (CLAUDE.md gotcha 4/4b)
+        — these mid-flight pulls are additive and idempotent, never a
+        replacement. Mirrors :meth:`ComputeSource.wait_for_all`; kept in sync.
+        """
+        final_statuses: Dict[str, str] = {}
+        for job_id, info in list(self.completed_jobs.items()):
+            final_statuses[job_id] = info.status
+
+        total = len(self.active_jobs) + len(final_statuses)
+        if on_progress is not None:
+            on_progress(len(final_statuses), max(total, 1))
+
+        pulled_through = len(final_statuses)
+        while self.active_jobs:
+            for job_id in list(self.active_jobs.keys()):
+                status = await self.get_job_status(job_id)
+                if status in TERMINAL_STATES and job_id not in final_statuses:
+                    final_statuses[job_id] = status
+            # New completions this cycle → pull their task dirs now.
+            if len(final_statuses) > pulled_through and self._remote_sweep_dir:
+                pulled_through = len(final_statuses)
+                try:
+                    await self._pull_tasks()
+                except Exception as e:  # noqa: BLE001 — best-effort; retried at end
+                    logger.warning(
+                        f"incremental tasks/ pull on {self.host} failed "
+                        f"(will retry in collect_results): {e}"
+                    )
+            if on_progress is not None:
+                total = len(self.active_jobs) + len(final_statuses)
+                on_progress(len(final_statuses), max(total, 1))
+            if self.active_jobs:
+                await asyncio.sleep(poll_interval)
+        return final_statuses
+
     async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
         if self._remote_sweep_dir is None or self.sweep_dir is None:
             logger.warning(
@@ -579,11 +779,7 @@ class SSHSlurmComputeSource(ComputeSource):
         if self._should_archive(any_failed):
             await self._archive_remote(any_failed)
 
-        remote_tasks = f"{self._remote_sweep_dir}/tasks"
-        local_tasks = str(self.sweep_dir / "tasks")
-        pull_cmd = build_rsync_pull_cmd(self.host, remote_tasks, local_tasks)
-        logger.info(f"rsync pull from {self.host}:{remote_tasks}")
-        rc = await self._run_rsync(pull_cmd)
+        rc = await self._pull_tasks()
         if rc != 0:
             return False
 

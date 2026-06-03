@@ -27,6 +27,10 @@ echo "Job ID: ${SLURM_JOB_ID:-unknown}" > {{ task_dir }}/task_info.txt
 echo "Node: $(hostname)" >> {{ task_dir }}/task_info.txt
 echo "Parameters: {{ params_hydra }}" >> {{ task_dir }}/task_info.txt
 echo "Started: $(date)" >> {{ task_dir }}/task_info.txt
+# Self-describing artifact: the exact overrides for this task, so a synced
+# checkpoint is never orphaned from its params (see Tier 2 of the field report).
+cat > {{ task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
+{{ params_yaml }}HSM_PARAMS_EOF
 
 COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group or sweep_id }} output.dir={{ task_dir }}"
 echo "Executing: $COMMAND"

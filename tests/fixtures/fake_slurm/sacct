@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Fake sacct: reports a job's terminal state from $HSM_FAKE_STATE_DIR/jobs.jsonl.
+
+Mirrors the fake ``squeue`` state model, but — like real sacct — reports jobs
+even after they've left the queue (that's the whole point: squeue forgets,
+sacct remembers, which is exactly what HSM consults to tell COMPLETED from
+FAILED). Supports the subset HSM uses: ``-j ID[,ID...]`` (repeatable), ``-n``,
+``-X``, ``-o State``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+
+_DEFAULTS = {"pending_s": 0.5, "running_s": 1.0}
+
+
+def _read_jobs(state_path: str) -> list[dict]:
+    if not os.path.exists(state_path):
+        return []
+    out: list[dict] = []
+    with open(state_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+def _current_state(job: dict, now: float, pending_s: float, running_s: float) -> str:
+    if job["state"] in ("CANCELLED", "FAILED"):
+        return job["state"]
+    elapsed = now - job["submit_time"]
+    if elapsed < pending_s:
+        return "PENDING"
+    if elapsed < pending_s + running_s:
+        return "RUNNING"
+    return "COMPLETED"
+
+
+def main() -> int:
+    state_dir = os.environ.get("HSM_FAKE_STATE_DIR")
+    if not state_dir:
+        print("HSM_FAKE_STATE_DIR not set", file=sys.stderr)
+        return 1
+
+    pending_s = float(os.environ.get("HSM_FAKE_PENDING_S", _DEFAULTS["pending_s"]))
+    running_s = float(os.environ.get("HSM_FAKE_RUNNING_S", _DEFAULTS["running_s"]))
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("-j", "--job", action="append", default=[])
+    parser.add_argument("-n", action="store_true", dest="noheader")
+    parser.add_argument("-X", action="store_true", dest="allocations")
+    parser.add_argument("-o", "--format", default="State")
+    args, _ = parser.parse_known_args()
+
+    requested_ids: set[str] = set()
+    for j_arg in args.job:
+        for piece in j_arg.split(","):
+            piece = piece.strip()
+            if piece:
+                requested_ids.add(piece)
+
+    jobs = _read_jobs(os.path.join(state_dir, "jobs.jsonl"))
+    if requested_ids:
+        jobs = [j for j in jobs if j["id"] in requested_ids]
+
+    now = time.time()
+    # -o State → one State token per allocation row. We store one record per
+    # job, so -X (allocations only) is a no-op here.
+    for j in jobs:
+        print(_current_state(j, now, pending_s, running_s))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

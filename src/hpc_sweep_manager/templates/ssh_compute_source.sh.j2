@@ -27,6 +27,9 @@ mkdir -p {{ remote_task_dir }}
     echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
     echo "Started: $(date)"
 } > {{ remote_task_dir }}/task_info.txt
+# Self-describing artifact: the exact overrides for this task (Tier 2).
+cat > {{ remote_task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
+{{ params_yaml }}HSM_PARAMS_EOF
 
 COMMAND="{{ run_prefix }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group }} output.dir={{ remote_task_dir }}"
 echo "$COMMAND" > {{ remote_task_dir }}/command.txt

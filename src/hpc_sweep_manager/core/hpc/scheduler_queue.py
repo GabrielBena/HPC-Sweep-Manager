@@ -265,30 +265,38 @@ class SlurmQueue:
             return []
         if result.returncode != 0:
             return []
-
-        # scontrol emits "key=value" pairs separated by whitespace, one
-        # reservation per stanza (stanzas separated by blank lines).
-        stanzas = re.split(r"\n\s*\n", result.stdout.strip())
-        out: List[Reservation] = []
-        for stanza in stanzas:
-            if not stanza.strip() or stanza.lower().startswith("no reservations"):
-                continue
-            fields = dict(_KV_RE.findall(stanza))
-            try:
-                node_count = int(fields.get("NodeCnt", "0"))
-            except ValueError:
-                node_count = 0
-            out.append(
-                Reservation(
-                    name=fields.get("ReservationName", "?"),
-                    start_time=fields.get("StartTime", "?"),
-                    end_time=fields.get("EndTime", "?"),
-                    duration=fields.get("Duration", "?"),
-                    nodes=fields.get("Nodes", "?"),
-                    node_count=node_count,
-                )
-            )
-        return out
+        return parse_reservations_output(result.stdout)
 
 
 _KV_RE = re.compile(r"([A-Za-z][A-Za-z0-9_]*)=(\S+)")
+
+
+def parse_reservations_output(stdout: str) -> List[Reservation]:
+    """Parse ``scontrol show reservations`` stdout into :class:`Reservation` rows.
+
+    Pure (no subprocess) so SSH-driven sources can reuse it over their own
+    transport (run ``scontrol`` via SSH, hand the stdout here). scontrol emits
+    whitespace-separated ``key=value`` pairs, one reservation per blank-line-
+    separated stanza.
+    """
+    stanzas = re.split(r"\n\s*\n", (stdout or "").strip())
+    out: List[Reservation] = []
+    for stanza in stanzas:
+        if not stanza.strip() or stanza.lower().startswith("no reservations"):
+            continue
+        fields = dict(_KV_RE.findall(stanza))
+        try:
+            node_count = int(fields.get("NodeCnt", "0"))
+        except ValueError:
+            node_count = 0
+        out.append(
+            Reservation(
+                name=fields.get("ReservationName", "?"),
+                start_time=fields.get("StartTime", "?"),
+                end_time=fields.get("EndTime", "?"),
+                duration=fields.get("Duration", "?"),
+                nodes=fields.get("Nodes", "?"),
+                node_count=node_count,
+            )
+        )
+    return out

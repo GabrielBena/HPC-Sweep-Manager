@@ -54,6 +54,13 @@ try:
         sys.exit(1)
     global_index = matching_combo.get('global_index', array_index)
     params = matching_combo['params']
+    # Self-describing artifact: drop the exact overrides next to the checkpoint
+    # (Tier 2). JSON is valid YAML, so no PyYAML needed on the compute node.
+    _task_dir = os.path.join("{{ tasks_dir }}", f"task_{global_index}")
+    os.makedirs(_task_dir, exist_ok=True)
+    with open(os.path.join(_task_dir, "params.yaml"), "w") as _pf:
+        json.dump(params, _pf, indent=2, sort_keys=True)
+        _pf.write("\n")
     tokens = []
     for k, v in params.items():
         if isinstance(v, (list, tuple)):

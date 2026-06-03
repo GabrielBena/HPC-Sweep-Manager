@@ -8,10 +8,12 @@ export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% for mod in modules %}
 module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed (no module system?)" >&2
 {% endfor %}
-{% include "_conda_init.sh.j2" %}
 {% for line in pre_script %}
 {{ line }}
 {% endfor %}
+{# conda-init AFTER modules + pre_script so a module-provided conda is on PATH
+   first and the probe defers to it (never shadows it with micromamba). #}
+{% include "_conda_init.sh.j2" %}
 
 cd {{ project_dir }}
 
@@ -24,6 +26,9 @@ mkdir -p {{ task_dir }}
     echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
     echo "Started: $(date)"
 } > {{ task_dir }}/task_info.txt
+# Self-describing artifact: the exact overrides for this task (Tier 2).
+cat > {{ task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
+{{ params_yaml }}HSM_PARAMS_EOF
 
 COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group }} output.dir={{ task_dir }}"
 echo "$COMMAND" > {{ task_dir }}/command.txt

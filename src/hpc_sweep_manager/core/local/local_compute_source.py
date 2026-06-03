@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
-from ..common.templating import params_to_hydra_args, render_template
+from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.push_exec import resolve_run_prefix
 
 logger = logging.getLogger(__name__)
@@ -274,6 +274,7 @@ class LocalComputeSource(ComputeSource):
             python_path=self.python_path,
             script_path=self.script_path,
             params_hydra=params_to_hydra_args(params),
+            params_yaml=params_to_yaml(params),
             wandb_group=wandb_group or sweep_id,
             cuda_visible_devices=cuda_visible,
             modules=list(effective_spec.modules),

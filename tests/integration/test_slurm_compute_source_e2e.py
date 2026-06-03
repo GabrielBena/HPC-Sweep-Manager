@@ -89,6 +89,23 @@ async def test_wait_for_all_observes_completion(configured_source, tmp_path, fak
     assert job_id in configured_source.completed_jobs
 
 
+async def test_wait_for_all_reports_failed_via_sacct(
+    configured_source, tmp_path, fake_slurm
+):
+    """#4 regression: a job that ends FAILED must be reported FAILED, not
+    COMPLETED. Once a job leaves squeue, HSM consults sacct for the real
+    terminal state (queue-absence is not success)."""
+    sweep_dir = tmp_path / "sweep_test"
+    sweep_dir.mkdir()
+    await configured_source.setup(sweep_dir, "sweep_test")
+    job_id = await configured_source.submit_job({"lr": 0.01}, "task_001", "sweep_test")
+    # Job ends in FAILED and drops out of the queue (sticky in the fake).
+    fake_slurm.mark_failed(job_id)
+    final = await configured_source.wait_for_all(poll_interval=0.05)
+    assert final == {job_id: "FAILED"}
+    assert configured_source.completed_jobs[job_id].status == "FAILED"
+
+
 async def test_cancel_job_marks_state(configured_source, tmp_path, fake_slurm):
     sweep_dir = tmp_path / "sweep_test"
     sweep_dir.mkdir()

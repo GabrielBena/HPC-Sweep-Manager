@@ -836,6 +836,105 @@ def run_cmd(
     )
 
 
+async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Console) -> None:
+    """Re-attach to an SSH-Slurm sweep and pull/archive whatever's terminal.
+
+    No dependence on the original launcher's in-memory state: the manifest
+    carries the source-reconstruction fields + resolved remote paths + job ids.
+    Idempotent — rsync only transfers new task dirs; re-running picks up tasks
+    that finished since.
+    """
+    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
+
+    source = SSHSlurmComputeSource.from_manifest(manifest)
+    sweep_id = manifest["sweep_id"]
+    if not await source.reattach(sweep_dir, sweep_id, manifest):
+        console.print(f"[red]Could not connect to {source.host} to collect.[/red]")
+        return
+    try:
+        job_ids = manifest.get("job_ids", [])
+        statuses = {jid: await source._terminal_state_via_sacct(jid) for jid in job_ids}
+        terminal = {j: s for j, s in statuses.items() if s in TERMINAL_STATES}
+        running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
+        # Seed completed_jobs so collect_results computes any_failed correctly.
+        for jid, s in terminal.items():
+            source.completed_jobs[jid] = JobInfo(
+                job_id=jid, job_name=jid, params={}, source_name=source.name, status=s
+            )
+        if running:
+            # Partial: pull what's done; keep remote + skip archive (not done yet).
+            rc = await source._pull_tasks()
+            console.print(
+                f"[yellow]{len(terminal)}/{len(job_ids)} job(s) terminal; "
+                f"{len(running)} still running.[/yellow]"
+            )
+            console.print(
+                f"Pulled tasks/ → {sweep_dir / 'tasks'} (rc={rc}). "
+                f"Re-run [bold]hsm sweep collect {sweep_id}[/bold] later for the rest."
+            )
+        else:
+            ok = await source.collect_results()
+            failed = sum(1 for s in terminal.values() if s == "FAILED")
+            colour = "red" if failed else "green"
+            console.print(
+                f"[{colour}]All {len(job_ids)} job(s) terminal: "
+                f"{len(terminal) - failed} COMPLETED, {failed} FAILED.[/{colour}]"
+            )
+            archived = " + archived" if source.archive_dir else ""
+            console.print(
+                f"Pulled{archived} → {sweep_dir / 'tasks'} "
+                f"({'ok' if ok else 'pull reported an error — see logs'})."
+            )
+    finally:
+        await source.cleanup()
+
+
+@sweep_cmd.command("collect")
+@click.argument("sweep_id")
+@common_options
+@click.pass_context
+def collect_cmd(ctx, sweep_id, verbose, quiet):
+    """Re-attach to a sweep and pull/archive whatever finished.
+
+    For SSH-Slurm sweeps whose launching `hsm sweep run` process is gone (long
+    run + overnight + a maintenance window). Reads the sweep's
+    `.hsm_manifest.json`, classifies each job via `sacct`, pulls terminal task
+    dirs back, and runs the server-side archive once everything is done.
+    Idempotent: safe to re-run as more tasks finish.
+    """
+    import json
+
+    console = ctx.obj["console"]
+    logger = ctx.obj["logger"]
+    sweep_dir = Path("sweeps/outputs") / sweep_id
+    manifest_path = sweep_dir / ".hsm_manifest.json"
+    if not manifest_path.exists():
+        console.print(f"[red]No manifest at {manifest_path}.[/red]")
+        console.print(
+            "[yellow]`hsm sweep collect` needs the .hsm_manifest.json written at "
+            "submit time (SSH-Slurm sweeps from this build onward).[/yellow]"
+        )
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as e:
+        console.print(f"[red]Could not read manifest {manifest_path}: {e}[/red]")
+        return
+    if manifest.get("backend") != "slurm":
+        console.print(
+            f"[red]collect supports backend=slurm sweeps only "
+            f"(manifest backend={manifest.get('backend')!r}).[/red]"
+        )
+        return
+    try:
+        asyncio.run(_collect_via_manifest(sweep_dir, manifest, console))
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]collect failed: {e}[/red]")
+        logger.exception("hsm sweep collect failed")
+        raise
+
+
 @sweep_cmd.command("status")
 @click.argument("sweep_id", required=False)
 @click.option("--all", "-a", is_flag=True, help="Show status of all sweeps")
