@@ -112,6 +112,42 @@ Should print a python path. If you see `command not found: conda`, the
 template's auto-source will catch the most common installs, but if your
 conda lives somewhere exotic you may need to set `python_path` instead.
 
+## Your project's own package on the remote
+
+If your training script does `import yourpkg` and `yourpkg` is an
+*editable* install on your local machine (`pip install -e .`), the
+rsynced tree alone will **not** make that import work on the remote:
+`python scripts/train.py` puts `scripts/` on `sys.path`, not the project
+root, and the remote conda env has never seen your package. The failure
+is silent at submit time — every task dies mid-sweep on the compute node
+with `ModuleNotFoundError: No module named 'yourpkg'`.
+
+Two fixes; pick one:
+
+1. **Install the package into the remote env** (durable — survives HSM
+   re-pushes; do it once per env):
+
+   ```bash
+   ssh my-box "cd ~/.hsm/runs/<project-name>/code && conda run -n my-env pip install -e ."
+   ```
+
+2. **Point `PYTHONPATH` at the pushed code dir** (zero-install — lives in
+   config, applies to every task):
+
+   ```yaml
+   distributed:
+     remotes:
+       my-box:
+         pre_script:
+           - export PYTHONPATH=$HOME/.hsm/runs/<project-name>/code:$PYTHONPATH
+   ```
+
+Option 2 always imports exactly the code that was just pushed (no stale
+installed copy), which is usually what you want for active development.
+Note option 1's editable install points at the *rolling* code dir — HSM
+re-pushes into the same path, so the install stays current too; it only
+goes stale if you change the project name or `remote_root`.
+
 ## `.hsm/config.yaml` — the `distributed:` block
 
 You can submit a sweep with **just** a bare `~/.ssh/config` alias and no
