@@ -338,8 +338,21 @@ ssh hq 'cd ~/code/my-project && hsm sweep status'
 rsync -av hq:/mnt/8TB_HDD/<user>/hsm-sweeps/<sweep_id>/ /tmp/<sweep_id>/
 ```
 
-There's no `hsm sweep collect` command yet — for now, plain `rsync` is
-the recommended path.
+### Re-attaching to a sweep whose launcher died
+
+For SSH-Slurm sweeps, if the `hsm sweep run` process exits before every task
+finishes (long run + overnight + a maintenance reservation — the classic
+`/scratch` purge trap), re-attach from HQ and pull/archive what's done:
+
+```bash
+ssh hq 'cd ~/code/my-project && hsm sweep collect <sweep_id>'
+```
+
+It reads the sweep's `.hsm_manifest.json`, classifies each job via `sacct`,
+pulls terminal task dirs, and runs the `/scratch → /shares` archive once all
+tasks are done. Idempotent — re-run as more finish. HSM also pulls completed
+tasks **incrementally during the run**, so a single stuck task can't strand the
+rest, and warns at submit if a reservation window could outlast the launcher.
 
 ## Smoke test before turning on distributed
 

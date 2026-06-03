@@ -126,6 +126,7 @@ distributed:
   conda_env: my-env                 # global default
   rsync_excludes:                   # adds to DEFAULT_RSYNC_EXCLUDES
     - data/raw/
+    - outputs/                      # see note below
     - "*.pt"
   remotes:
     my-box:
@@ -144,6 +145,13 @@ distributed:
 
 CLI flags (`--gpus`, `--conda-env`) override per-remote config; per-remote
 config overrides global `distributed.*`; global overrides defaults.
+
+`DEFAULT_RSYNC_EXCLUDES` already skips the usual ML artifacts from the code
+push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.pkl`/`*.ckpt`,
+`checkpoints/`, `multirun/`, `.hydra`, `wandb`. A bare `outputs/` is **not**
+excluded by default (it's too easy to clobber a legit source dir of that name);
+if your project dumps artifacts under `outputs/`, add it to `rsync_excludes`
+as shown above to keep the push lean.
 
 ## Driving Slurm over SSH (`backend: slurm`)
 
@@ -178,11 +186,20 @@ distributed:
 Then:
 
 ```bash
-hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode array
+hsm sweep run --remote uzh -c sweeps/sweep.yaml              # one sbatch per combo
+hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode array # one sbatch --array
 ```
 
+`--remote` implies remote execution; the optional `--mode array|individual`
+picks the **submission style**. Default is `individual` (one `sbatch` per
+parameter combo). `--mode array` packs the whole sweep into a single
+`sbatch --array` — fewer scheduler entries, faster to queue. (`--mode array`
+is ignored for `backend: ssh` bash remotes, which have no scheduler.)
+
 The CLI flags `--walltime` / `--resources` still override `spec:` per
-run, same as the local-Slurm path.
+run, same as the local-Slurm path. Add `--dry-run` to preview the merged
+per-remote `spec:` (the resulting `#SBATCH --gres=…`, account, qos) before
+submitting.
 
 ### `workdir` vs `remote_root` — what changes
 
@@ -231,11 +248,24 @@ distributed:
         mem: "32G"
         gpus: 1
         gpu_type: H100              # uppercase; check `sinfo -o "%P %G"`
+        pre_script:
+          - module load miniforge3 # canonical S3IT conda recipe (see below)
 ```
 
 GRES names are case-sensitive on S3IT (`H100`/`L4`/`A100`/`H200`). See
 [HPC_EXECUTION.md](HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant)
 for the wider Slurm field reference.
+
+**`$USER` / `~` / `$HOME` in `workdir` / `archive_dir` expand** — HSM resolves
+them once on the remote at connect time, so `/scratch/$USER/hsm-runs` becomes
+`/scratch/<you>/hsm-runs` (not a literal `$USER` directory).
+
+**Conda from a module (the S3IT way).** S3IT provides conda via
+`module load miniforge3` (prefix under `/apps/...`), not a fixed `~/miniconda3`.
+Put it in `pre_script:` as above — HSM renders `module load` *before* its
+conda-init probe and defers to the module's conda when it's on PATH, so
+`conda run -n <env>` resolves the right env and your GPU job stays on GPU. (No
+`ln -sfn … ~/miniforge3` symlink needed — that old workaround is obsolete.)
 
 ### Smoke test
 
@@ -262,6 +292,41 @@ REMOTE=uzh CONDA_ENV=cpvr \
 - **Empty `archive_dir`:** the `.archived` sentinel only lands when
   `archive_dir` is set AND `archive_on` allows. If you want forensics
   on partial-failure runs, use `archive_on: always`.
+- **Job trains on CPU though a GPU was allocated:** almost always the conda
+  env wasn't the one you think (a micromamba bridge shadowed a module conda).
+  Use the `pre_script: [module load miniforge3]` recipe above; the rendered
+  script now defers to a module-provided conda. Verify with a one-off
+  `srun … python -c "import jax; print(jax.devices())"`.
+- **A failed sweep prints `FAILED`, not `COMPLETED`.** Once a job leaves the
+  queue HSM asks `sacct` for the real terminal state, and `hsm sweep run` exits
+  non-zero if anything failed — so check the exit code in scripts. Failing task
+  dirs + the logs dir are printed; `hsm sweep report <id> --scan-tasks` and
+  `hsm sweep errors <id>` give detail.
+
+### Recovering a sweep whose launcher died — `hsm sweep collect`
+
+A long sweep where the `hsm sweep run` process exits before every task finishes
+(overnight runs, a task stuck behind a **maintenance reservation**, a dropped
+SSH session) no longer strands results:
+
+- As each task reaches a terminal state mid-flight, HSM pulls its `tasks/<t>/`
+  dir back immediately — a single stuck task can't hold the others hostage.
+- At submit, HSM warns if the cluster has a Slurm reservation whose window
+  could outlast this launcher.
+- Submit writes a `.hsm_manifest.json` (locally + on the remote). Re-attach any
+  time with:
+
+  ```bash
+  hsm sweep collect <sweep_id>
+  ```
+
+  It classifies each job via `sacct`, pulls everything terminal, and runs the
+  `/scratch → /shares` archive once all tasks are done. Idempotent — re-run as
+  more tasks finish. No dependence on the original process.
+
+Every task dir also carries a `params.yaml` with that task's exact overrides,
+so a synced checkpoint is self-describing (pair it with the project code to
+rebuild the model) even from a partial pull.
 
 ## Housekeeping
 

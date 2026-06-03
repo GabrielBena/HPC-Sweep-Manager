@@ -141,7 +141,11 @@ These were deliberately removed; resist resurrecting them.
   by `hsm_config.yaml`'s `distributed:` block.
 - **`hsm results collect` / `hsm collect-results`.** Deleted — the push-SSH
   `SSHComputeSource.collect_results()` does rsync-pull automatically as part
-  of `run_sweep_async()`.
+  of `run_sweep_async()`. NOTE: this is NOT the same as the **live**
+  `hsm sweep collect <sweep_id>` (added for field-report #8 Tier 0) — that one
+  *re-attaches* to an already-submitted SSH-Slurm sweep via its
+  `.hsm_manifest.json` and pulls/archives after the launcher died. Distinct
+  command, distinct purpose; don't conflate or delete it.
 - **`RemoteJobManager` / `RemoteDiscovery` / `RemoteValidator` /
   `discover_remote_config`.** Auto-discovery of remote project structure is
   gone for good. The push model rsyncs the local tree up; the remote is a
@@ -175,25 +179,32 @@ These are real bugs that have been fixed; if you see code that looks like
 it's trying to reintroduce them, push back.
 
 1. **Non-interactive SSH shells AND sbatch compute nodes skip `~/.bashrc`** →
-   `conda` / `MAMBA_EXE` is not on PATH. All three rendered-script templates
-   (`ssh_compute_source.sh.j2`, `slurm_array.sh.j2`, `slurm_single.sh.j2`)
-   include the shared partial
+   `conda` / `MAMBA_EXE` is not on PATH. All **four** rendered-script templates
+   (`ssh_compute_source.sh.j2`, `slurm_array.sh.j2`, `slurm_single.sh.j2`,
+   `local_compute_source.sh.j2`) include the shared partial
    [`templates/_conda_init.sh.j2`](src/hpc_sweep_manager/templates/_conda_init.sh.j2)
-   when `uses_conda=True`. The partial probes standard conda paths
-   (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`), then falls back
-   to micromamba via `$MAMBA_EXE` + common locations (including
-   `~/code/packages/HPC-Sweep-Manager/bin/micromamba` for the S3IT layout
-   where the binary lives inside an HSM clone), sources the right
-   shell-hook, and defines `conda() { micromamba "$@"; }` so the rest of
-   the script can keep emitting `conda run -n <env> python ...` uniformly.
-   SSHComputeSource + SSHSlurmComputeSource pass `uses_conda` based on
-   `bool(self.conda_env)`; native SlurmComputeSource uses
-   `_python_needs_conda_init(python_path)` (`True` if `python_path`
-   starts with `conda `/`mamba `/`micromamba `).
+   when `uses_conda=True`. **Ordering matters (field-report fix):** `modules`
+   and `pre_script` render *before* the conda-init include, so a conda provided
+   by `module load miniforge3` (the canonical S3IT recipe) is already on PATH
+   when the partial runs. The partial first checks `command -v conda` — if a
+   real conda is already present it does NOTHING ELSE (never defines the
+   `conda() { micromamba "$@"; }` bridge, which would otherwise shadow the
+   module conda and silently train on CPU). Only if no real conda is found does
+   it probe standard paths (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`)
+   then fall back to micromamba (`$MAMBA_EXE` + common locations, including
+   `~/code/packages/HPC-Sweep-Manager/bin/micromamba`). SSHComputeSource +
+   SSHSlurmComputeSource pass `uses_conda` based on `bool(self.conda_env)`;
+   native SlurmComputeSource uses `_python_needs_conda_init(python_path)`.
+   **The historical `ln -sfn <module-prefix> ~/miniforge3` workaround is no
+   longer needed** — `pre_script: [module load miniforge3]` is sufficient.
 
-2. **`~` in `output.dir=~/path` does NOT tilde-expand** inside double-quoted
-   COMMAND strings (bash only expands `~` in cd/mkdir tokens). `SSHComputeSource.setup()`
-   probes `echo $HOME` once and substitutes if `remote_root` starts with `~`.
+2. **`~` / `$USER` / `$HOME` in remote paths don't expand where it matters.**
+   `output.dir=<path>` inside double-quoted COMMAND strings and the rsync
+   *destination* (built locally, no remote shell) won't expand them — so
+   `workdir: /scratch/$USER/...` used to create a literal `$USER` dir. Both SSH
+   sources resolve `remote_root` / `workdir` / `archive_dir` ONCE at setup via
+   `_resolve_remote_path()` (a remote-shell `echo <path>`, which expands `~`
+   AND `$VAR`). Don't revert to a `~`-only substitution.
 
 3. **`script_path` must be relative-to-project on the remote.** After
    `cd <remote_code_dir>` on the rsync'd mirror, an absolute LOCAL path
@@ -285,6 +296,16 @@ it's trying to reintroduce them, push back.
    inserts one `JobInfo` for the whole array; `wait_for_all` reports `1 done`
    even when `N` tasks succeeded. The per-task truth lives in
    `tasks/*/task_info.txt`. Acceptable for now — defer until users complain.
+
+7b. **Terminal state comes from `sacct`, NOT queue-absence (field-report fix).**
+   A job leaving `squeue` is NOT success. Both Slurm sources, once `squeue -j`
+   returns empty, call `sacct -j <id> -n -X -o State` and map it via
+   `parse_sacct_state` (`slurm_protocol.py`) — so FAILED/TIMEOUT/OOM are
+   reported correctly instead of a false `COMPLETED` (the most dangerous bug in
+   the report). Fallback to `COMPLETED` only when sacct is absent / returns
+   nothing (no-accounting clusters; `FileNotFoundError` is caught). `hsm sweep
+   run` now exits non-zero when any job failed. Don't revert to "gone from
+   squeue → COMPLETED".
 
 8. **`params_to_hydra_args` quoting:** values with spaces/commas may render
    with nested quotes that bash collapses gracefully, but path-as-value
@@ -392,6 +413,26 @@ Smoke driver for the new SSH-Slurm path:
 User-facing docs: [docs/user_guide/MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md)
 is the canonical place; [SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm)
 has the per-feature reference.
+
+## Recently landed (2026-06-03) — S3IT first-use field-report fixes
+
+Eight issues from the first real SSH-Slurm → S3IT run
+(`FIRST_USE_FEEDBACK_S3IT.md`), landed in 3 commits. Plan:
+`/home/gbena/.claude/plans/we-have-been-running-silly-pine.md`.
+
+| # | Fix | Where |
+|---|---|---|
+| 4 | `sacct` terminal-state (FAILED no longer reported COMPLETED) + nonzero exit | `slurm_protocol.py` (`parse_sacct_state`), both Slurm sources, `cli/sweep.py` |
+| 7 | conda-init: modules+pre_script render before the partial; `command -v conda` guard so a module conda is never shadowed | 4 templates + `_conda_init.sh.j2` |
+| 1 | `$USER`/`$HOME`/`~` expanded in remote `workdir`/`archive_dir`/`remote_root` | `_resolve_remote_path` in both SSH sources |
+| 2 | dry-run shows the merged per-remote spec (`source.default_spec`) | `cli/sweep.py` |
+| 3 | array-over-SSH wired (`--remote <a> --mode array`); orchestrator returns the chosen submission | `cli/sweep.py`, `sweep_orchestrator.py` |
+| 5 | rsync excludes `*.pkl`/`*.pth`/`checkpoints`/`multirun`/`.hydra` (not bare `outputs`) | `push_exec.py` |
+| 6 | `detect_hpc_system` order Slurm>SGE>PBS, default `unknown` | `path_detector.py` |
+| 8 | **T0** `hsm sweep collect <id>` + `.hsm_manifest.json` re-attach · **T1** continuous `tasks/` pull in `wait_for_all` · **T2** per-task `params.yaml` · **T3** maintenance-reservation warning | `ssh_slurm_compute_source.py`, `cli/sweep.py`, templates, `scheduler_queue.py` |
+
+Deferred (clean follow-up): #8 Tier-3 `--dependency=afterany` server-side
+epilog archive (durability with no client ever returning).
 
 ## Cross-references
 
