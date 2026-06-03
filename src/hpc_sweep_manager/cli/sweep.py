@@ -372,6 +372,7 @@ def _run_sweep_via_orchestrator(
     logger: logging.Logger,
     remote_alias: Optional[str] = None,
     gpus_arg: Optional[str] = None,
+    remote_submission: Optional[str] = None,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
@@ -409,10 +410,18 @@ def _run_sweep_via_orchestrator(
             parallel_jobs=parallel_jobs,
             remote_alias=remote_alias,
             gpus_override=gpus_override,
+            remote_submission=remote_submission,
         )
     except (ValueError, RuntimeError) as e:
         console.print(f"[red]Error building compute source: {e}[/red]")
         return
+
+    # The per-remote `spec:` block is merged into the source's default_spec by
+    # build_ssh_source / build_ssh_slurm_source (at construction, no connection
+    # needed). Prefer it for display so --mode remote dry-runs show the real
+    # --gres / account / qos instead of the empty pre-merge CLI spec. No-op for
+    # local/native (default_spec == spec); falls back for distributed.
+    effective_spec = getattr(source, "default_spec", None) or spec
 
     console.print(
         f"[green]Execution backend: {source.source_type} "
@@ -428,7 +437,7 @@ def _run_sweep_via_orchestrator(
     _render_placement(
         source=source,
         resolved_mode=resolved_mode,
-        spec=spec,
+        spec=effective_spec,
         num_tasks=len(combinations),
         remote_alias=remote_alias,
         hsm_config=hsm_config,
@@ -440,7 +449,7 @@ def _run_sweep_via_orchestrator(
 
         console.print("\n[yellow]DRY RUN - No jobs will be submitted[/yellow]")
         console.print("\n[bold]Effective ResourceSpec:[/bold]")
-        for k, v in spec.to_dict().items():
+        for k, v in effective_spec.to_dict().items():
             if v in (None, [], {}, ()):
                 continue
             console.print(f"  {k:18s} = {v!r}")
@@ -485,7 +494,7 @@ def _run_sweep_via_orchestrator(
                     f"  {run_prefix} {src_script} "
                     f"{params_to_hydra_args(combinations[0])} {suffix}"
                 )
-                if spec.gpus and resolved_mode == "local":
+                if effective_spec.gpus and resolved_mode == "local":
                     console.print(
                         "  [dim]# CUDA_VISIBLE_DEVICES is assigned per slot at runtime[/dim]"
                     )
@@ -628,6 +637,7 @@ def run_sweep(
     hsm_config: Optional["HSMConfig"] = None,
     remote_alias: Optional[str] = None,
     gpus_arg: Optional[str] = None,
+    remote_submission: Optional[str] = None,
 ):
     """Run parameter sweep (orchestrator-only path)."""
 
@@ -701,6 +711,7 @@ def run_sweep(
             logger=logger,
             remote_alias=remote_alias,
             gpus_arg=gpus_arg,
+            remote_submission=remote_submission,
         )
 
     except FileNotFoundError:
@@ -777,6 +788,7 @@ def run_cmd(
     quiet,
 ):
     """Run parameter sweep."""
+    remote_submission = None
     if mode is None:
         mode = "remote" if remote_alias else "auto"
     elif mode == "remote" and not remote_alias:
@@ -784,9 +796,16 @@ def run_cmd(
             "[red]--mode remote requires --remote <alias>[/red]"
         )
         return
+    elif remote_alias and mode in ("array", "individual"):
+        # For a remote, --mode array|individual chooses the SUBMISSION STYLE;
+        # execution stays remote. Keep mode='remote' so spec_from_cli reads no
+        # local block (per-remote spec lives under distributed.remotes.<alias>).
+        remote_submission = mode
+        mode = "remote"
     elif remote_alias and mode not in ("remote", "auto"):
         ctx.obj["console"].print(
-            f"[red]--remote is only valid with --mode remote (got --mode {mode!r}).[/red]"
+            f"[red]--remote can't be combined with --mode {mode!r} "
+            f"(use --mode array|individual to pick submission style, or omit it).[/red]"
         )
         return
 
@@ -813,6 +832,7 @@ def run_cmd(
         hsm_config=hsm_config,
         remote_alias=remote_alias,
         gpus_arg=gpus_arg,
+        remote_submission=remote_submission,
     )
 
 

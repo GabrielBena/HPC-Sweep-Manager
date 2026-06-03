@@ -86,3 +86,36 @@ class TestTrainScriptCandidates:
         info = PathDetector(tmp_path).get_project_info()
         assert "train_script_candidates" in info
         assert len(info["train_script_candidates"]) == 2
+
+
+class TestDetectHpcSystem:
+    """Scheduler detection order: Slurm > SGE (qstat+qsub) > PBS (qstat) >
+    unknown. qstat is ambiguous so it must not short-circuit ahead of Slurm/SGE,
+    and a box with no scheduler must report 'unknown', not 'pbs'."""
+
+    @staticmethod
+    def _which(present):
+        present = set(present)
+        return lambda cmd: ("/usr/bin/" + cmd) if cmd in present else None
+
+    def test_slurm_wins_even_with_qstat_present(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", self._which({"sbatch", "sinfo", "qstat"}))
+        assert PathDetector().detect_hpc_system() == "slurm"
+
+    def test_sbatch_only_is_slurm(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", self._which({"sbatch"}))
+        assert PathDetector().detect_hpc_system() == "slurm"
+
+    def test_sge_needs_qstat_and_qsub(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", self._which({"qstat", "qsub"}))
+        assert PathDetector().detect_hpc_system() == "sge"
+
+    def test_pbs_is_qstat_only(self, monkeypatch):
+        monkeypatch.setattr("shutil.which", self._which({"qstat"}))
+        assert PathDetector().detect_hpc_system() == "pbs"
+
+    def test_no_scheduler_is_unknown_not_pbs(self, monkeypatch):
+        # Field-report scenario: a box that only drives Slurm over SSH has no
+        # local scheduler — must NOT mis-report PBS.
+        monkeypatch.setattr("shutil.which", self._which(set()))
+        assert PathDetector().detect_hpc_system() == "unknown"

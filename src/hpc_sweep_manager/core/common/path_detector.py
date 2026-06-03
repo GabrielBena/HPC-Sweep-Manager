@@ -155,21 +155,29 @@ class PathDetector:
         return self.project_root / "outputs"
 
     def detect_hpc_system(self) -> str:
-        """Detect HPC system type."""
-        # Check for PBS/Torque
-        if shutil.which("qstat"):
-            return "pbs"
+        """Detect the LOCAL HPC scheduler from tools on PATH.
 
-        # Check for Slurm
+        Order matters: ``qstat`` is ambiguous (PBS *and* SGE ship it), so check
+        the unambiguous Slurm tools first, then SGE (needs both ``qstat`` AND
+        ``qsub``), then PBS. Default to ``"unknown"`` rather than ``"pbs"`` — a
+        box with no local scheduler (e.g. one that only drives Slurm over SSH)
+        previously mis-reported PBS.
+        """
+        # Slurm — unambiguous.
         if shutil.which("sinfo") or shutil.which("sbatch"):
             return "slurm"
 
-        # Check for SGE
+        # SGE / Grid Engine — qstat AND qsub (checked before PBS so qstat alone
+        # doesn't shadow it).
         if shutil.which("qstat") and shutil.which("qsub"):
             return "sge"
 
-        # Default to PBS
-        return "pbs"
+        # PBS / Torque — qstat present (qsub already ruled SGE out above).
+        if shutil.which("qstat"):
+            return "pbs"
+
+        # No local scheduler detected.
+        return "unknown"
 
     def detect_storage_paths(self) -> Dict[str, Optional[Path]]:
         """Detect common HPC storage paths."""

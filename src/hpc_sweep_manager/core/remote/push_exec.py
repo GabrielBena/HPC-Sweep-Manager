@@ -22,8 +22,17 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
     "sweeps/outputs",
     "*.ckpt",
     "*.pt",
+    "*.pth",
+    "*.pkl",
+    "checkpoints",
+    "multirun",
+    ".hydra",
     "wandb",
 )
+# NOTE: deliberately NOT excluding a bare ``outputs`` — too easy to clobber a
+# legit source dir named ``outputs``. Only ``sweeps/outputs`` is excluded. A
+# project that keeps artifacts under ``outputs/`` should add it to the
+# per-remote ``rsync_excludes:`` list (see docs/user_guide/SSH_EXECUTION.md).
 
 
 def normalize_gpu_allowlist(

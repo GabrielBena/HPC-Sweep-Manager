@@ -149,6 +149,7 @@ def build_compute_source(
     remote_alias: str | None = None,
     gpus_override: Union[None, int, Sequence[int]] = None,
     conda_env_override: str | None = None,
+    remote_submission: SubmissionMode | None = None,
 ) -> tuple[ComputeSource, str, SubmissionMode]:
     """Build a :class:`ComputeSource` for the requested mode.
 
@@ -235,10 +236,19 @@ def build_compute_source(
                 default_spec=default_spec,
                 conda_env_override=conda_env_override,
             )
-            return source, "remote", "individual"
+            # `--mode array` over SSH-Slurm packs one `sbatch --array`; default
+            # is one sbatch per combo (individual). SSHSlurmComputeSource
+            # already implements both via submit_batch(mode=...).
+            return source, "remote", (remote_submission or "individual")
         elif backend == "ssh":
             from ..remote.ssh_compute_source import build_ssh_source
 
+            if remote_submission == "array":
+                logger.warning(
+                    f"--mode array is ignored for backend=ssh on {remote_alias!r} "
+                    f"(array submission needs Slurm; using individual). Set "
+                    f"`backend: slurm` on the remote to pack one sbatch --array."
+                )
             source = build_ssh_source(
                 name=remote_alias,
                 remote_cfg=remote_cfg,

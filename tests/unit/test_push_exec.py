@@ -99,3 +99,18 @@ class TestRsyncCommands:
         assert "--delete" not in cmd
         assert cmd[-2] == "anahita:/remote/tasks/"
         assert cmd[-1] == "/local/tasks/"
+
+
+class TestDefaultExcludes:
+    """The push payload should skip common ML artifact dirs/files (#5)."""
+
+    def test_includes_ml_artifact_patterns(self):
+        for pat in ("*.pkl", "*.pth", "checkpoints", "multirun", ".hydra"):
+            assert pat in DEFAULT_RSYNC_EXCLUDES, pat
+        # Pre-existing patterns still present.
+        for pat in (".git", "wandb", "*.ckpt", "*.pt", "sweeps/outputs"):
+            assert pat in DEFAULT_RSYNC_EXCLUDES, pat
+
+    def test_does_not_exclude_bare_outputs(self):
+        # A bare `outputs` would clobber legit source dirs — opt-in only.
+        assert "outputs" not in DEFAULT_RSYNC_EXCLUDES
