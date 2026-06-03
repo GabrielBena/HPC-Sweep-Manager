@@ -35,7 +35,14 @@ if [[ ! -f "$PARAMS_FILE" ]]; then
     exit 1
 fi
 
-PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
+# Write the extraction snippet to a tempfile and run it BY PATH. Never feed a
+# program over stdin into an interpreter prefix we don't control: python_path
+# may be a wrapper (`conda run -n <env> python`), and `conda run` does not
+# forward heredoc stdin to the subprocess inside $() on some clusters — the
+# snippet then reads empty stdin, prints nothing, and exits 0, silently
+# running the task with the project's DEFAULT config (field report 2026-06-03).
+_HSM_PARAMS_SCRIPT=$(mktemp)
+cat > "$_HSM_PARAMS_SCRIPT" <<'PYTHON_EOF'
 import json
 import os
 import sys
@@ -78,9 +85,20 @@ except Exception as e:
     print(f"Error processing parameters: {e}", file=sys.stderr)
     sys.exit(1)
 PYTHON_EOF
-)
-if [[ $? -ne 0 ]]; then
+
+# `|| { … }` (not a $?-check after the fact): the script runs under `set -e`,
+# so a failing assignment would kill it before any later check could fire.
+PARAMS_JSON=$({{ python_path }} "$_HSM_PARAMS_SCRIPT") || {
+    rm -f "$_HSM_PARAMS_SCRIPT"
     echo "Error extracting parameters for array index $SLURM_ARRAY_TASK_ID"
+    exit 1
+}
+rm -f "$_HSM_PARAMS_SCRIPT"
+
+# Fail fast on empty params: a sweep task with zero overrides is never
+# intended — error out instead of silently training the default config.
+if [[ -z "$PARAMS_JSON" ]]; then
+    echo "Error: empty parameter set for array index $SLURM_ARRAY_TASK_ID — refusing to run the default config"
     exit 1
 fi
 
