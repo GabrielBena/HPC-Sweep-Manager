@@ -105,10 +105,10 @@ class TestDefaultExcludes:
     """The push payload should skip common ML artifact dirs/files (#5)."""
 
     def test_includes_ml_artifact_patterns(self):
-        for pat in ("*.pth", "checkpoints", "multirun", ".hydra"):
+        for pat in ("*.pth", "/checkpoints", "/multirun", ".hydra"):
             assert pat in DEFAULT_RSYNC_EXCLUDES, pat
         # Pre-existing patterns still present.
-        for pat in (".git", "wandb", "*.ckpt", "*.pt", "sweeps/outputs"):
+        for pat in (".git", "/wandb", "*.ckpt", "*.pt", "sweeps/outputs"):
             assert pat in DEFAULT_RSYNC_EXCLUDES, pat
 
     def test_does_not_exclude_input_ambiguous_patterns(self):
@@ -116,3 +116,64 @@ class TestDefaultExcludes:
         # are NOT default-excluded — opt in per-remote if they're artifacts.
         assert "outputs" not in DEFAULT_RSYNC_EXCLUDES
         assert "*.pkl" not in DEFAULT_RSYNC_EXCLUDES
+
+    def test_output_dir_names_are_anchored(self):
+        # B2 (field report 2026-06-03): an UNANCHORED dir name also matches a
+        # Hydra config GROUP of the same name (`configs/wandb/`) and silently
+        # strips it from the push — with no per-remote un-exclude mechanism.
+        for bare in ("wandb", "checkpoints", "multirun"):
+            assert bare not in DEFAULT_RSYNC_EXCLUDES, bare
+            assert f"/{bare}" in DEFAULT_RSYNC_EXCLUDES, bare
+
+
+class TestExcludeRsyncSemantics:
+    """Pin the actual rsync filter behavior of the default excludes — tuple
+    membership alone doesn't prove `configs/wandb/` survives a push."""
+
+    @pytest.fixture()
+    def pushed(self, tmp_path):
+        import shutil
+        import subprocess
+
+        if shutil.which("rsync") is None:
+            pytest.skip("rsync not available")
+
+        src = tmp_path / "src"
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        for rel in (
+            "wandb/run-1/log.txt",            # root output dir → dropped
+            "checkpoints/model.bin",          # root output dir → dropped
+            "multirun/2026/cfg.yaml",         # root output dir → dropped
+            "configs/wandb/default.yaml",     # Hydra config GROUP → must ship
+            "configs/checkpoints/opt.yaml",   # Hydra config GROUP → must ship
+            "configs/multirun/sweep.yaml",    # Hydra config GROUP → must ship
+            "sub/wandb/nested.txt",           # nested junk → ships (accepted cost)
+            "scripts/train.py",
+        ):
+            p = src / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x")
+
+        # Same command construction as the real push; local→local instead of
+        # over SSH (strip the `host:` prefix off the destination).
+        cmd = build_rsync_push_cmd(str(src), "HOST", str(dst), DEFAULT_RSYNC_EXCLUDES)
+        cmd[-1] = cmd[-1].removeprefix("HOST:")
+        subprocess.run(cmd, check=True, capture_output=True)
+        return dst
+
+    def test_config_groups_survive_the_push(self, pushed):
+        assert (pushed / "configs/wandb/default.yaml").is_file()
+        assert (pushed / "configs/checkpoints/opt.yaml").is_file()
+        assert (pushed / "configs/multirun/sweep.yaml").is_file()
+
+    def test_root_output_dirs_are_dropped(self, pushed):
+        assert not (pushed / "wandb").exists()
+        assert not (pushed / "checkpoints").exists()
+        assert not (pushed / "multirun").exists()
+
+    def test_nested_same_name_dirs_now_ship(self, pushed):
+        # Documented trade-off of anchoring: nested junk re-pushes (weight
+        # globs still strip the heavy files). Add an unanchored per-remote
+        # exclude if a project needs the old behavior.
+        assert (pushed / "sub/wandb/nested.txt").is_file()

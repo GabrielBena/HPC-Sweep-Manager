@@ -6,8 +6,37 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
-First-use field report from driving SSH-Slurm → S3IT (UZH). Full account:
-[`docs/dev/field-reports/2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md).
+Two field reports drove this cycle: SSH-Slurm → S3IT first use
+([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
+and the first blind agent-driven consumer run from Comp-PVR
+([`2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)).
+
+### Fixed (Comp-PVR consumer report, 2026-06-03)
+- **Array tasks silently ran the default config under `conda run`.** The
+  per-task params extraction fed Python over stdin (`python - <<heredoc`);
+  `conda run` doesn't forward heredoc stdin inside `$()` on some clusters, so
+  tasks got zero overrides and reported SUCCESS. The snippet now runs from a
+  tempfile by path, and an empty extraction fails fast instead of training
+  the default config.
+- **`configs/wandb/` was silently stripped from the push.** Output-dir rsync
+  excludes are now anchored to the project root (`/wandb`, `/checkpoints`,
+  `/multirun`) so they can't shadow a same-named Hydra config group
+  (`MissingConfigException` on every task, with no per-remote workaround).
+- **`hsm setup init` reported failure after succeeding** (crash after all
+  files were written). Also hardened: exits non-zero on *real* failure
+  (previously exited 0), re-runs back up `.hsm/config.yaml` to
+  `.hsm/config.yaml.bak` before regenerating, and non-interactive runs never
+  prompt (migration path included).
+
+### Added (Comp-PVR consumer report, 2026-06-03)
+- `hsm init` — top-level alias for `hsm setup init`.
+- The init re-run/overwrite contract is documented in `hsm setup init --help`,
+  README, and getting_started.md.
+- SSH_EXECUTION.md: "Your project's own package on the remote" — editable
+  installs don't import from the rsynced tree; `pip install -e` into the
+  remote env or a `PYTHONPATH` `pre_script`.
+- `hsm docs` prints URLs unwrapped (copy-pasteable at any width) and notes
+  that `main` is the canonical branch.
 
 ### Added
 - `hsm docs` — prints the documentation URLs (+ local path on a source checkout),
@@ -44,9 +73,10 @@ First-use field report from driving SSH-Slurm → S3IT (UZH). Full account:
   (defaults to `unknown`; checks Slurm → SGE → PBS in order).
 
 ### Changed
-- `DEFAULT_RSYNC_EXCLUDES` adds `*.pth` / `checkpoints/` / `multirun/` /
-  `.hydra/`; per-remote `rsync_excludes` now **extends** the defaults instead of
-  replacing them (so adding `outputs/` can't accidentally start pushing `.git`).
+- `DEFAULT_RSYNC_EXCLUDES` adds `*.pth` / `/checkpoints` / `/multirun` /
+  `.hydra` (dir names root-anchored — see Fixed above); per-remote
+  `rsync_excludes` now **extends** the defaults instead of replacing them
+  (so adding `outputs/` can't accidentally start pushing `.git`).
 
 ## [0.1.0]
 - Initial release: `local` / `array` / `individual` / `remote` / `distributed`

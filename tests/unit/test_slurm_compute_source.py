@@ -453,3 +453,149 @@ class TestSelfDescribingParams:
         assert "os.makedirs(_task_dir" in r
         assert 'params.yaml' in r
         assert "json.dump(params" in r
+
+
+def _render_array_script(**extra):
+    from hpc_sweep_manager.core.common.templating import render_template
+
+    ctx = dict(
+        job_name="a",
+        sweep_id="sw",
+        num_jobs=1,
+        logs_dir="/l",
+        tasks_dir="/t",
+        params_file="/p.json",
+        sbatch_directives="",
+        modules=[],
+        pre_script=[],
+        project_dir="/p",
+        python_path="conda run -n env python",
+        script_path="train.py",
+        wandb_group=None,
+        uses_conda=False,
+    )
+    ctx.update(extra)
+    return render_template("slurm_array.sh.j2", **ctx)
+
+
+class TestArrayParamsExtraction:
+    """B3 (field report 2026-06-03): per-task params extraction must run python
+    BY FILE PATH, never via stdin heredoc — `conda run -n env python -` does
+    not forward heredoc stdin inside $() on some clusters, so the snippet reads
+    empty stdin, prints nothing, exits 0, and the task silently trains the
+    project's DEFAULT config while reporting SUCCESS."""
+
+    def test_no_stdin_heredoc_into_interpreter(self):
+        r = _render_array_script()
+        # The fatal shape: `<python_path> - <<'EOF'` (program fed over stdin).
+        assert " - <<'PYTHON_EOF'" not in r
+        # The snippet is written to a tempfile and run by path instead.
+        assert "mktemp" in r
+        assert '"$_HSM_PARAMS_SCRIPT"' in r
+
+    def test_empty_params_fail_fast_guard(self):
+        # Defense-in-depth: zero overrides is never intended for a sweep task.
+        r = _render_array_script()
+        assert '-z "$PARAMS_JSON"' in r
+        assert "refusing to run the default config" in r
+
+
+class TestArrayParamsExtractionFunctional:
+    """Execute the rendered array script under bash with interpreter wrappers
+    that reproduce the cluster failure modes — no Slurm needed."""
+
+    def _setup_sweep(self, tmp_path):
+        import json
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        tasks_dir = tmp_path / "tasks"
+        params_file = tmp_path / "parameter_combinations.json"
+        # "note" carries a literal '|' — the tokens|index protocol must split
+        # on the LAST pipe, not the first, or values with pipes corrupt both
+        # the overrides and the parsed global index.
+        params_file.write_text(
+            json.dumps(
+                [
+                    {
+                        "index": 1,
+                        "global_index": 1,
+                        "params": {"lr": 0.01, "seed": 7, "note": "a|b"},
+                    }
+                ]
+            )
+        )
+        # Training stub: records its argv so we can assert the overrides
+        # actually arrived.
+        (proj / "train.py").write_text(
+            "import os, sys\n"
+            "open(os.environ['HSM_TEST_ARGS_OUT'], 'w').write('\\n'.join(sys.argv[1:]))\n"
+        )
+        return proj, tasks_dir, params_file
+
+    def _run(self, tmp_path, script_text, args_out):
+        import os
+        import subprocess
+
+        script = tmp_path / "array_job.sh"
+        script.write_text(script_text)
+        env = dict(os.environ)
+        env["SLURM_ARRAY_TASK_ID"] = "1"
+        env["HSM_TEST_ARGS_OUT"] = str(args_out)
+        return subprocess.run(
+            ["bash", str(script)], env=env, capture_output=True, text=True
+        )
+
+    def test_overrides_survive_a_stdin_swallowing_wrapper(self, tmp_path):
+        # Wrapper that mimics `conda run` on S3IT: argv passes through, but
+        # the child's stdin is severed. The legacy `python - <<heredoc` form
+        # yields empty params + exit 0 under this wrapper; run-by-path is
+        # immune.
+        import sys
+
+        wrapper = tmp_path / "swallowpy"
+        wrapper.write_text(f'#!/bin/bash\nexec "{sys.executable}" "$@" < /dev/null\n')
+        wrapper.chmod(0o755)
+
+        proj, tasks_dir, params_file = self._setup_sweep(tmp_path)
+        rendered = _render_array_script(
+            tasks_dir=str(tasks_dir),
+            params_file=str(params_file),
+            project_dir=str(proj),
+            python_path=str(wrapper),
+        )
+        args_out = tmp_path / "argv.txt"
+        result = self._run(tmp_path, rendered, args_out)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        # eval consumes the protective quotes; the script sees bare overrides.
+        argv = args_out.read_text().splitlines()
+        assert "lr=0.01" in argv
+        assert "seed=7" in argv
+        assert "note=a|b" in argv  # pipe in a VALUE survives the index split
+        # The tempfile snippet also dropped the self-describing params.yaml.
+        assert (tasks_dir / "task_1" / "params.yaml").is_file()
+
+    def test_empty_extraction_fails_fast_not_default_run(self, tmp_path):
+        # Wrapper reproducing the OBSERVED legacy failure: extraction produces
+        # nothing yet exits 0. The guard must kill the task, not let it run
+        # the default config.
+        wrapper = tmp_path / "mutepy"
+        wrapper.write_text("#!/bin/bash\nexit 0\n")
+        wrapper.chmod(0o755)
+
+        proj, tasks_dir, params_file = self._setup_sweep(tmp_path)
+        rendered = _render_array_script(
+            tasks_dir=str(tasks_dir),
+            params_file=str(params_file),
+            project_dir=str(proj),
+            python_path=str(wrapper),
+        )
+        args_out = tmp_path / "argv.txt"
+        result = self._run(tmp_path, rendered, args_out)
+
+        assert result.returncode != 0
+        assert "refusing to run the default config" in result.stdout
+        # The task never got as far as creating its dir or running anything.
+        assert not (tasks_dir / "task_1").exists()
+        assert not args_out.exists()

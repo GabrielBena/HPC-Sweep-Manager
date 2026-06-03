@@ -35,7 +35,20 @@ if [[ ! -f "$PARAMS_FILE" ]]; then
     exit 1
 fi
 
-PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
+# Write the extraction snippet to a tempfile and run it BY PATH. Never feed a
+# program over stdin into an interpreter prefix we don't control: python_path
+# may be a wrapper (`conda run -n <env> python`), and `conda run` does not
+# forward heredoc stdin to the subprocess inside $() on some clusters — the
+# snippet then reads empty stdin, prints nothing, and exits 0, silently
+# running the task with the project's DEFAULT config (field report 2026-06-03).
+_HSM_PARAMS_SCRIPT=$(mktemp) || {
+    echo "Error: mktemp failed (TMPDIR=${TMPDIR:-unset}) — cannot stage params extraction for array index $SLURM_ARRAY_TASK_ID"
+    exit 1
+}
+# Backstop cleanup on every exit path (incl. set -e aborts); the explicit
+# rm after extraction keeps /tmp tidy during long training runs.
+trap 'rm -f "$_HSM_PARAMS_SCRIPT"' EXIT
+cat > "$_HSM_PARAMS_SCRIPT" <<'PYTHON_EOF'
 import json
 import os
 import sys
@@ -78,13 +91,34 @@ except Exception as e:
     print(f"Error processing parameters: {e}", file=sys.stderr)
     sys.exit(1)
 PYTHON_EOF
-)
-if [[ $? -ne 0 ]]; then
+
+# `|| { … }` (not a $?-check after the fact): the script runs under `set -e`,
+# so a failing assignment would kill it before any later check could fire.
+PARAMS_JSON=$({{ python_path }} "$_HSM_PARAMS_SCRIPT") || {
     echo "Error extracting parameters for array index $SLURM_ARRAY_TASK_ID"
+    exit 1
+}
+rm -f "$_HSM_PARAMS_SCRIPT"
+
+# Fail fast when extraction produced NOTHING (the B3 failure shape: wrapper
+# swallowed the program, printed nothing, exited 0). Note: a legitimately
+# empty params dict yields "|<index>" (non-empty) and is allowed through —
+# baseline sweeps with zero overrides run identically in the other modes.
+if [[ -z "$PARAMS_JSON" ]]; then
+    echo "Error: empty parameter set for array index $SLURM_ARRAY_TASK_ID — refusing to run the default config"
     exit 1
 fi
 
-IFS='|' read -r PARAMS_JSON GLOBAL_INDEX <<< "$PARAMS_JSON"
+# Split on the LAST '|': override VALUES may contain pipes (regexes,
+# choice strings); the trailing global index never does. Then require the
+# index to be numeric — catches corrupted/partial extraction output that
+# the emptiness check above can't see.
+GLOBAL_INDEX="${PARAMS_JSON##*|}"
+PARAMS_JSON="${PARAMS_JSON%|*}"
+if ! [[ "$GLOBAL_INDEX" =~ ^[0-9]+$ ]]; then
+    echo "Error: malformed parameter extraction output for array index $SLURM_ARRAY_TASK_ID (global index: '$GLOBAL_INDEX')"
+    exit 1
+fi
 echo "Parameters: $PARAMS_JSON"
 echo "Global task index: $GLOBAL_INDEX"
 

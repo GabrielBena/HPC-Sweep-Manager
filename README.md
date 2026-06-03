@@ -6,9 +6,10 @@ remote Linux boxes over SSH — same CLI, same sweep config, four
 execution modes.
 
 > **Status:** alpha. Active refactor; semantics stable for the modes
-> documented below. See [ARCHITECTURE.md](ARCHITECTURE.md) for what's
-> live vs legacy and [CLAUDE.md](CLAUDE.md) if you're an AI agent
-> landing here cold.
+> documented below. **`main` is the canonical branch** — the `v2` branch
+> is an abandoned 2025 experiment; ignore it. See
+> [ARCHITECTURE.md](ARCHITECTURE.md) for what's live vs legacy and
+> [CLAUDE.md](CLAUDE.md) if you're an AI agent landing here cold.
 
 ## Why HSM
 
@@ -31,6 +32,9 @@ pip install -e ".[dev]"
 # 2. Initialize HSM in YOUR ML project.
 cd /path/to/your/project
 hsm setup init                # creates .hsm/config.yaml + sweeps/example_sweep.yaml
+# Safe to re-run: regenerates .hsm/config.yaml (previous copy saved to
+# .hsm/config.yaml.bak), sweeps/README.md and sweeps/example_sweep.yaml;
+# never touches your other sweep configs, never prompts unless -i.
 
 # 3. Edit sweeps/example_sweep.yaml — a simple grid:
 #    sweep:

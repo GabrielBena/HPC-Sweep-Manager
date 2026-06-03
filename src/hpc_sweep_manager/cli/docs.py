@@ -44,7 +44,7 @@ def docs(ctx: click.Context) -> None:
     console.print(f"[bold]HSM documentation[/bold] — {_REPO}\n")
     local = _local_docs_dir()
     if local:
-        console.print(f"[green]Local copy (this checkout):[/green] {local}")
+        console.print(f"[green]Local copy (this checkout):[/green] {local}", soft_wrap=True)
     else:
         console.print(
             "[dim]No local docs/ (pip-installed) — use the URLs below, or "
@@ -54,12 +54,19 @@ def docs(ctx: click.Context) -> None:
     console.print("\n[bold]Guides:[/bold]")
     for fname, desc in _PAGES:
         console.print(f"  • {desc}")
-        console.print(f"      {_DOCS_BASE}/{fname}")
+        # soft_wrap: rich must never insert hard newlines into URLs/paths —
+        # they'd break copy/paste at normal terminal widths (U3, field
+        # report 2026-06-03). The terminal still wraps them visually.
+        console.print(f"      {_DOCS_BASE}/{fname}", soft_wrap=True)
         if local:
-            console.print(f"      {local / fname}")
+            console.print(f"      {local / fname}", soft_wrap=True)
 
     console.print(
         "\n[dim]In your project: sweeps/README.md is a self-contained "
         "quickstart. Architecture + gotchas live in CLAUDE.md in the HSM "
         "repo.[/dim]"
+    )
+    console.print(
+        "[dim]Canonical branch: main — ignore origin/v2 (an abandoned "
+        "2025 experiment).[/dim]"
     )

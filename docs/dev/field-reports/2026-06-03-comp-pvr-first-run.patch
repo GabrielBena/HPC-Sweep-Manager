@@ -1,0 +1,78 @@
+diff --git a/src/hpc_sweep_manager/cli/init.py b/src/hpc_sweep_manager/cli/init.py
+index 3a40992..19da7e3 100644
+--- a/src/hpc_sweep_manager/cli/init.py
++++ b/src/hpc_sweep_manager/cli/init.py
+@@ -634,7 +634,9 @@ def init_project(project_path: Path, interactive: bool, console: Console, logger
+ 
+     # Create sweep infrastructure
+     console.print("\n[yellow]Creating sweep infrastructure...[/yellow]")
+-    success = _create_sweep_infrastructure(project_path, config, console, logger)
++    success = _create_sweep_infrastructure(
++        project_path, config, interactive, console, logger
++    )
+ 
+     if success:
+         # If we migrated, offer to clean up old file
+@@ -853,7 +855,11 @@ def _auto_configuration(project_info: Dict[str, Any]) -> Dict[str, Any]:
+ 
+ 
+ def _create_sweep_infrastructure(
+-    project_path: Path, config: Dict[str, Any], console: Console, logger: logging.Logger
++    project_path: Path,
++    config: Dict[str, Any],
++    interactive: bool,
++    console: Console,
++    logger: logging.Logger,
+ ) -> bool:
+     """Create sweep directories and configuration files."""
+     try:
+diff --git a/src/hpc_sweep_manager/core/remote/push_exec.py b/src/hpc_sweep_manager/core/remote/push_exec.py
+index 841decb..11fe24d 100644
+--- a/src/hpc_sweep_manager/core/remote/push_exec.py
++++ b/src/hpc_sweep_manager/core/remote/push_exec.py
+@@ -26,7 +26,10 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
+     "checkpoints",
+     "multirun",
+     ".hydra",
+-    "wandb",
++    # Anchored to the repo root: excludes the wandb *output* dir (<root>/wandb)
++    # only. An unanchored "wandb" also matches a `configs/wandb/` Hydra config
++    # group and silently strips it from the push (→ MissingConfigException).
++    "/wandb",
+ )
+ # Per-remote ``rsync_excludes:`` is layered ON TOP of these (extends, doesn't
+ # replace — see SSHComputeSource.__init__). Scope notes:
+diff --git a/src/hpc_sweep_manager/templates/slurm_array.sh.j2 b/src/hpc_sweep_manager/templates/slurm_array.sh.j2
+index 79452c0..f2c4007 100644
+--- a/src/hpc_sweep_manager/templates/slurm_array.sh.j2
++++ b/src/hpc_sweep_manager/templates/slurm_array.sh.j2
+@@ -35,7 +35,12 @@ if [[ ! -f "$PARAMS_FILE" ]]; then
+     exit 1
+ fi
+ 
+-PARAMS_JSON=$({{ python_path }} - <<'PYTHON_EOF'
++# Write the params-extraction script to a tempfile — avoids the `conda run`
++# stdin-passthrough issue where `$(conda run ... python - <<'HEREDOC')` silently
++# produces empty output because conda run doesn't forward the heredoc's stdin to
++# the subprocess inside command substitution on some cluster environments.
++_HSM_PARAMS_SCRIPT=$(mktemp /tmp/hsm_params_XXXXXX.py)
++cat > "$_HSM_PARAMS_SCRIPT" << 'PARAMS_SCRIPT_EOF'
+ import json
+ import os
+ import sys
+@@ -77,9 +82,12 @@ try:
+ except Exception as e:
+     print(f"Error processing parameters: {e}", file=sys.stderr)
+     sys.exit(1)
+-PYTHON_EOF
+-)
+-if [[ $? -ne 0 ]]; then
++PARAMS_SCRIPT_EOF
++
++PARAMS_JSON=$({{ python_path }} "$_HSM_PARAMS_SCRIPT")
++_HSM_PARAMS_EXIT=$?
++rm -f "$_HSM_PARAMS_SCRIPT"
++if [[ $_HSM_PARAMS_EXIT -ne 0 ]]; then
+     echo "Error extracting parameters for array index $SLURM_ARRAY_TASK_ID"
+     exit 1
+ fi

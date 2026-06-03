@@ -347,6 +347,37 @@ it's trying to reintroduce them, push back.
     HSM enforces the env from config. `HSMConfig.load()` warns if a
     legacy `paths.python_interpreter` is present.
 
+11. **Never feed a program over stdin into an interpreter prefix you don't
+    control (consumer field-report fix, 2026-06-03).** `python_path` is
+    often a *wrapper* — `conda run -n <env> python` — and `conda run` does
+    NOT forward heredoc stdin to the subprocess inside `$()` on some
+    clusters (observed on S3IT): `python - <<'EOF'` reads empty stdin,
+    prints nothing, exits **0**. In `slurm_array.sh.j2` that meant
+    `PARAMS_JSON` was empty and every task silently trained the project's
+    *default* config while reporting SUCCESS. The template now writes the
+    extraction snippet to a tempfile and runs it **by path**, with a
+    fail-fast guard (`[[ -z "$PARAMS_JSON" ]]` → exit 1 — a sweep task
+    with zero overrides is never intended). Error handling is
+    `|| { … }`-style because the script runs under `set -e` (a `$?` check
+    after a failing assignment is dead code). Regression-tested in
+    `tests/unit/test_slurm_compute_source.py::TestArrayParamsExtractionFunctional`
+    with a stdin-severing wrapper — don't regress to `python - <<EOF`
+    anywhere a rendered script computes something via `{{ python_path }}`.
+
+12. **rsync dir-name excludes must be ANCHORED (`/wandb`, `/checkpoints`,
+    `/multirun`) — same field report.** An unanchored `wandb` in
+    `DEFAULT_RSYNC_EXCLUDES` also matched the Hydra config GROUP
+    `configs/wandb/` and silently stripped it from the push → every task
+    died with `MissingConfigException` (load-bearing: the templates inject
+    `wandb.group=` into every command, so the group is mandatory). Since
+    per-remote `rsync_excludes` only *extends* the defaults, a consumer
+    cannot un-exclude — so dir-name defaults are root-anchored; nested
+    junk re-pushing is the accepted cost (weight globs still catch heavy
+    files; an unanchored per-remote pattern can be added back on purpose).
+    Dot-dirs (`.hydra`) and env dirs (`venv`) stay unanchored
+    deliberately. Behavioral tests run real rsync:
+    `tests/unit/test_push_exec.py::TestExcludeRsyncSemantics`.
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1
@@ -363,6 +394,14 @@ it's trying to reintroduce them, push back.
   `extra_directives`. Use the typed `slurm:` block in
   `.hsm/config.yaml` for those. See
   [`HPC_EXECUTION.md`](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
+
+- **`wandb.group=` is injected unconditionally** into every rendered task
+  command, which forces every consumer project to have a `wandb` config
+  key Hydra can override (the 2026-06-03 field report flagged this as the
+  reason the B2 exclude bug was load-bearing). Making the injection
+  conditional (config flag, or detect a `configs/wandb/` group) is a
+  design follow-up — projects without wandb currently can't run under HSM
+  without adding a stub key.
 
 ## Testing model
 
@@ -434,6 +473,28 @@ landed in 3 commits. Plan:
 
 Deferred (clean follow-up): #8 Tier-3 `--dependency=afterany` server-side
 epilog archive (durability with no client ever returning).
+
+## Recently landed (2026-06-03 evening) — Comp-PVR consumer field-report fixes
+
+First *blind agent-driven* consumer use of HSM (from the Comp-PVR project;
+report + validated patch:
+[`docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)),
+landed in 5 commits. Theme: **silent, success-shaped failures** — status
+must match reality. Plan:
+`/home/gbena/.claude/plans/new-feedback-just-dropped-bright-porcupine.md`.
+
+| # | Fix | Where |
+|---|---|---|
+| B3 | array params extraction by tempfile path, never `python - <<heredoc` (`conda run` swallows stdin in `$()`); empty-PARAMS fail-fast | `templates/slurm_array.sh.j2` (→ gotcha #11) |
+| B2 | dir-name rsync excludes anchored: `/wandb` `/checkpoints` `/multirun` (unanchored stripped `configs/<name>/` Hydra groups) | `push_exec.py` (→ gotcha #12) |
+| B1 | init NameError after files written → false "failed"; + exit non-zero on real failure, `.hsm/config.yaml.bak` on re-run, no non-interactive prompts | `cli/init.py` |
+| G1 | re-run/overwrite contract documented in `--help` + README + getting_started | `cli/init.py` docstring, docs |
+| doc | "Your project's own package on the remote" (editable installs / PYTHONPATH) | `SSH_EXECUTION.md` + MULTI_CLUSTER cross-link |
+| U1-U3 | top-level `hsm init` alias · soft-wrapped `hsm docs` URLs · canonical-branch note | `cli/main.py`, `cli/docs.py`, README |
+
+Deferred: G2 train-script-detection rework (loud warning + per-sweep
+`script:` remain the mitigation); conditional `wandb.group=` injection
+(see Known limitations).
 
 ## Cross-references
 

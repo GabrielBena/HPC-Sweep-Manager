@@ -321,6 +321,11 @@ S3IT login lives at `cluster.s3it.uzh.ch`. GRES names are
 case-sensitive — use `gpu_type: H100` (uppercase), not `h100`. Check
 what's actually available with `sinfo -o "%P %G"` on the cluster.
 
+If your training imports your project's own (editable-installed)
+package, that import won't resolve from the rsynced tree alone — see
+[SSH_EXECUTION.md → Your project's own package on the remote](SSH_EXECUTION.md#your-projects-own-package-on-the-remote)
+(`pip install -e` into the remote env, or a `PYTHONPATH` `pre_script`).
+
 S3IT docs:
 [Storage](https://docs.s3it.uzh.ch/cluster/data/) |
 [Transfer](https://docs.s3it.uzh.ch/cluster/transfer/) |
