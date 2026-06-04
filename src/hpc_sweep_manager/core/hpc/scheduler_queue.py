@@ -134,7 +134,9 @@ def _parse_one_gpu_entry(rest: str) -> tuple[int, Optional[str]]:
     # First token is a type name; count is the next numeric token if present.
     if len(tokens) >= 2 and tokens[1].isdigit():  # ":TYPE:N"
         return int(tokens[1]), first
-    return 1, first  # ":TYPE" — bare type, count defaults to 1
+    # ":TYPE" — bare type, count defaults to 1. `or None` so a malformed
+    # trailing colon ("gres/gpu:") can't produce a falsy-but-not-None type.
+    return 1, (first or None)
 
 
 def _parse_gpu_from_tres(tres: str) -> tuple[int, Optional[str]]:
@@ -180,6 +182,8 @@ def parse_array_task_count(job_id: str) -> int:
 
     ``"123"`` / ``"123_7"`` → 1. ``"123_[5-9]"`` → 5. ``"123_[5-9%2]"`` → 5
     (``%N`` is a *throttle*, not a count). ``"123_[1,3,7-9]"`` → 5.
+    ``"123_[0-100:10]"`` → 11 (``:step`` ranges — Slurm reconstructs them
+    for evenly-spaced pending indices, e.g. ``sbatch --array=0-100:10``).
     Unparseable specs conservatively count 1 per comma-separated part.
     """
     m = re.search(r"_\[([^\]]+)\]$", job_id)
@@ -192,8 +196,11 @@ def parse_array_task_count(job_id: str) -> int:
         if not part:
             continue
         lo, sep, hi = part.partition("-")
+        hi, _, step = hi.partition(":")
         if sep and lo.strip().isdigit() and hi.strip().isdigit():
-            total += abs(int(hi) - int(lo)) + 1
+            span = abs(int(hi) - int(lo))
+            step_n = int(step) if step.strip().isdigit() and int(step) > 0 else 1
+            total += span // step_n + 1
         else:
             total += 1
     return max(total, 1)

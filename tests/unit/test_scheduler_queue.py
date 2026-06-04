@@ -344,6 +344,19 @@ class TestArrayIdHelpers:
     def test_count_comma_list_with_ranges(self):
         assert parse_array_task_count("123_[1,3,7-9]") == 5
 
+    def test_count_step_range(self):
+        # Slurm reconstructs `lo-hi:step` for evenly-spaced pending indices
+        # (sbatch --array=0-100:10). 0,10,...,100 → 11 tasks, not 1.
+        assert parse_array_task_count("123_[0-100:10]") == 11
+        assert parse_array_task_count("123_[1-9:2]") == 5
+
+    def test_count_step_range_with_throttle(self):
+        assert parse_array_task_count("123_[0-15:4%2]") == 4
+
+    def test_count_zero_step_is_tolerated(self):
+        # Malformed step → treated as step 1, not a ZeroDivisionError.
+        assert parse_array_task_count("123_[1-5:0]") == 5
+
     def test_count_unparseable_part_counts_one(self):
         assert parse_array_task_count("123_[x]") == 1
 
@@ -523,10 +536,24 @@ class TestSSHSlurmQueue:
         assert len(res) == 1 and res[0].node_count == 3
 
     @pytest.mark.asyncio
-    async def test_same_commands_as_local_transport(self):
-        """Anti-drift: the SSH twin must run exactly the local argv, joined."""
+    @pytest.mark.parametrize(
+        "method,args",
+        [
+            ("list_user_jobs", ("alice",)),
+            ("pending_gpu_jobs_sorted", ()),
+            ("gpu_summary", ()),
+            ("reservations", ()),
+        ],
+    )
+    async def test_same_commands_as_local_transport(self, method, args):
+        """Anti-drift: the SSH twin must run exactly the local argv, joined —
+        for every query path, not just one exemplar."""
         conn = FakeConn()
-        await SSHSlurmQueue(conn).gpu_summary()
+        await getattr(SSHSlurmQueue(conn), method)(*args)
         with patch("subprocess.run", return_value=_fake_completed("")) as mock_run:
-            SlurmQueue().gpu_summary()
+            getattr(SlurmQueue(), method)(*args)
         assert shlex.split(conn.run_calls[0]) == mock_run.call_args[0][0]
+
+    def test_bare_trailing_colon_type_is_none_not_empty(self):
+        # "gres/gpu:" must not yield gpu_type="" (falsy-but-not-None trap).
+        assert _parse_gpu_from_tres("gres/gpu:") == (1, None)

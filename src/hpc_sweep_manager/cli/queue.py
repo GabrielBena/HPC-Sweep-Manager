@@ -71,7 +71,10 @@ def _manifest_job_ids(sweep_dir: Path) -> List[str]:
         data = json.loads(manifest.read_text())
     except (OSError, ValueError):
         return []
-    return [str(j) for j in (data.get("job_ids") or [])]
+    job_ids = data.get("job_ids") if isinstance(data, dict) else None
+    if not isinstance(job_ids, list):
+        return []  # corrupt manifest must not masquerade as a query failure
+    return [str(j) for j in job_ids]
 
 
 def _build_sweep_id_index(sweeps_root: Path) -> Dict[str, str]:
@@ -137,6 +140,12 @@ class _LocalQueueAsync:
 
     async def gpu_summary(self) -> Dict[str, Dict[str, int]]:
         return self._q.gpu_summary()
+
+    async def position_in_gpu_queue(self, job_id: str) -> Optional[tuple[int, int]]:
+        # Surface parity with SSHSlurmQueue — no gather uses this today, but
+        # a facade missing a twin's method is a local-mode-only AttributeError
+        # waiting to happen.
+        return self._q.position_in_gpu_queue(job_id)
 
     async def reservations(self) -> List[Reservation]:
         return self._q.reservations()
@@ -299,6 +308,7 @@ def _watch_options(func):
         default=30,
         show_default=True,
         metavar="SECONDS",
+        type=click.IntRange(min=1),  # 0/negative would busy-spin the watch loop
         help="Watch-mode refresh interval",
     )(func)
     return func

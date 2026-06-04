@@ -214,6 +214,39 @@ class TestRunQueueCommandRemote:
         with pytest.raises(click.ClickException, match="uzh.*Connection refused"):
             _run_queue_command(console, _TARGET, gather, lambda data: None)
 
+    def test_watch_reuses_single_connection(self, monkeypatch):
+        """The headline watch-mode claim: ONE SSH connection across refresh
+        cycles. A regression to reconnect-per-cycle (the `remote health
+        --watch` anti-pattern) must fail here."""
+        conn = FakeConn()
+        created = {"n": 0}
+
+        async def fake_create(host, ssh_key=None, ssh_port=None):
+            created["n"] += 1
+            return conn
+
+        monkeypatch.setattr(
+            "hpc_sweep_manager.core.remote.discovery.create_ssh_connection", fake_create
+        )
+        console, buf = _console_buf()
+        cycles = {"n": 0}
+
+        async def gather(q):
+            return await q.list_user_jobs("gbena")
+
+        def render(data):
+            cycles["n"] += 1
+            if cycles["n"] >= 3:
+                raise KeyboardInterrupt  # stand-in for the user's Ctrl+C
+
+        # refresh=0 keeps the test instant; user input is gated to >=1 by
+        # the --refresh IntRange at the Click layer.
+        _run_queue_command(console, _TARGET, gather, render, watch=True, refresh=0)
+        assert cycles["n"] == 3
+        assert created["n"] == 1  # one handshake total, not one per cycle
+        assert conn.closed
+        assert "stopped" in buf.getvalue()
+
     def test_local_transport_used_when_target_none(self, monkeypatch):
         seen = {}
 
