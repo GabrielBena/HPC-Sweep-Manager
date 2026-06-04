@@ -43,6 +43,7 @@ from rich.table import Table
 
 from ..core.common.config import HSMConfig
 from ..core.hpc.scheduler_queue import (
+    KNOWN_GPU_VRAM_GB,
     JobGroup,
     QueueCommandError,
     QueueJob,
@@ -580,6 +581,23 @@ def _mine_gpu_contribution(
     return mine_running, mine_pending
 
 
+def _format_vram(type_key: str, cap_entry: Dict) -> tuple[str, bool]:
+    """VRAM cell for a GPU type: ``(text, used_model_typical_fallback)``.
+
+    Cluster-reported (``vram_gb`` from GPUMEM feature tags) wins — shown
+    plain, with mixed node groups joined (``40/80G``). Otherwise the
+    model-typical table gives a ``~``-prefixed value, and unknown models
+    show ``?`` — an unknown is never displayed as a confident number.
+    """
+    vram = cap_entry.get("vram_gb")
+    if vram:
+        return "/".join(str(v) for v in vram) + "G", False
+    known = KNOWN_GPU_VRAM_GB.get(type_key.upper())
+    if known:
+        return f"~{known}G", True
+    return "[dim]?[/dim]", False
+
+
 def _render_gpus(
     console: Console,
     summary: Dict[str, Dict[str, int]],
@@ -604,6 +622,7 @@ def _render_gpus(
             return
         table = Table(title="GPU capacity & queue by type")
         table.add_column("Type", style="cyan")
+        table.add_column("VRAM/GPU", justify="right")
         table.add_column("Total", justify="right")
         table.add_column("In use", justify="right", style="green")
         table.add_column("Free", justify="right", style="bold green")
@@ -611,14 +630,18 @@ def _render_gpus(
         if mine_jobs is not None:
             table.add_column("Mine (R/P)", justify="right", style="magenta")
         free_total = 0
+        any_model_typical = False
         for type_key in type_keys:
             cap = cap_by_type.get(type_key)
             pending = summary.get(type_key, {}).get("PENDING", 0)
             if cap:
+                vram_cell, model_typical = _format_vram(type_key, cap)
+                any_model_typical |= model_typical
                 free = max(cap["total"] - cap["used"], 0)
                 free_total += free
                 row = [
                     type_key,
+                    vram_cell,
                     str(cap["total"]),
                     str(cap["used"]),
                     str(free) if free else "0",
@@ -627,7 +650,7 @@ def _render_gpus(
             else:
                 # Demand for a type sinfo doesn't list (e.g. the "<untyped>"
                 # request bucket) — no physical inventory to show.
-                row = [type_key, "", "", "", str(pending) if pending else ""]
+                row = [type_key, "", "", "", "", str(pending) if pending else ""]
             if mine_jobs is not None:
                 row.append(
                     f"{mine_running.get(type_key, 0)}/{mine_pending.get(type_key, 0)}"
@@ -638,6 +661,16 @@ def _render_gpus(
         if excluded_gpus:
             line += f" [dim](+{excluded_gpus} on down/drained nodes, excluded)[/dim]"
         console.print(line)
+        if "<untyped>" in type_keys:
+            console.print(
+                "[dim]<untyped> = jobs requesting a GPU without a type "
+                "(e.g. --gpus=1) — demand only; once running, their GPUs are "
+                "attributed to the physical type in the In-use column.[/dim]"
+            )
+        if any_model_typical:
+            console.print(
+                "[dim]~ = model-typical VRAM (this cluster doesn't report it).[/dim]"
+            )
         return
 
     # Legacy queue-only view (sinfo unavailable).

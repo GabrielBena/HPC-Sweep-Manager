@@ -125,18 +125,21 @@ vanishing.
 Per-GPU-type **capacity and** queue depth, cluster-wide:
 
 ```
-                GPU capacity & queue by type
-┏━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┓
-┃ Type      ┃ Total ┃ In use ┃ Free ┃ Pending ┃ Mine (R/P) ┃
-┡━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━┩
-│ <untyped> │       │        │      │      83 │        0/0 │
-│ A100      │    40 │     34 │    6 │       4 │        9/4 │
-│ H100      │    28 │     28 │    0 │      14 │        0/0 │
-│ H200      │    16 │     16 │    0 │         │        0/0 │
-│ L4        │    16 │      9 │    7 │       4 │        0/0 │
-│ V100      │    48 │      3 │   45 │         │        0/0 │
-└───────────┴───────┴────────┴──────┴─────────┴────────────┘
+                       GPU capacity & queue by type
+┏━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Type      ┃ VRAM/GPU ┃ Total ┃ In use ┃ Free ┃ Pending ┃ Mine (R/P) ┃
+┡━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━┩
+│ <untyped> │          │       │        │      │      83 │        0/0 │
+│ A100      │      80G │    40 │     34 │    6 │       4 │        9/4 │
+│ H100      │   80/96G │    28 │     28 │    0 │      14 │        0/0 │
+│ H200      │     140G │    16 │     16 │    0 │         │        0/0 │
+│ L4        │      24G │    16 │      9 │    7 │       4 │        0/0 │
+│ V100      │      32G │    48 │      3 │   45 │         │        0/0 │
+└───────────┴──────────┴───────┴────────┴──────┴─────────┴────────────┘
 58 GPU(s) free right now
+<untyped> = jobs requesting a GPU without a type (e.g. --gpus=1) — demand
+only; once running, their GPUs are attributed to the physical type in the
+In-use column.
 ```
 
 - **Total / In use / Free** come from `sinfo`'s per-node allocation
@@ -145,9 +148,17 @@ Per-GPU-type **capacity and** queue depth, cluster-wide:
   an estimate**. GPUs on down/drained nodes are excluded from totals (a
   footer notes how many). Types with zero queue demand (idle V100s
   above) still show — that's the point of a Free column.
+- **VRAM/GPU** is cluster-reported when nodes carry `GPUMEM<N>GB`
+  feature tags (S3IT does) — mixed node groups list every variant
+  (`80/96G` above is real: two H100 flavors). When the cluster doesn't
+  report it, a model-typical value is shown with a `~` marker (and a
+  legend), only for models with a single common configuration —
+  ambiguous ones (A100 40/80, V100 16/32) show `?` rather than a
+  confident guess.
 - **Pending** is demand from `squeue -r` (per-task). Jobs requesting
   GPUs without a type (`--gpus=1`, no `--gres=gpu:TYPE:N`) aggregate
-  under `<untyped>` — demand-only, no physical inventory.
+  under `<untyped>` — demand-only, no physical inventory (explained by
+  an automatic legend whenever the row appears).
 - **Mine (R/P)** — your contribution per type — is **on by default**
   (`--no-mine` to hide). Useful for "am I overcommitting on H100s?" and
   for spotting QoS-capped pendings: pending tasks *despite* free GPUs of
