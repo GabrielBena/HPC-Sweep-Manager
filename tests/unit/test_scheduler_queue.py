@@ -7,18 +7,29 @@ parsed dataclasses come out right.
 
 from __future__ import annotations
 
+import asyncio
+import shlex
 import subprocess
+from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hpc_sweep_manager.core.hpc.scheduler_queue import (
+    SQUEUE_FORMAT,
+    QueueCommandError,
     QueueJob,
     Reservation,
     SlurmQueue,
+    SSHSlurmQueue,
     _parse_gpu_from_tres,
     _parse_priority,
+    parse_array_task_count,
     parse_reservations_output,
+    parse_squeue_output,
+    positions_by_base,
+    strip_array_suffix,
+    summarize_gpu_jobs,
 )
 
 
@@ -246,3 +257,303 @@ class TestParseReservationsOutput:
         assert out[0].name == "maint"
         assert out[0].start_time == "2026-06-04T06:00:00"
         assert out[0].node_count == 2
+
+
+# ------------------------------------------------- colon-count GRES (live S3IT)
+
+
+class TestParseGpuFromTresColonGrammar:
+    """The grammar ``%b`` actually emits on Slurm 25.05 (S3IT live census,
+    2026-06-04). The original parser only understood ``=``-count and reported
+    (0, None) for ALL of these — the field-audit bug that blanked every view.
+    """
+
+    # The complete census over 1092 live queue rows:
+    def test_census_na(self):
+        assert _parse_gpu_from_tres("N/A") == (0, None)
+
+    def test_census_untyped_one(self):
+        assert _parse_gpu_from_tres("gres/gpu:1") == (1, None)
+
+    def test_census_typed_a100(self):
+        assert _parse_gpu_from_tres("gres/gpu:A100:1") == (1, "A100")
+
+    def test_census_typed_h100(self):
+        assert _parse_gpu_from_tres("gres/gpu:H100:1") == (1, "H100")
+
+    def test_census_untyped_three(self):
+        assert _parse_gpu_from_tres("gres/gpu:3") == (3, None)
+
+    def test_census_typed_l4(self):
+        assert _parse_gpu_from_tres("gres/gpu:L4:1") == (1, "L4")
+
+    # Tolerated variants beyond the census:
+    def test_multi_gpu_typed(self):
+        assert _parse_gpu_from_tres("gres/gpu:H200:8") == (8, "H200")
+
+    def test_bare_type_defaults_to_one(self):
+        assert _parse_gpu_from_tres("gres/gpu:a100") == (1, "a100")
+
+    def test_bare_gpu_defaults_to_one(self):
+        assert _parse_gpu_from_tres("gres/gpu") == (1, None)
+
+    def test_index_decoration_stripped(self):
+        assert _parse_gpu_from_tres("gres/gpu:A100:2(IDX:0-1)") == (2, "A100")
+
+    def test_typed_colon_wins_over_untyped(self):
+        assert _parse_gpu_from_tres("gres/gpu:1,gres/gpu:A100:1") == (1, "A100")
+
+    def test_mixed_with_other_tres(self):
+        assert _parse_gpu_from_tres("cpu=4,mem=32G,gres/gpu:H100:2") == (2, "H100")
+
+    def test_non_gpu_gres_ignored(self):
+        assert _parse_gpu_from_tres("gres/shard:4") == (0, None)
+
+
+# ----------------------------------------------------------- array-id helpers
+
+
+class TestArrayIdHelpers:
+    def test_strip_plain(self):
+        assert strip_array_suffix("3713695") == "3713695"
+
+    def test_strip_task(self):
+        assert strip_array_suffix("3703585_14") == "3703585"
+
+    def test_strip_collapsed_range(self):
+        assert strip_array_suffix("3710878_[690-1920]") == "3710878"
+
+    def test_strip_throttled_range(self):
+        assert strip_array_suffix("3713285_[6-44%4]") == "3713285"
+
+    def test_count_plain_and_single_task(self):
+        assert parse_array_task_count("3713695") == 1
+        assert parse_array_task_count("3703585_14") == 1
+
+    def test_count_range(self):
+        assert parse_array_task_count("3703585_[19-22]") == 4
+
+    def test_count_big_live_range(self):
+        # The live row that motivated this: ONE squeue line, 1231 queued tasks.
+        assert parse_array_task_count("3710878_[690-1920]") == 1231
+
+    def test_count_throttle_is_not_a_divisor(self):
+        # %N limits concurrency, it does not change how many tasks are queued.
+        assert parse_array_task_count("3713285_[6-44%4]") == 39
+
+    def test_count_comma_list_with_ranges(self):
+        assert parse_array_task_count("123_[1,3,7-9]") == 5
+
+    def test_count_step_range(self):
+        # Slurm reconstructs `lo-hi:step` for evenly-spaced pending indices
+        # (sbatch --array=0-100:10). 0,10,...,100 → 11 tasks, not 1.
+        assert parse_array_task_count("123_[0-100:10]") == 11
+        assert parse_array_task_count("123_[1-9:2]") == 5
+
+    def test_count_step_range_with_throttle(self):
+        assert parse_array_task_count("123_[0-15:4%2]") == 4
+
+    def test_count_zero_step_is_tolerated(self):
+        # Malformed step → treated as step 1, not a ZeroDivisionError.
+        assert parse_array_task_count("123_[1-5:0]") == 5
+
+    def test_count_unparseable_part_counts_one(self):
+        assert parse_array_task_count("123_[x]") == 1
+
+
+# ------------------------------------------------------------ pure aggregators
+
+
+def _job(job_id: str, state: str = "PENDING", gpu_count: int = 1,
+         gpu_type: Optional[str] = None, task_count: int = 1) -> QueueJob:
+    return QueueJob(
+        job_id=job_id, name="n", user="u", state=state, reason="(Priority)",
+        partition="standard", tres_per_node="", expected_start="N/A",
+        priority=0, gpu_count=gpu_count, gpu_type=gpu_type, task_count=task_count,
+    )
+
+
+class TestSummarizeTaskWeighted:
+    def test_collapsed_pending_array_counts_all_tasks(self):
+        # One collapsed row, 10 tasks × 1 A100 each → 10 pending A100 GPUs.
+        summary = summarize_gpu_jobs([_job("2001_[1-10]", gpu_type="A100", task_count=10)])
+        assert summary == {"A100": {"PENDING": 10}}
+
+    def test_expanded_rows_unchanged(self):
+        summary = summarize_gpu_jobs(
+            [_job("2001_1", gpu_type="A100"), _job("2001_2", gpu_type="A100")]
+        )
+        assert summary == {"A100": {"PENDING": 2}}
+
+
+class TestPositionsByBase:
+    def test_groups_expanded_array_tasks(self):
+        pending = [
+            _job("9_1"),           # someone else's task at position 1
+            _job("3703585_19"),    # mine
+            _job("9_2"),
+            _job("3703585_20"),    # mine
+        ]
+        by_base = positions_by_base(pending)
+        assert by_base["3703585"] == [2, 4]
+        assert by_base["9"] == [1, 3]
+
+
+class TestCountingPathsExpandArrays:
+    """The counting paths must pass -r so Slurm expands pending arrays
+    per-task; the display path (list_user_jobs) must NOT, to stay compact."""
+
+    def _capture_cmd(self, call):
+        with patch("subprocess.run", return_value=_fake_completed("")) as mock_run:
+            call()
+        return mock_run.call_args[0][0]
+
+    def test_pending_gpu_sorted_uses_r(self):
+        cmd = self._capture_cmd(lambda: SlurmQueue().pending_gpu_jobs_sorted())
+        assert "-r" in cmd
+
+    def test_gpu_summary_uses_r(self):
+        cmd = self._capture_cmd(lambda: SlurmQueue().gpu_summary())
+        assert "-r" in cmd
+
+    def test_list_user_jobs_stays_collapsed(self):
+        cmd = self._capture_cmd(lambda: SlurmQueue().list_user_jobs("alice"))
+        assert "-r" not in cmd
+        assert "-u" in cmd and "alice" in cmd
+
+
+# --------------------------------------------------------------- SSHSlurmQueue
+
+
+class _Result:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class FakeConn:
+    """asyncssh stand-in: substring responder, records every command."""
+
+    def __init__(self):
+        self.run_calls: List[str] = []
+        self._responder: List[tuple] = []
+        self.run_delay_s: float = 0.0
+
+    def add(self, sub: str, res: _Result) -> None:
+        self._responder.append((sub, res))
+
+    async def run(self, cmd: str, *, input: Optional[str] = None, check: bool = False):
+        self.run_calls.append(cmd)
+        if self.run_delay_s:
+            await asyncio.sleep(self.run_delay_s)
+        for i, (sub, res) in enumerate(self._responder):
+            if sub in cmd:
+                del self._responder[i]
+                return res
+        return _Result(0, "")
+
+
+# A live-grammar row (colon-count GRES) as the remote would emit it.
+_REMOTE_ROW_A100 = "\t".join(
+    ["3703585_14", "sweep_x_array", "gbena", "RUNNING", "u24-chaiam0-615",
+     "standard", "gres/gpu:A100:1", "2026-06-04T09:05:27", "106515"]
+)
+
+
+class TestSSHSlurmQueue:
+    @pytest.mark.asyncio
+    async def test_format_string_survives_shell_quoting(self):
+        """THE wire-level gotcha: the format string contains literal tabs.
+
+        Unquoted, a remote shell word-splits them into separate argv entries
+        and squeue gets a broken --format. shlex.join must keep it ONE token
+        with the real tabs intact (squeue treats a textual ``\\t`` as two
+        characters — only real tabs delimit).
+        """
+        conn = FakeConn()
+        await SSHSlurmQueue(conn).list_user_jobs("gbena")
+        cmd = conn.run_calls[0]
+        # Re-split the way the remote shell would: format must be one token.
+        tokens = shlex.split(cmd)
+        fmt_tokens = [t for t in tokens if t.startswith("--format=")]
+        assert fmt_tokens == [f"--format={SQUEUE_FORMAT}"]
+        assert "\t" in fmt_tokens[0]  # real tabs, not backslash-t text
+
+    @pytest.mark.asyncio
+    async def test_parses_live_grammar_rows(self):
+        conn = FakeConn()
+        conn.add("squeue", _Result(0, _REMOTE_ROW_A100 + "\n"))
+        jobs = await SSHSlurmQueue(conn).list_user_jobs("gbena")
+        assert len(jobs) == 1
+        assert jobs[0].gpu_count == 1
+        assert jobs[0].gpu_type == "A100"
+
+    @pytest.mark.asyncio
+    async def test_pending_path_passes_r_flag(self):
+        conn = FakeConn()
+        await SSHSlurmQueue(conn).pending_gpu_jobs_sorted()
+        assert "-r" in shlex.split(conn.run_calls[0])
+
+    @pytest.mark.asyncio
+    async def test_nonzero_rc_raises_not_empty(self):
+        """Over SSH an empty table must mean 'no jobs', never 'squeue broke'."""
+        conn = FakeConn()
+        conn.add("squeue", _Result(127, "", "bash: squeue: command not found"))
+        with pytest.raises(QueueCommandError, match="rc=127"):
+            await SSHSlurmQueue(conn).list_user_jobs("gbena")
+
+    @pytest.mark.asyncio
+    async def test_timeout_raises(self):
+        conn = FakeConn()
+        conn.run_delay_s = 0.2
+        q = SSHSlurmQueue(conn, timeout_s=0.01)
+        with pytest.raises(QueueCommandError, match="timed out"):
+            await q.list_user_jobs("gbena")
+
+    @pytest.mark.asyncio
+    async def test_whoami(self):
+        conn = FakeConn()
+        conn.add("whoami", _Result(0, "gbena\n"))
+        assert await SSHSlurmQueue(conn).whoami() == "gbena"
+
+    @pytest.mark.asyncio
+    async def test_whoami_empty_raises(self):
+        conn = FakeConn()
+        conn.add("whoami", _Result(0, "\n"))
+        with pytest.raises(QueueCommandError):
+            await SSHSlurmQueue(conn).whoami()
+
+    @pytest.mark.asyncio
+    async def test_reservations_roundtrip(self):
+        conn = FakeConn()
+        conn.add(
+            "scontrol",
+            _Result(0, "ReservationName=maint StartTime=s EndTime=e "
+                       "Duration=d Nodes=n NodeCnt=3\n"),
+        )
+        res = await SSHSlurmQueue(conn).reservations()
+        assert len(res) == 1 and res[0].node_count == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method,args",
+        [
+            ("list_user_jobs", ("alice",)),
+            ("pending_gpu_jobs_sorted", ()),
+            ("gpu_summary", ()),
+            ("reservations", ()),
+        ],
+    )
+    async def test_same_commands_as_local_transport(self, method, args):
+        """Anti-drift: the SSH twin must run exactly the local argv, joined —
+        for every query path, not just one exemplar."""
+        conn = FakeConn()
+        await getattr(SSHSlurmQueue(conn), method)(*args)
+        with patch("subprocess.run", return_value=_fake_completed("")) as mock_run:
+            getattr(SlurmQueue(), method)(*args)
+        assert shlex.split(conn.run_calls[0]) == mock_run.call_args[0][0]
+
+    def test_bare_trailing_colon_type_is_none_not_empty(self):
+        # "gres/gpu:" must not yield gpu_type="" (falsy-but-not-None trap).
+        assert _parse_gpu_from_tres("gres/gpu:") == (1, None)

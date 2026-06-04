@@ -109,8 +109,13 @@ backs `hsm sweep status` / `hsm sweep report`.
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
 - [`core/hpc/scheduler_queue.py`](src/hpc_sweep_manager/core/hpc/scheduler_queue.py) —
-  `SlurmQueue` (+ `QueueJob` / `Reservation` dataclasses). Read-only wrappers
-  around `squeue` / `sprio` / `scontrol`. Backs `hsm queue mine|position|gpus|reservations`.
+  `SlurmQueue` (local subprocess) + `SSHSlurmQueue` (async, over an asyncssh
+  conn) + `QueueJob` / `Reservation` dataclasses, built on shared pure
+  command-builders/parsers/aggregators (slurm_protocol-style anti-drift).
+  Backs `hsm queue mine|position|gpus|reservations [--remote <alias>]`
+  (auto-falls back to the sole `backend: slurm` remote when no local
+  squeue; `--watch` on mine/gpus). See gotcha #13 for the `%b` GRES
+  grammar + pending-array counting traps.
 
 ## Do NOT reintroduce
 
@@ -378,6 +383,29 @@ it's trying to reintroduce them, push back.
     deliberately. Behavioral tests run real rsync:
     `tests/unit/test_push_exec.py::TestExcludeRsyncSemantics`.
 
+13. **squeue `%b` is tres-per-NODE with colon-count GRES; pending arrays
+    are ONE row (queue-audit fixes, 2026-06-04).** Two traps found by live
+    audit on S3IT/Slurm 25.05 with sweeps in flight:
+
+    - `%b` emits `gres/gpu:A100:1` / `gres/gpu:3` (colon-count) — NOT the
+      `=`-count accounting grammar (`gres/gpu:h100=1`) the original parser
+      expected, so every job parsed as 0 GPUs and all `hsm queue` views
+      were success-shaped-empty. `_parse_gpu_from_tres` accepts BOTH
+      grammars (census fixtures in `test_scheduler_queue.py`); don't
+      "simplify" it back to one. Also: `%b` is per-*node*, hence
+      `QueueJob.tres_per_node` — fine for HSM's single-node tasks.
+    - A *pending* array job is a single squeue row (`123_[690-1920%4]` =
+      1231 tasks; `%4` is a throttle, not a count). Counting paths MUST
+      pass `-r/--array` (Slurm expands per-task rows); display paths keep
+      collapsed rows + `parse_array_task_count`. Don't drop the `-r` or
+      totals silently shrink by orders of magnitude.
+    - SSH transport corollary: the squeue format string contains literal
+      tabs → remote commands MUST be `shlex.join`ed or the remote shell
+      word-splits the format flag (squeue treats a textual `\t` as two
+      chars; only real tabs delimit). `SSHSlurmQueue` raises
+      `QueueCommandError` on failure instead of returning `[]` — over SSH
+      an empty table must mean "no jobs", never "squeue quietly broke".
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1
@@ -495,6 +523,25 @@ must match reality. Plan:
 Deferred: G2 train-script-detection rework (loud warning + per-sweep
 `script:` remain the mitigation); conditional `wandb.group=` injection
 (see Known limitations).
+
+## Recently landed (2026-06-04) — queue audit + SSH-driven `hsm queue`
+
+Live audit on S3IT (two sweeps in flight) found every `hsm queue` view
+success-shaped-empty on a real cluster; fixed the core, then made the
+whole group drivable from the workstation. Plan:
+`/home/gbena/.claude/plans/giggly-floating-lark.md`.
+
+| What | Where |
+|---|---|
+| GRES colon-grammar parsing (`gres/gpu:A100:1`) + `tres_per_node` semantics; live census = test fixtures | `scheduler_queue.py` (→ gotcha #13) |
+| Pending-array task counting: `-r` on counting paths, `parse_array_task_count` + `×N` Tasks column on display paths | `scheduler_queue.py`, `cli/queue.py` |
+| `SSHSlurmQueue` async twin on shared pure helpers; raises `QueueCommandError`, never empty-on-failure | `scheduler_queue.py` |
+| `--remote <alias>` on all four subcommands + sole-slurm-remote auto-fallback + `--watch/--refresh` (persistent conn) | `cli/queue.py` |
+| Job→sweep linkage via `.hsm_manifest.json` fallback (SSH-Slurm sweeps have no `submission_summary.txt`) | `cli/queue.py` |
+
+User-facing docs: [docs/user_guide/QUEUE.md](docs/user_guide/QUEUE.md);
+monitor-from-HQ section in
+[MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md#monitoring-the-cluster-queue-from-hq).
 
 ## Cross-references
 

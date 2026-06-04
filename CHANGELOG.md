@@ -11,6 +11,40 @@ Two field reports drove this cycle: SSH-Slurm → S3IT first use
 and the first blind agent-driven consumer run from Comp-PVR
 ([`2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)).
 
+### Fixed (queue inspection audit, 2026-06-04)
+
+Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
+`hsm queue` blind on real clusters:
+
+- **GPU parsing missed the colon-count GRES grammar.** `squeue %b` emits
+  `gres/gpu:A100:1` / `gres/gpu:3` on Slurm 25.05; the parser only knew the
+  `=`-count accounting style (`gres/gpu:h100=1`), so every job parsed as
+  0 GPUs — `gpus` reported an empty GPU queue, `position` denied pending GPU
+  jobs existed, `mine`'s GPU column was blank. Both grammars are accepted
+  now, with the live cluster census as test fixtures. Also corrected the
+  field's semantics: `%b` is TRES per **node** (`QueueJob.tres_per_node`).
+- **Pending arrays counted as 1 task.** A pending array is one squeue row
+  (`123_[690-1920%4]` = 1231 tasks). Counting paths (`position`, `gpus`)
+  now query with `squeue -r` so totals/positions count tasks; `mine` keeps
+  the compact row and shows a `×N` Tasks column.
+- **`position` silently hid CPU-only pending jobs** — now surfaced as a
+  note; the reason-code legend covers `(QOSMaxJobsPerUserLimit)`.
+
+### Added (queue inspection from the driving workstation, 2026-06-04)
+
+- **`--remote <alias>` on all four `hsm queue` subcommands** — runs the same
+  queries over SSH (registered `backend: slurm` remote or bare `~/.ssh/config`
+  alias). New `SSHSlurmQueue` async twin shares the pure command
+  builders/parsers with the local `SlurmQueue` (the `slurm_protocol.py`
+  anti-drift idiom); failures raise instead of rendering an empty table.
+- **Auto-fallback:** with no local `squeue` and exactly one slurm-backend
+  remote registered, `hsm queue` uses it automatically (note printed).
+- **`--watch [--refresh N]` on `mine` and `gpus`** — live-refreshing view;
+  one SSH connection reused across cycles.
+- **Sweep linkage for SSH-Slurm sweeps:** `mine` resolves job→sweep from
+  `.hsm_manifest.json` too (such sweeps have no `submission_summary.txt`),
+  so the from-HQ view shows which sweep each job belongs to.
+
 ### Fixed (Comp-PVR consumer report, 2026-06-03)
 - **Array tasks silently ran the default config under `conda run`.** The
   per-task params extraction fed Python over stdin (`python - <<heredoc`);

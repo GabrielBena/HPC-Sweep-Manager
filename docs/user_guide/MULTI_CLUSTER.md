@@ -299,8 +299,9 @@ ssh anahita "cd ~/code/<proj> && hsm sweep run --remote uzh -c sweep.yaml --mode
 This routes through `SSHSlurmComputeSource._submit_array`: **one
 sbatch with `--array=1-N`**. The cluster sees one queue position for
 the whole batch, the fair-share calculation amortizes across all
-tasks, and `hsm queue mine` shows one entry instead of N. Submission
-is also one ssh + sbatch round-trip instead of N.
+tasks, and `hsm queue mine` shows one entry (with a `×N` Tasks count)
+instead of N rows. Submission is also one ssh + sbatch round-trip
+instead of N.
 
 Use distributed when you genuinely want heterogeneous fan-out (mix of
 local + SSH workstation + cluster). For "I just want this on S3IT,"
@@ -331,6 +332,26 @@ S3IT docs:
 [Transfer](https://docs.s3it.uzh.ch/cluster/transfer/) |
 [Job submission](https://docs.s3it.uzh.ch/cluster/job_submission/)
 
+## Monitoring the cluster queue from HQ
+
+`hsm queue mine|position|gpus|reservations` run their `squeue`/`scontrol`
+queries **over SSH** with `--remote <alias>` — no Slurm needed on the
+machine you're sitting at. When the project registers exactly one
+`backend: slurm` remote, the flag is optional (auto-fallback with a
+printed note), so from HQ this just works:
+
+```bash
+cd ~/code/my-project
+hsm queue mine                          # auto-uses the sole slurm remote
+hsm queue gpus --mine --watch           # live dashboard, one SSH connection
+hsm queue position                      # pending GPU tasks, per-task counted
+```
+
+Run it from the project directory that launched the sweeps and the
+`Sweep` column links each job back to its local sweep dir (for SSH-Slurm
+sweeps via `.hsm_manifest.json`) — the from-HQ view is *richer* than the
+same command on the login node. See [QUEUE.md](QUEUE.md).
+
 ## Watching from your laptop
 
 When you're not at your HQ box, two patterns work:
@@ -342,6 +363,9 @@ ssh hq 'cd ~/code/my-project && hsm sweep status'
 # Pull a specific sweep's results back to your laptop (read-only):
 rsync -av hq:/mnt/8TB_HDD/<user>/hsm-sweeps/<sweep_id>/ /tmp/<sweep_id>/
 ```
+
+(For queue state specifically, `hsm queue ... --remote <alias>` works
+from the laptop too — any box with SSH access to the cluster.)
 
 ### Re-attaching to a sweep whose launcher died
 

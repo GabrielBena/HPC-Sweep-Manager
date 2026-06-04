@@ -109,20 +109,28 @@ See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the ful
 ## `hsm queue`
 
 Cluster-wide Slurm queue inspection. Read-only — wraps `squeue` /
-`sprio` / `scontrol show reservations` with richer output (including
-sweep-ID linkage for your jobs).
+`scontrol show reservations` with richer output (including sweep-ID
+linkage for your jobs). Runs locally on a login node, or **over SSH**
+with `--remote <alias>` (every subcommand takes it) so you can monitor
+the cluster from the workstation that drives the sweeps. Pending arrays
+are counted per-task (`squeue -r` for totals/positions; a `×N` Tasks
+column for compact views).
 
 | Subcommand | What it does |
 |---|---|
-| `hsm queue mine` | Your jobs (any state) with sweep IDs cross-referenced from `sweeps/outputs/*/submission_summary.txt`. Same scope as `hsm sweep queue` but with structure. |
-| `hsm queue position [<job_id>]` | Position of your pending GPU job(s) in the cluster-wide priority-sorted GPU queue. With a `job_id`, reports just that job; without, reports every pending GPU job of yours. |
-| `hsm queue gpus [--mine]` | Per-GPU-type queue depth: running/pending counts grouped by `H100` / `L4` / `A100` / `H200` / `<untyped>`. `--mine` adds a column with your contribution. |
+| `hsm queue mine [--watch]` | Your jobs (any state) with sweep IDs cross-referenced from `sweeps/outputs/*/submission_summary.txt` AND `.hsm_manifest.json` (SSH-Slurm sweeps). Same scope as `hsm sweep queue` but with structure. |
+| `hsm queue position [<job_id>]` | Position of your pending GPU task(s) in the cluster-wide priority-sorted GPU queue. With a `job_id` (exact task or array base), reports just that job; without, reports every pending GPU job of yours, plus a note for CPU-only pending tasks. |
+| `hsm queue gpus [--mine] [--watch]` | Per-GPU-type queue depth: running/pending GPU counts grouped by `H100` / `L4` / `A100` / `H200` / `<untyped>`. `--mine` adds a column with your contribution. |
 | `hsm queue reservations` | Upcoming Slurm maintenance windows. |
 
-All subcommands degrade gracefully on machines without `squeue` on PATH
-(prints a one-line "no scheduler detected" message). PBS isn't covered
-yet. See [../user_guide/QUEUE.md](../user_guide/QUEUE.md) for output
-samples and the underlying API.
+`--watch [--refresh N]` (on `mine` and `gpus`) keeps the view
+refreshing; over SSH the connection is opened once and reused. With no
+local `squeue` and exactly one `backend: slurm` remote registered, the
+remote is used automatically (a note is printed); otherwise the error
+lists the available `--remote` choices. A failing remote exits non-zero
+— never a silently empty table. PBS isn't covered yet. See
+[../user_guide/QUEUE.md](../user_guide/QUEUE.md) for output samples and
+the underlying API.
 
 ## Environment variables
 
