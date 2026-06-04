@@ -120,27 +120,40 @@ order Slurm uses to decide what runs next. CPU-only pending jobs are not
 *in* the GPU queue; they're surfaced as a note instead of silently
 vanishing.
 
-## `hsm queue gpus [--mine] [--remote ALIAS] [--watch [--refresh N]]`
+## `hsm queue gpus [--no-mine] [--remote ALIAS] [--watch [--refresh N]]`
 
-Per-GPU-type queue depth, cluster-wide (GPUs, task-weighted):
+Per-GPU-type **capacity and** queue depth, cluster-wide:
 
 ```
-GPU queue depth by type
-┏━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━┓
-┃ Type      ┃ Running ┃ Pending ┃ Other ┃ Mine (R/P) ┃
-┡━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━┩
-│ <untyped> │      26 │      74 │       │        0/0 │
-│ A100      │      12 │       4 │       │        9/4 │
-│ H100      │       7 │       4 │       │        0/0 │
-│ L4        │       7 │       0 │       │        0/0 │
-└───────────┴─────────┴─────────┴───────┴────────────┘
+                GPU capacity & queue by type
+┏━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━┳━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Type      ┃ Total ┃ In use ┃ Free ┃ Pending ┃ Mine (R/P) ┃
+┡━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━╇━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━┩
+│ <untyped> │       │        │      │      83 │        0/0 │
+│ A100      │    40 │     34 │    6 │       4 │        9/4 │
+│ H100      │    28 │     28 │    0 │      14 │        0/0 │
+│ H200      │    16 │     16 │    0 │         │        0/0 │
+│ L4        │    16 │      9 │    7 │       4 │        0/0 │
+│ V100      │    48 │      3 │   45 │         │        0/0 │
+└───────────┴───────┴────────┴──────┴─────────┴────────────┘
+58 GPU(s) free right now
 ```
 
-With `--mine` the extra `Mine (R/P)` column shows your contribution to
-each row — useful for "am I overcommitting on H100s?" sanity checks.
-
-Jobs requesting GPUs without a type (`--gpus=1`, no `--gres=gpu:TYPE:N`)
-are aggregated under `<untyped>`.
+- **Total / In use / Free** come from `sinfo`'s per-node allocation
+  accounting (`Gres` / `GresUsed`), so GPUs consumed by *untyped* job
+  requests are attributed to their physical type and **Free is real, not
+  an estimate**. GPUs on down/drained nodes are excluded from totals (a
+  footer notes how many). Types with zero queue demand (idle V100s
+  above) still show — that's the point of a Free column.
+- **Pending** is demand from `squeue -r` (per-task). Jobs requesting
+  GPUs without a type (`--gpus=1`, no `--gres=gpu:TYPE:N`) aggregate
+  under `<untyped>` — demand-only, no physical inventory.
+- **Mine (R/P)** — your contribution per type — is **on by default**
+  (`--no-mine` to hide). Useful for "am I overcommitting on H100s?" and
+  for spotting QoS-capped pendings: pending tasks *despite* free GPUs of
+  that type usually means `(QOSMaxJobsPerUserLimit)`, not capacity.
+- Clusters where `sinfo` is unavailable degrade to the queue-only
+  Running/Pending table with a one-line note — never silently.
 
 ## `hsm queue reservations [--remote ALIAS]`
 

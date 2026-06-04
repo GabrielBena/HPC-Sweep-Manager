@@ -163,6 +163,9 @@ class _LocalQueueAsync:
     async def sacct_job_states(self, base_ids) -> Optional[Dict[str, Dict[str, int]]]:
         return self._q.sacct_job_states(base_ids)
 
+    async def gpu_capacity(self) -> Optional[tuple]:
+        return self._q.gpu_capacity()
+
     async def reservations(self) -> List[Reservation]:
         return self._q.reservations()
 
@@ -560,29 +563,87 @@ def _render_position_all(
     console.print(_REASON_LEGEND)
 
 
+def _mine_gpu_contribution(
+    mine_jobs: Optional[List[QueueJob]],
+) -> tuple[Dict[str, int], Dict[str, int]]:
+    """Per-type GPU counts of the user's running/pending jobs (task-weighted)."""
+    mine_running: Dict[str, int] = {}
+    mine_pending: Dict[str, int] = {}
+    for j in mine_jobs or []:
+        if j.gpu_count == 0:
+            continue
+        t = j.gpu_type or "<untyped>"
+        if j.state == "RUNNING":
+            mine_running[t] = mine_running.get(t, 0) + j.gpu_count * j.task_count
+        elif j.state == "PENDING":
+            mine_pending[t] = mine_pending.get(t, 0) + j.gpu_count * j.task_count
+    return mine_running, mine_pending
+
+
 def _render_gpus(
     console: Console,
     summary: Dict[str, Dict[str, int]],
     mine_jobs: Optional[List[QueueJob]],
+    capacity: Optional[tuple] = None,
 ) -> None:
+    """GPU depth table — capacity-aware when sinfo data is available.
+
+    With capacity: Type | Total | In use | Free | Pending | Mine. "In use"
+    is Slurm's own per-node allocation accounting (GresUsed), so GPUs
+    consumed by *untyped* job requests are attributed to their physical
+    type — and Free = Total − In use is real, not an estimate. Without
+    capacity (sinfo absent): the legacy queue-only view.
+    """
+    mine_running, mine_pending = _mine_gpu_contribution(mine_jobs)
+
+    if capacity is not None:
+        cap_by_type, excluded_gpus = capacity
+        type_keys = sorted(set(cap_by_type) | set(summary))
+        if not type_keys:
+            console.print("[dim]No GPUs configured and no GPU jobs in queue.[/dim]")
+            return
+        table = Table(title="GPU capacity & queue by type")
+        table.add_column("Type", style="cyan")
+        table.add_column("Total", justify="right")
+        table.add_column("In use", justify="right", style="green")
+        table.add_column("Free", justify="right", style="bold green")
+        table.add_column("Pending", justify="right", style="yellow")
+        if mine_jobs is not None:
+            table.add_column("Mine (R/P)", justify="right", style="magenta")
+        free_total = 0
+        for type_key in type_keys:
+            cap = cap_by_type.get(type_key)
+            pending = summary.get(type_key, {}).get("PENDING", 0)
+            if cap:
+                free = max(cap["total"] - cap["used"], 0)
+                free_total += free
+                row = [
+                    type_key,
+                    str(cap["total"]),
+                    str(cap["used"]),
+                    str(free) if free else "0",
+                    str(pending) if pending else "",
+                ]
+            else:
+                # Demand for a type sinfo doesn't list (e.g. the "<untyped>"
+                # request bucket) — no physical inventory to show.
+                row = [type_key, "", "", "", str(pending) if pending else ""]
+            if mine_jobs is not None:
+                row.append(
+                    f"{mine_running.get(type_key, 0)}/{mine_pending.get(type_key, 0)}"
+                )
+            table.add_row(*row)
+        console.print(table)
+        line = f"[bold green]{free_total}[/bold green] GPU(s) free right now"
+        if excluded_gpus:
+            line += f" [dim](+{excluded_gpus} on down/drained nodes, excluded)[/dim]"
+        console.print(line)
+        return
+
+    # Legacy queue-only view (sinfo unavailable).
     if not summary:
         console.print("[dim]No GPU jobs in queue right now.[/dim]")
         return
-
-    # Optionally compute the user's per-type contribution to each row
-    # (task-weighted, so collapsed pending arrays count their full range).
-    mine_running: Dict[str, int] = {}
-    mine_pending: Dict[str, int] = {}
-    if mine_jobs is not None:
-        for j in mine_jobs:
-            if j.gpu_count == 0:
-                continue
-            t = j.gpu_type or "<untyped>"
-            if j.state == "RUNNING":
-                mine_running[t] = mine_running.get(t, 0) + j.gpu_count * j.task_count
-            elif j.state == "PENDING":
-                mine_pending[t] = mine_pending.get(t, 0) + j.gpu_count * j.task_count
-
     table = Table(title="GPU queue depth by type")
     table.add_column("Type", style="cyan")
     table.add_column("Running", justify="right", style="green")
@@ -600,6 +661,7 @@ def _render_gpus(
             row.append(f"{mine_running.get(type_key, 0)}/{mine_pending.get(type_key, 0)}")
         table.add_row(*row)
     console.print(table)
+    console.print("[dim]No sinfo capacity data — totals/free unavailable.[/dim]")
 
 
 def _render_reservations(console: Console, reservations: List[Reservation]) -> None:
@@ -717,7 +779,13 @@ def queue_position(ctx, job_id: str, remote_alias: str, verbose: bool, quiet: bo
 
 
 @queue.command("gpus")
-@click.option("--mine", "show_mine", is_flag=True, help="Annotate rows with your GPU counts")
+@click.option(
+    "--mine/--no-mine",
+    "show_mine",
+    default=True,
+    show_default=True,
+    help="Annotate rows with your GPU counts",
+)
 @_remote_option
 @_watch_options
 @common_options
@@ -731,20 +799,26 @@ def queue_gpus(
     verbose: bool,
     quiet: bool,
 ):
-    """Per-GPU-type queue depth (running vs pending GPUs, cluster-wide)."""
+    """Per-GPU-type capacity and queue depth, cluster-wide.
+
+    Total / In use / Free come from sinfo's per-node allocation accounting
+    (gracefully omitted on clusters without it); Pending demand from
+    squeue; your own contribution in the Mine column (--no-mine to hide).
+    """
     console = ctx.obj["console"]
     target = _resolve_queue_target(remote_alias, console)
 
     async def gather(q):
         summary = await q.gpu_summary()
+        capacity = await q.gpu_capacity()
         mine_jobs = None
         if show_mine:
             mine_jobs = await q.list_user_jobs(await q.whoami())
-        return summary, mine_jobs
+        return summary, mine_jobs, capacity
 
     def render(data):
-        summary, mine_jobs = data
-        _render_gpus(console, summary, mine_jobs)
+        summary, mine_jobs, capacity = data
+        _render_gpus(console, summary, mine_jobs, capacity)
 
     _run_queue_command(
         console,
@@ -753,7 +827,7 @@ def queue_gpus(
         render,
         watch=watch,
         refresh=refresh,
-        title="GPU queue depth",
+        title="GPU capacity & queue",
     )
 
 

@@ -120,7 +120,7 @@ column for compact views).
 |---|---|
 | `hsm queue mine [--flat] [--watch]` | Your jobs **grouped by array**: one row per array with `▶ running ⏳ pending` (squeue) and `✓ completed ✗ failed` + progress-out-of-total (sacct accounting, gracefully omitted when unavailable), plus sweep IDs cross-referenced from `sweeps/outputs/*/submission_summary.txt` AND `.hsm_manifest.json` (SSH-Slurm sweeps). `--flat` for the per-task rows. |
 | `hsm queue position [<job_id>]` | Position of your pending GPU task(s) in the cluster-wide priority-sorted GPU queue. With a `job_id` (exact task or array base), reports just that job; without, reports every pending GPU job of yours, plus a note for CPU-only pending tasks. |
-| `hsm queue gpus [--mine] [--watch]` | Per-GPU-type queue depth: running/pending GPU counts grouped by `H100` / `L4` / `A100` / `H200` / `<untyped>`. `--mine` adds a column with your contribution. |
+| `hsm queue gpus [--no-mine] [--watch]` | Per-GPU-type capacity + queue: Total / In use / Free from `sinfo` allocation accounting (excludes down/drained nodes; degrades to queue-only when sinfo is absent), Pending demand from `squeue -r`, and your contribution (Mine, on by default — `--no-mine` to hide). |
 | `hsm queue reservations` | Upcoming Slurm maintenance windows. |
 
 `--watch [--refresh N]` (on `mine` and `gpus`) keeps the view

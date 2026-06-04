@@ -25,11 +25,13 @@ from hpc_sweep_manager.core.hpc.scheduler_queue import (
     SSHSlurmQueue,
     _parse_gpu_from_tres,
     _parse_priority,
+    _split_gres_entries,
     enrich_groups_with_accounting,
     group_jobs_by_array,
     parse_array_task_count,
     parse_reservations_output,
     parse_sacct_job_states,
+    parse_sinfo_gpu_capacity,
     parse_squeue_output,
     positions_by_base,
     strip_array_suffix,
@@ -530,6 +532,89 @@ class TestEnrichGroupsWithAccounting:
         assert e.completed is None
 
 
+class TestSplitGresEntries:
+    def test_comma_inside_parens_is_one_entry(self):
+        # THE live trap: GresUsed index lists contain commas.
+        assert _split_gres_entries("gpu:A100:6(IDX:0-1,4-7)") == [
+            "gpu:A100:6(IDX:0-1,4-7)"
+        ]
+
+    def test_top_level_commas_split(self):
+        assert _split_gres_entries("gpu:A100:8,shard:a100:32") == [
+            "gpu:A100:8",
+            "shard:a100:32",
+        ]
+
+    def test_mixed(self):
+        assert _split_gres_entries("gpu:H100:2(IDX:0,1),gpu:L4:1") == [
+            "gpu:H100:2(IDX:0,1)",
+            "gpu:L4:1",
+        ]
+
+
+class TestParseSinfoGpuCapacity:
+    # Shaped like live S3IT `sinfo -h -N -O NodeHost,StateCompact,Gres,GresUsed`
+    # (incl. the duplicate rows -N emits for multi-partition nodes and the
+    # comma-bearing IDX decorations).
+    _LIVE_SHAPED = "\n".join(
+        [
+            "node-611   mix    gpu:A100:8   gpu:A100:4(IDX:0-3)",
+            "node-612   mix-   gpu:A100:8   gpu:A100:6(IDX:0-1,4-7)",
+            "node-612   mix-   gpu:A100:8   gpu:A100:6(IDX:0-1,4-7)",  # dup partition row
+            "node-613   alloc  gpu:A100:8   gpu:A100:8(IDX:0-7)",
+            "node-700   idle   gpu:L4:1     gpu:0",
+            "node-701   comp   gpu:H100:2   gpu:H100:2(IDX:0-1)",
+            "node-800   down*  gpu:H100:8   gpu:0",
+            "node-801   drain  gpu:L4:1     gpu:0",
+            "node-802   drng   gpu:L4:1     gpu:L4:1(IDX:0)",  # draining BUT busy → counts
+            "node-900   idle   (null)       (null)",
+            "cpu-node   mix    (null)",
+        ]
+    )
+
+    def test_live_shaped_fixture(self):
+        capacity, excluded = parse_sinfo_gpu_capacity(self._LIVE_SHAPED)
+        # node-612 counted ONCE despite the duplicate partition row; the
+        # IDX-comma entry parses as 6 used (a naive comma split would say 1).
+        assert capacity["A100"] == {"total": 24, "used": 18}
+        assert capacity["H100"] == {"total": 2, "used": 2}  # down node excluded
+        # idle L4 contributes total only; drng node is present AND in use.
+        assert capacity["L4"] == {"total": 2, "used": 1}
+        assert excluded == 9  # 8×H100 down + 1×L4 drained
+
+    def test_untyped_used_zero_ignored(self):
+        capacity, _ = parse_sinfo_gpu_capacity("n1 idle gpu:A100:2 gpu:0\n")
+        assert capacity["A100"] == {"total": 2, "used": 0}
+        assert "<untyped>" not in capacity
+
+    def test_state_suffix_flags_stripped(self):
+        capacity, excluded = parse_sinfo_gpu_capacity(
+            "n1 down~ gpu:H100:4 gpu:0\nn2 mix* gpu:H100:4 gpu:H100:1(IDX:0)\n"
+        )
+        assert capacity["H100"] == {"total": 4, "used": 1}
+        assert excluded == 4
+
+    def test_empty(self):
+        assert parse_sinfo_gpu_capacity("") == ({}, 0)
+
+
+class TestGpuCapacityTransports:
+    def test_local_missing_binary_returns_none(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert SlurmQueue().gpu_capacity() is None
+
+    def test_local_rc_nonzero_returns_none(self):
+        with patch("subprocess.run", return_value=_fake_completed("", "err", 1)):
+            assert SlurmQueue().gpu_capacity() is None
+
+    def test_local_happy_path(self):
+        with patch(
+            "subprocess.run",
+            return_value=_fake_completed("n1 idle gpu:L4:2 gpu:L4:1(IDX:0)\n"),
+        ):
+            assert SlurmQueue().gpu_capacity() == ({"L4": {"total": 2, "used": 1}}, 0)
+
+
 class TestSacctTransports:
     def test_local_missing_binary_returns_none(self):
         with patch("subprocess.run", side_effect=FileNotFoundError):
@@ -683,6 +768,19 @@ class TestSSHSlurmQueue:
         assert conn.run_calls == []  # "nothing to ask" ≠ a remote round-trip
 
     @pytest.mark.asyncio
+    async def test_sinfo_failure_returns_none_not_raise(self):
+        conn = FakeConn()
+        conn.add("sinfo", _Result(127, "", "bash: sinfo: command not found"))
+        assert await SSHSlurmQueue(conn).gpu_capacity() is None
+
+    @pytest.mark.asyncio
+    async def test_sinfo_happy_path(self):
+        conn = FakeConn()
+        conn.add("sinfo", _Result(0, "n1 mix gpu:A100:8 gpu:A100:4(IDX:0-3)\n"))
+        capacity = await SSHSlurmQueue(conn).gpu_capacity()
+        assert capacity == ({"A100": {"total": 8, "used": 4}}, 0)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "method,args",
         [
@@ -691,6 +789,7 @@ class TestSSHSlurmQueue:
             ("gpu_summary", ()),
             ("reservations", ()),
             ("sacct_job_states", (["1", "2"],)),
+            ("gpu_capacity", ()),
         ],
     )
     async def test_same_commands_as_local_transport(self, method, args):

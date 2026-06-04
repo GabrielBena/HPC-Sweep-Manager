@@ -542,6 +542,7 @@ whole group drivable from the workstation. Plan:
 | `--remote <alias>` on all four subcommands + sole-slurm-remote auto-fallback + `--watch/--refresh` (persistent conn) | `cli/queue.py` |
 | Job→sweep linkage via `.hsm_manifest.json` fallback (SSH-Slurm sweeps have no `submission_summary.txt`) | `cli/queue.py` |
 | Grouped `mine` (follow-up PR): one row per array, `▶/⏳` from squeue + `✓/✗` + true-total progress from optional sacct (`JobGroup`, `group_jobs_by_array`, `parse_sacct_job_states`, `enrich_groups_with_accounting`); `--flat` keeps per-task rows | `scheduler_queue.py`, `cli/queue.py` |
+| `gpus` capacity view (follow-up PR): Total/In use/Free per type from optional sinfo `Gres`/`GresUsed` (`parse_sinfo_gpu_capacity` — paren-aware gres split for comma-bearing `(IDX:...)`, node dedup, down/drain exclusion); `--mine` now default (`--no-mine`) | `scheduler_queue.py`, `cli/queue.py` |
 
 User-facing docs: [docs/user_guide/QUEUE.md](docs/user_guide/QUEUE.md);
 monitor-from-HQ section in

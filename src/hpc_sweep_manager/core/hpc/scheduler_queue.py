@@ -176,6 +176,45 @@ def _parse_one_gpu_entry(rest: str) -> tuple[int, Optional[str]]:
     return 1, (first or None)
 
 
+def _parse_gpu_entry_any(entry: str) -> tuple[int, Optional[str]]:
+    """Parse ONE gres entry (any source) into (gpu_count, gpu_type).
+
+    Accepts both the squeue ``gres/gpu...`` and the sinfo ``gpu...`` prefix
+    forms; non-gpu gres (``shard:...``) and lookalikes (``gpumem...``)
+    return ``(0, None)``.
+    """
+    m = re.match(r"(?:gres/)?gpu(?![A-Za-z0-9_])(?P<rest>.*)$", entry.strip(), re.IGNORECASE)
+    if not m:
+        return 0, None
+    return _parse_one_gpu_entry(m.group("rest"))
+
+
+def _split_gres_entries(field: str) -> List[str]:
+    """Split a gres field on commas NOT inside parentheses.
+
+    Load-bearing for sinfo's GresUsed: index decorations contain commas —
+    ``gpu:A100:6(IDX:0-1,4-7)`` is ONE entry. A naive ``split(",")`` would
+    truncate it to ``gpu:A100:6(IDX:0-1`` and mis-parse the count as 1.
+    """
+    entries: List[str] = []
+    depth = 0
+    current: List[str] = []
+    for ch in field:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        if ch == "," and depth == 0:
+            if current:
+                entries.append("".join(current))
+                current = []
+            continue
+        current.append(ch)
+    if current:
+        entries.append("".join(current))
+    return entries
+
+
 def _parse_gpu_from_tres(tres: str) -> tuple[int, Optional[str]]:
     """Pull (count, type) for GPUs out of a tres-per-node string.
 
@@ -265,6 +304,76 @@ def sacct_args(base_ids: Sequence[str]) -> List[str]:
     parsable output immune to column truncation.
     """
     return ["-j", ",".join(base_ids), "-n", "-X", "-P", "-o", "JobID,State"]
+
+
+def sinfo_capacity_args() -> List[str]:
+    """Canonical sinfo argument list (sans binary) shared by both transports.
+
+    ``-N`` = one row per node (per partition — duplicates deduped at parse
+    time); generous column widths because ``GresUsed`` strings carry long
+    ``(IDX:...)`` decorations that must not truncate mid-entry.
+    """
+    return ["-h", "-N", "-O", "NodeHost:40,StateCompact:20,Gres:60,GresUsed:90"]
+
+
+# Node states whose GPUs can't host work — excluded from capacity totals.
+# "drng" (drainING — jobs still running) deliberately stays IN: its GPUs are
+# both present and in use; "drain" (drainED, empty) is out.
+_UNUSABLE_STATE_PREFIXES = (
+    "down", "drain", "fail", "maint", "boot", "unk", "inval", "err", "futr",
+)
+
+
+def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], int]:
+    """Parse ``sinfo -h -N -O NodeHost,StateCompact,Gres,GresUsed`` output.
+
+    Returns ``({gpu_type: {"total": N, "used": M}}, excluded_gpu_count)``.
+    Pure, shared by both transports.
+
+    - Rows are one-per-node-per-partition → deduped by node name (first
+      occurrence wins).
+    - ``used`` comes from Slurm's own allocation accounting (``GresUsed``),
+      so GPUs consumed by *untyped* job requests are still attributed to
+      their physical type — squeue job rows can't do that.
+    - Nodes in unusable states (down/drained/failed/...) contribute to
+      neither total nor used; their GPU count is returned separately so
+      the UI can disclose what was excluded. State suffix flags
+      (``*~#%$@!+-``) are stripped before classification.
+    """
+    capacity: Dict[str, Dict[str, int]] = {}
+    excluded_gpus = 0
+    seen: set = set()
+    for line in (stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        node, state, gres = parts[0], parts[1], parts[2]
+        gres_used = parts[3] if len(parts) > 3 else ""
+        if node in seen:
+            continue
+        seen.add(node)
+        if gres.lower().startswith("(null)"):
+            continue
+        base_state = state.lower().rstrip("*~#%$@!+-")
+        unusable = any(base_state.startswith(p) for p in _UNUSABLE_STATE_PREFIXES)
+        for entry in _split_gres_entries(gres):
+            count, gtype = _parse_gpu_entry_any(entry)
+            if count <= 0:
+                continue
+            if unusable:
+                excluded_gpus += count
+                continue
+            cap = capacity.setdefault(gtype or "<untyped>", {"total": 0, "used": 0})
+            cap["total"] += count
+        if unusable:
+            continue
+        for entry in _split_gres_entries(gres_used):
+            count, gtype = _parse_gpu_entry_any(entry)
+            if count <= 0:
+                continue
+            cap = capacity.setdefault(gtype or "<untyped>", {"total": 0, "used": 0})
+            cap["used"] += count
+    return capacity, excluded_gpus
 
 
 def parse_squeue_output(stdout: str) -> List[QueueJob]:
@@ -508,10 +617,12 @@ class SlurmQueue:
         scontrol_bin: str = "scontrol",
         timeout_s: float = 15.0,
         sacct_bin: str = "sacct",
+        sinfo_bin: str = "sinfo",
     ):
         self.squeue_bin = squeue_bin
         self.scontrol_bin = scontrol_bin
         self.sacct_bin = sacct_bin
+        self.sinfo_bin = sinfo_bin
         self.timeout_s = timeout_s
 
     # -------------------------------------------------------------- raw queries
@@ -596,6 +707,27 @@ class SlurmQueue:
             return None
         return parse_sacct_job_states(result.stdout)
 
+    def gpu_capacity(self) -> Optional[tuple[Dict[str, Dict[str, int]], int]]:
+        """Per-type GPU totals + in-use counts from sinfo — OPTIONAL enrichment.
+
+        Same contract as :meth:`sacct_job_states`: any failure returns
+        ``None`` and the caller degrades to the queue-only view.
+        """
+        try:
+            result = subprocess.run(
+                [self.sinfo_bin, *sinfo_capacity_args()],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            logger.debug(f"sinfo unavailable: {e}")
+            return None
+        if result.returncode != 0:
+            logger.debug(f"sinfo rc={result.returncode}: {result.stderr.strip()}")
+            return None
+        return parse_sinfo_gpu_capacity(result.stdout)
+
     # ----------------------------------------------------------- reservations
 
     def reservations(self) -> List[Reservation]:
@@ -644,11 +776,13 @@ class SSHSlurmQueue:
         scontrol_bin: str = "scontrol",
         timeout_s: float = 15.0,
         sacct_bin: str = "sacct",
+        sinfo_bin: str = "sinfo",
     ):
         self._conn = conn
         self.squeue_bin = squeue_bin
         self.scontrol_bin = scontrol_bin
         self.sacct_bin = sacct_bin
+        self.sinfo_bin = sinfo_bin
         self.timeout_s = timeout_s
 
     # -------------------------------------------------------------- raw queries
@@ -729,6 +863,27 @@ class SSHSlurmQueue:
             )
             return None
         return parse_sacct_job_states(result.stdout or "")
+
+    async def gpu_capacity(self) -> Optional[tuple[Dict[str, Dict[str, int]], int]]:
+        """Per-type GPU totals + in-use from sinfo — OPTIONAL enrichment.
+
+        Same None-on-failure contract as :meth:`sacct_job_states` (and the
+        same deliberate asymmetry with the raise-on-failure squeue paths).
+        """
+        cmd = shlex.join([self.sinfo_bin, *sinfo_capacity_args()])
+        try:
+            result = await asyncio.wait_for(
+                self._conn.run(cmd, check=False), timeout=self.timeout_s
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"remote sinfo timed out after {self.timeout_s:.0f}s")
+            return None
+        if result.returncode != 0:
+            logger.debug(
+                f"remote sinfo rc={result.returncode}: {(result.stderr or '').strip()}"
+            )
+            return None
+        return parse_sinfo_gpu_capacity(result.stdout or "")
 
     # ----------------------------------------------------------- reservations
 
