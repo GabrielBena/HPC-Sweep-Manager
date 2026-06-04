@@ -43,6 +43,11 @@ Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
   commas inside `GresUsed` index decorations (`gpu:A100:6(IDX:0-1,4-7)`).
 - **`--mine` is now the default** on `gpus` (`--no-mine` to hide) — there
   was no good reason to hide your own footprint.
+- **VRAM/GPU column**: cluster-reported via `GPUMEM<N>GB` node-feature
+  tags when available (mixed node groups list every variant — live S3IT
+  H100s really are `80/96G`); model-typical fallback marked with `~` and
+  restricted to unambiguous models; `?` otherwise — never a confident
+  guess. An automatic legend explains the `<untyped>` demand row.
 
 ### Changed (grouped `hsm queue mine`, 2026-06-04)
 

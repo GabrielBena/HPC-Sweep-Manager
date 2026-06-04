@@ -511,3 +511,43 @@ class TestRenderGpus:
         assert "H100" in out
         assert "0 GPU(s) free right now" in out
         assert "down/drained" not in out  # no exclusion note when nothing excluded
+
+    def test_vram_cluster_reported_and_mixed_variants(self):
+        console, buf = _console_buf()
+        capacity = (
+            {
+                "A100": {"total": 40, "used": 34, "vram_gb": [80]},
+                "H100": {"total": 28, "used": 28, "vram_gb": [80, 96]},
+            },
+            0,
+        )
+        _render_gpus(console, {}, None, capacity)
+        out = buf.getvalue()
+        assert "80G" in out
+        assert "80/96G" in out  # mixed node groups: every variant disclosed
+        assert "model-typical" not in out  # everything cluster-reported → no ~ legend
+
+    def test_vram_model_typical_fallback_is_marked(self):
+        console, buf = _console_buf()
+        capacity = ({"L4": {"total": 16, "used": 9}}, 0)  # no vram_gb reported
+        _render_gpus(console, {}, None, capacity)
+        out = buf.getvalue()
+        assert "~24G" in out
+        assert "model-typical" in out  # the ~ legend explains itself
+
+    def test_vram_unknown_model_shows_question_mark(self):
+        console, buf = _console_buf()
+        # A100 is deliberately NOT in the model-typical table (40/80 ambiguity).
+        capacity = ({"A100": {"total": 8, "used": 0}}, 0)
+        _render_gpus(console, {}, None, capacity)
+        out = buf.getvalue()
+        assert "?" in out
+        assert "~" not in out and "model-typical" not in out
+
+    def test_untyped_legend_explains_the_row(self):
+        console, buf = _console_buf()
+        summary = {"<untyped>": {"PENDING": 83}}
+        capacity = ({"A100": {"total": 8, "used": 8, "vram_gb": [80]}}, 0)
+        _render_gpus(console, summary, None, capacity)
+        out = buf.getvalue()
+        assert "<untyped> = jobs requesting a GPU without a type" in out

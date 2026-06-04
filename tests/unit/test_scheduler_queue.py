@@ -597,6 +597,32 @@ class TestParseSinfoGpuCapacity:
     def test_empty(self):
         assert parse_sinfo_gpu_capacity("") == ({}, 0)
 
+    def test_vram_from_feature_tags(self):
+        # S3IT-shaped: Features column carries GPUMEM<N>GB.
+        capacity, _ = parse_sinfo_gpu_capacity(
+            "n1 mix gpu:H100:2 gpu:H100:2(IDX:0-1) AMD,EPYC,GPU,H100,GPUMEM96GB\n"
+        )
+        assert capacity["H100"] == {"total": 2, "used": 2, "vram_gb": [96]}
+
+    def test_vram_mixed_node_groups_lists_variants(self):
+        # Live S3IT reality: H100 nodes exist in 80GB AND 96GB flavors.
+        capacity, _ = parse_sinfo_gpu_capacity(
+            "n1 mix gpu:H100:2 gpu:0 X,GPUMEM96GB\n"
+            "n2 idle gpu:H100:8 gpu:0 X,GPUMEM80GB\n"
+        )
+        assert capacity["H100"]["vram_gb"] == [80, 96]
+
+    def test_vram_absent_when_cluster_silent(self):
+        capacity, _ = parse_sinfo_gpu_capacity("n1 idle gpu:L4:2 gpu:0\n")
+        assert "vram_gb" not in capacity["L4"]  # absent = unknown, never zero
+
+    def test_vram_not_taken_from_unusable_nodes(self):
+        capacity, _ = parse_sinfo_gpu_capacity(
+            "n1 idle gpu:A100:8 gpu:0\n"
+            "n2 down gpu:A100:8 gpu:0 X,GPUMEM80GB\n"
+        )
+        assert "vram_gb" not in capacity["A100"]
+
 
 class TestGpuCapacityTransports:
     def test_local_missing_binary_returns_none(self):

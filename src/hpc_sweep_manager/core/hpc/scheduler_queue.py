@@ -311,9 +311,43 @@ def sinfo_capacity_args() -> List[str]:
 
     ``-N`` = one row per node (per partition — duplicates deduped at parse
     time); generous column widths because ``GresUsed`` strings carry long
-    ``(IDX:...)`` decorations that must not truncate mid-entry.
+    ``(IDX:...)`` decorations that must not truncate mid-entry. ``Features``
+    rides along for VRAM discovery (clusters like S3IT publish
+    ``GPUMEM96GB``-style feature tags) — parsed by scanning the whole line,
+    so an empty ``GresUsed`` column shifting fields can degrade VRAM info
+    but never corrupt the count columns.
     """
-    return ["-h", "-N", "-O", "NodeHost:40,StateCompact:20,Gres:60,GresUsed:90"]
+    return [
+        "-h",
+        "-N",
+        "-O",
+        "NodeHost:40,StateCompact:20,Gres:60,GresUsed:90,Features:120",
+    ]
+
+
+# VRAM advertised by the cluster itself, e.g. S3IT's GPUMEM80GB / GPUMEM96GB
+# / GPUMEM140GB feature tags. Scanned line-wide (column-position-proof).
+_GPUMEM_FEATURE_RE = re.compile(r"GPUMEM(\d+)\s*GB", re.IGNORECASE)
+
+
+# Model-typical VRAM (GB) used ONLY when the cluster doesn't report it via
+# features — and only for models with a single common configuration. The
+# ambiguous ones are deliberately absent (A100 = 40/80, V100 = 16/32,
+# H100 = 80/94+: the live S3IT H100s report 96GB — a static entry would lie).
+KNOWN_GPU_VRAM_GB: Dict[str, int] = {
+    "L4": 24,
+    "T4": 16,
+    "A30": 24,
+    "A40": 48,
+    "A6000": 48,
+    "H200": 141,
+    "L40": 48,
+    "L40S": 48,
+    "P100": 16,
+    "RTX2080TI": 11,
+    "RTX3090": 24,
+    "RTX4090": 24,
+}
 
 
 # Node states whose GPUs can't host work — excluded from capacity totals.
@@ -339,8 +373,14 @@ def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], in
       neither total nor used; their GPU count is returned separately so
       the UI can disclose what was excluded. State suffix flags
       (``*~#%$@!+-``) are stripped before classification.
+    - When the node line carries a ``GPUMEM<N>GB`` feature tag, ``N`` is
+      recorded under the type's ``"vram_gb"`` key (sorted list — a type
+      served by mixed-VRAM node groups lists every variant). The key is
+      ABSENT when the cluster doesn't report VRAM; callers must treat
+      absent as unknown, not zero.
     """
     capacity: Dict[str, Dict[str, int]] = {}
+    vram_seen: Dict[str, set] = {}
     excluded_gpus = 0
     seen: set = set()
     for line in (stdout or "").splitlines():
@@ -356,23 +396,32 @@ def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], in
             continue
         base_state = state.lower().rstrip("*~#%$@!+-")
         unusable = any(base_state.startswith(p) for p in _UNUSABLE_STATE_PREFIXES)
+        vram_match = _GPUMEM_FEATURE_RE.search(line)
+        node_types: List[str] = []
         for entry in _split_gres_entries(gres):
             count, gtype = _parse_gpu_entry_any(entry)
             if count <= 0:
                 continue
+            type_key = gtype or "<untyped>"
             if unusable:
                 excluded_gpus += count
                 continue
-            cap = capacity.setdefault(gtype or "<untyped>", {"total": 0, "used": 0})
+            node_types.append(type_key)
+            cap = capacity.setdefault(type_key, {"total": 0, "used": 0})
             cap["total"] += count
         if unusable:
             continue
+        if vram_match:
+            for type_key in node_types:
+                vram_seen.setdefault(type_key, set()).add(int(vram_match.group(1)))
         for entry in _split_gres_entries(gres_used):
             count, gtype = _parse_gpu_entry_any(entry)
             if count <= 0:
                 continue
             cap = capacity.setdefault(gtype or "<untyped>", {"total": 0, "used": 0})
             cap["used"] += count
+    for type_key, values in vram_seen.items():
+        capacity[type_key]["vram_gb"] = sorted(values)  # type: ignore[assignment]
     return capacity, excluded_gpus
 
 
