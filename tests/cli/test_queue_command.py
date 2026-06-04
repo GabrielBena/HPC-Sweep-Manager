@@ -469,12 +469,45 @@ class TestRenderGpus:
             _job("a_1", state="RUNNING", gpu_type="A100"),
             _job("a_[19-22]", state="PENDING", gpu_type="A100", task_count=4),
         ]
-        _render_gpus(console, summary, mine)
+        _render_gpus(console, summary, mine)  # capacity omitted → legacy view
         out = buf.getvalue()
         assert "A100" in out
         assert "1/4" in out  # 1 running, 4 pending (task-weighted, not 1/1)
+        assert "No sinfo capacity data" in out  # degradation is disclosed
 
     def test_empty_summary_message(self):
         console, buf = _console_buf()
         _render_gpus(console, {}, None)
         assert "No GPU jobs in queue" in buf.getvalue()
+
+    def test_capacity_table_with_free_and_footer(self):
+        console, buf = _console_buf()
+        summary = {
+            "A100": {"RUNNING": 34, "PENDING": 4},
+            "<untyped>": {"RUNNING": 26, "PENDING": 83},
+        }
+        capacity = (
+            {
+                "A100": {"total": 40, "used": 34},
+                "V100": {"total": 48, "used": 3},  # idle type, no queue demand
+            },
+            9,  # GPUs on down/drained nodes
+        )
+        mine = [_job("a_1", state="RUNNING", gpu_type="A100")]
+        _render_gpus(console, summary, mine, capacity)
+        out = buf.getvalue()
+        assert "GPU capacity & queue" in out
+        assert "40" in out and "34" in out and "6" in out  # A100 total/used/free
+        assert "V100" in out and "45" in out  # capacity-only type still listed
+        assert "<untyped>" in out and "83" in out  # demand-only type still listed
+        assert "51 GPU(s) free right now" in out  # 6 + 45
+        assert "+9 on down/drained nodes" in out
+
+    def test_capacity_zero_free_is_explicit(self):
+        console, buf = _console_buf()
+        capacity = ({"H100": {"total": 28, "used": 28}}, 0)
+        _render_gpus(console, {}, None, capacity)
+        out = buf.getvalue()
+        assert "H100" in out
+        assert "0 GPU(s) free right now" in out
+        assert "down/drained" not in out  # no exclusion note when nothing excluded

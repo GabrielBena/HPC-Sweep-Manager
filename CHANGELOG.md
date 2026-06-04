@@ -30,6 +30,20 @@ Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
 - **`position` silently hid CPU-only pending jobs** — now surfaced as a
   note; the reason-code legend covers `(QOSMaxJobsPerUserLimit)`.
 
+### Changed (`hsm queue gpus` capacity view, 2026-06-04)
+
+- **`hsm queue gpus` shows Total / In use / Free per GPU type**, from
+  `sinfo`'s per-node allocation accounting (`Gres`/`GresUsed`) — which also
+  attributes GPUs consumed by *untyped* job requests to their physical
+  type, making Free exact rather than an estimate. Down/drained nodes are
+  excluded from totals (disclosed in a footer); idle types with no queue
+  demand are now visible. sinfo is optional enrichment with the same
+  None-on-failure contract as sacct — clusters without it degrade to the
+  queue-only table with a note. Parser handles the live S3IT trap of
+  commas inside `GresUsed` index decorations (`gpu:A100:6(IDX:0-1,4-7)`).
+- **`--mine` is now the default** on `gpus` (`--no-mine` to hide) — there
+  was no good reason to hide your own footprint.
+
 ### Changed (grouped `hsm queue mine`, 2026-06-04)
 
 - **`hsm queue mine` groups by array by default.** Mid-sweep, every running
