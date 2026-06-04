@@ -110,12 +110,15 @@ backs `hsm sweep status` / `hsm sweep report`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
 - [`core/hpc/scheduler_queue.py`](src/hpc_sweep_manager/core/hpc/scheduler_queue.py) —
   `SlurmQueue` (local subprocess) + `SSHSlurmQueue` (async, over an asyncssh
-  conn) + `QueueJob` / `Reservation` dataclasses, built on shared pure
-  command-builders/parsers/aggregators (slurm_protocol-style anti-drift).
-  Backs `hsm queue mine|position|gpus|reservations [--remote <alias>]`
-  (auto-falls back to the sole `backend: slurm` remote when no local
-  squeue; `--watch` on mine/gpus). See gotcha #13 for the `%b` GRES
-  grammar + pending-array counting traps.
+  conn) + `QueueJob` / `JobGroup` / `Reservation` dataclasses, built on
+  shared pure command-builders/parsers/aggregators (slurm_protocol-style
+  anti-drift). Backs `hsm queue mine|position|gpus|reservations
+  [--remote <alias>]` (auto-falls back to the sole `backend: slurm` remote
+  when no local squeue; `--watch` on mine/gpus). `mine` groups by array
+  (`group_jobs_by_array`) with optional sacct enrichment
+  (`sacct_job_states` — returns None when accounting is absent, a
+  DELIBERATE asymmetry with the raise-on-failure squeue paths). See
+  gotcha #13 for the `%b` GRES grammar + pending-array counting traps.
 
 ## Do NOT reintroduce
 
@@ -538,6 +541,7 @@ whole group drivable from the workstation. Plan:
 | `SSHSlurmQueue` async twin on shared pure helpers; raises `QueueCommandError`, never empty-on-failure | `scheduler_queue.py` |
 | `--remote <alias>` on all four subcommands + sole-slurm-remote auto-fallback + `--watch/--refresh` (persistent conn) | `cli/queue.py` |
 | Job→sweep linkage via `.hsm_manifest.json` fallback (SSH-Slurm sweeps have no `submission_summary.txt`) | `cli/queue.py` |
+| Grouped `mine` (follow-up PR): one row per array, `▶/⏳` from squeue + `✓/✗` + true-total progress from optional sacct (`JobGroup`, `group_jobs_by_array`, `parse_sacct_job_states`, `enrich_groups_with_accounting`); `--flat` keeps per-task rows | `scheduler_queue.py`, `cli/queue.py` |
 
 User-facing docs: [docs/user_guide/QUEUE.md](docs/user_guide/QUEUE.md);
 monitor-from-HQ section in

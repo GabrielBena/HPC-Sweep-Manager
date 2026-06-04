@@ -1,6 +1,7 @@
 """Slurm queue inspection: where am I in line, what's running, what's reserved.
 
-Read-only wrappers around ``squeue`` / ``scontrol show reservations`` that the
+Read-only wrappers around ``squeue`` / ``scontrol show reservations`` (plus
+optional ``sacct`` enrichment for per-array completed/failed counts) that the
 CLI's ``hsm queue`` subcommands build on, in two transport flavors:
 
 - :class:`SlurmQueue` — sync, shells out locally (cluster login node).
@@ -39,13 +40,15 @@ S3IT-specific notes worth knowing (see also CLAUDE.md gotcha #6):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import re
 import shlex
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Sequence
+
+from .slurm_protocol import SLURM_STATE_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,40 @@ class Reservation:
     duration: str
     nodes: str
     node_count: int
+
+
+@dataclass(frozen=True)
+class JobGroup:
+    """One *array* (or single job) aggregated for the grouped ``mine`` view.
+
+    squeue-derived fields (``running``/``pending``/``other``, task-weighted)
+    are live; ``completed``/``failed``/``total`` come from optional sacct
+    enrichment via :meth:`with_accounting` and stay ``None`` when accounting
+    is unavailable — renderers must distinguish "0 failed" from "unknown".
+    """
+
+    base_id: str
+    name: str
+    user: str
+    partition: str
+    gpu_count: int
+    gpu_type: Optional[str]
+    is_array: bool
+    running: int = 0
+    pending: int = 0
+    other: int = 0  # COMPLETING / CONFIGURING / ... — still occupying the queue
+    nodes: tuple = ()  # distinct nodelists of RUNNING rows
+    reason: str = ""  # first pending row's reason, e.g. "(Priority)"
+    completed: Optional[int] = None  # sacct: COMPLETED task count
+    failed: Optional[int] = None  # sacct: FAILED + CANCELLED (incl. TIMEOUT/OOM)
+    total: Optional[int] = None  # sacct: sum over every task the array ever had
+
+    @property
+    def in_queue(self) -> int:
+        return self.running + self.pending + self.other
+
+    def with_accounting(self, completed: int, failed: int, total: int) -> "JobGroup":
+        return replace(self, completed=completed, failed=failed, total=total)
 
 
 # --------------------------------------------------------------- parse helpers
@@ -221,6 +258,15 @@ def squeue_args(extra_args: Sequence[str] = ()) -> List[str]:
     return ["--noheader", f"--format={SQUEUE_FORMAT}", *extra_args]
 
 
+def sacct_args(base_ids: Sequence[str]) -> List[str]:
+    """Canonical sacct argument list (sans binary) shared by both transports.
+
+    ``-X`` = one row per allocation (per array task), ``-P`` = pipe-delimited
+    parsable output immune to column truncation.
+    """
+    return ["-j", ",".join(base_ids), "-n", "-X", "-P", "-o", "JobID,State"]
+
+
 def parse_squeue_output(stdout: str) -> List[QueueJob]:
     """Parse canonical-format squeue stdout into :class:`QueueJob` rows.
 
@@ -313,6 +359,114 @@ def positions_by_base(pending: Sequence[QueueJob]) -> Dict[str, List[int]]:
     return out
 
 
+def group_jobs_by_array(jobs: Sequence[QueueJob]) -> List[JobGroup]:
+    """Collapse a (collapsed-display) squeue job list into one group per array.
+
+    Input is ``list_user_jobs`` output: running array tasks as individual
+    rows, pending ranges as collapsed rows. Groups by base job id,
+    task-weighting pending counts, collecting distinct running nodelists,
+    and keeping the first pending reason. First-seen order is preserved.
+    Single (non-array) jobs become one-group-of-one with ``is_array=False``.
+    """
+    order: List[str] = []
+    agg: Dict[str, dict] = {}
+    for j in jobs:
+        base = strip_array_suffix(j.job_id)
+        a = agg.get(base)
+        if a is None:
+            order.append(base)
+            a = agg[base] = {
+                "name": j.name,
+                "user": j.user,
+                "partition": j.partition,
+                "gpu_count": j.gpu_count,
+                "gpu_type": j.gpu_type,
+                "is_array": False,
+                "running": 0,
+                "pending": 0,
+                "other": 0,
+                "nodes": [],
+                "reason": "",
+            }
+        if j.job_id != base:
+            a["is_array"] = True
+        if j.gpu_count and not a["gpu_count"]:
+            # First GPU-bearing row wins (rows of one array share the spec).
+            a["gpu_count"], a["gpu_type"] = j.gpu_count, j.gpu_type
+        if j.state == "RUNNING":
+            a["running"] += j.task_count
+            # %R for a RUNNING row is its nodelist.
+            if j.reason and j.reason not in a["nodes"]:
+                a["nodes"].append(j.reason)
+        elif j.state == "PENDING":
+            a["pending"] += j.task_count
+            if not a["reason"]:
+                a["reason"] = j.reason
+        else:
+            a["other"] += j.task_count
+    groups: List[JobGroup] = []
+    for base in order:
+        a = agg[base]
+        nodes = tuple(a.pop("nodes"))
+        groups.append(JobGroup(base_id=base, nodes=nodes, **a))
+    return groups
+
+
+def parse_sacct_job_states(stdout: str) -> Dict[str, Dict[str, int]]:
+    """Parse ``sacct -n -X -P -o JobID,State`` into ``{base: {state: tasks}}``.
+
+    Pure, shared by both transports. One row per array task that has
+    started; never-started pending tasks appear as a collapsed range row
+    (``123_[710-1920]``) — counted via :func:`parse_array_task_count`.
+    States normalize through :data:`slurm_protocol.SLURM_STATE_MAP`
+    (``TIMEOUT``/``OOM`` → FAILED, ...) tolerating the ``CANCELLED by
+    <uid>`` long form and trailing ``+`` markers.
+    """
+    out: Dict[str, Dict[str, int]] = {}
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line or "|" not in line:
+            continue
+        job_id, _, raw_state = line.partition("|")
+        job_id = job_id.strip()
+        raw_state = raw_state.strip()
+        if not job_id or not raw_state:
+            continue
+        raw = raw_state.split()[0].rstrip("+")
+        state = SLURM_STATE_MAP.get(raw, "RUNNING")
+        counts = out.setdefault(strip_array_suffix(job_id), {})
+        counts[state] = counts.get(state, 0) + parse_array_task_count(job_id)
+    return out
+
+
+def enrich_groups_with_accounting(
+    groups: Sequence[JobGroup], states: Optional[Dict[str, Dict[str, int]]]
+) -> List[JobGroup]:
+    """Fold sacct per-state task counts into groups (no-op when ``states`` is None).
+
+    ``completed`` = COMPLETED; ``failed`` = FAILED + CANCELLED (the state map
+    already folds TIMEOUT/OOM/... into FAILED); ``total`` = every task sacct
+    knows about, including its own view of running/pending — a complete,
+    self-consistent snapshot even if squeue has moved on by a few seconds.
+    """
+    if states is None:
+        return list(groups)
+    enriched: List[JobGroup] = []
+    for g in groups:
+        s = states.get(g.base_id)
+        if not s:
+            enriched.append(g)
+            continue
+        enriched.append(
+            g.with_accounting(
+                completed=s.get("COMPLETED", 0),
+                failed=s.get("FAILED", 0) + s.get("CANCELLED", 0),
+                total=sum(s.values()),
+            )
+        )
+    return enriched
+
+
 # ------------------------------------------------------------ scheduler probe
 
 
@@ -353,9 +507,11 @@ class SlurmQueue:
         squeue_bin: str = "squeue",
         scontrol_bin: str = "scontrol",
         timeout_s: float = 15.0,
+        sacct_bin: str = "sacct",
     ):
         self.squeue_bin = squeue_bin
         self.scontrol_bin = scontrol_bin
+        self.sacct_bin = sacct_bin
         self.timeout_s = timeout_s
 
     # -------------------------------------------------------------- raw queries
@@ -412,6 +568,34 @@ class SlurmQueue:
         """
         return find_queue_position(self.pending_gpu_jobs_sorted(), job_id)
 
+    def sacct_job_states(
+        self, base_ids: Sequence[str]
+    ) -> Optional[Dict[str, Dict[str, int]]]:
+        """Per-task state counts from accounting — OPTIONAL enrichment.
+
+        Unlike squeue (mandatory; its failures are loud), sacct is routinely
+        absent or disabled, so every failure path returns ``None`` and the
+        caller degrades (no ✓/✗ split, no exact totals) instead of erroring.
+        Empty ``base_ids`` short-circuits to ``{}`` ("nothing to ask" ≠
+        "accounting broken").
+        """
+        if not base_ids:
+            return {}
+        try:
+            result = subprocess.run(
+                [self.sacct_bin, *sacct_args(base_ids)],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+            logger.debug(f"sacct unavailable: {e}")
+            return None
+        if result.returncode != 0:
+            logger.debug(f"sacct rc={result.returncode}: {result.stderr.strip()}")
+            return None
+        return parse_sacct_job_states(result.stdout)
+
     # ----------------------------------------------------------- reservations
 
     def reservations(self) -> List[Reservation]:
@@ -459,10 +643,12 @@ class SSHSlurmQueue:
         squeue_bin: str = "squeue",
         scontrol_bin: str = "scontrol",
         timeout_s: float = 15.0,
+        sacct_bin: str = "sacct",
     ):
         self._conn = conn
         self.squeue_bin = squeue_bin
         self.scontrol_bin = scontrol_bin
+        self.sacct_bin = sacct_bin
         self.timeout_s = timeout_s
 
     # -------------------------------------------------------------- raw queries
@@ -515,6 +701,34 @@ class SSHSlurmQueue:
     async def position_in_gpu_queue(self, job_id: str) -> Optional[tuple[int, int]]:
         """Exact-id position in the pending GPU queue — see :class:`SlurmQueue`."""
         return find_queue_position(await self.pending_gpu_jobs_sorted(), job_id)
+
+    async def sacct_job_states(
+        self, base_ids: Sequence[str]
+    ) -> Optional[Dict[str, Dict[str, int]]]:
+        """Per-task state counts from accounting — OPTIONAL enrichment.
+
+        Deliberate asymmetry with the squeue paths: those raise
+        :class:`QueueCommandError` (a broken squeue must be loud), while a
+        missing/disabled sacct is a normal cluster configuration → every
+        failure here returns ``None`` and the view degrades gracefully.
+        Does NOT use :meth:`_run` for exactly that reason.
+        """
+        if not base_ids:
+            return {}
+        cmd = shlex.join([self.sacct_bin, *sacct_args(base_ids)])
+        try:
+            result = await asyncio.wait_for(
+                self._conn.run(cmd, check=False), timeout=self.timeout_s
+            )
+        except asyncio.TimeoutError:
+            logger.debug(f"remote sacct timed out after {self.timeout_s:.0f}s")
+            return None
+        if result.returncode != 0:
+            logger.debug(
+                f"remote sacct rc={result.returncode}: {(result.stderr or '').strip()}"
+            )
+            return None
+        return parse_sacct_job_states(result.stdout or "")
 
     # ----------------------------------------------------------- reservations
 

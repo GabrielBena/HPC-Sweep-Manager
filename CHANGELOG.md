@@ -30,6 +30,20 @@ Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
 - **`position` silently hid CPU-only pending jobs** — now surfaced as a
   note; the reason-code legend covers `(QOSMaxJobsPerUserLimit)`.
 
+### Changed (grouped `hsm queue mine`, 2026-06-04)
+
+- **`hsm queue mine` groups by array by default.** Mid-sweep, every running
+  array task is its own squeue row — the old view printed hundreds of
+  near-identical lines. Now: one row per array with `▶ running ⏳ pending`
+  (squeue, live, task-weighted) plus `✓ completed ✗ failed` and a
+  progress-bar-out-of-true-total from **sacct accounting** — tasks that
+  already left the queue (including failures) were previously invisible in
+  every queue view. sacct is optional enrichment: clusters without
+  accounting degrade to sweep-metadata totals or `—`, never a guessed
+  number, and a missing sacct never errors (asymmetric with squeue, which
+  stays loud-on-failure). `--flat` restores the per-task rows. Failed-task
+  counts are surfaced in red per-row and in the footer.
+
 ### Added (queue inspection from the driving workstation, 2026-06-04)
 
 - **`--remote <alias>` on all four `hsm queue` subcommands** — runs the same
