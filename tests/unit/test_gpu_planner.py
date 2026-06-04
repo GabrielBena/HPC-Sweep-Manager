@@ -40,11 +40,34 @@ class TestTaskCosts:
         # YAML round-trips can stringify keys.
         assert task_costs([{"T": 5}], "T", {"5": 7.0}) == [7.0]
 
-    def test_missing_param_defaults_with_warning(self, caplog):
+    def test_missing_param_defaults_to_max_usable_with_warning(self, caplog):
+        # Unknown cost = treated as EXPENSIVE (max usable) — its bin's
+        # walltime must never be scaled down by it (TIMEOUT bias).
         with caplog.at_level("WARNING"):
             costs = task_costs([{"T": 5}, {"other": 1}], "T")
-        assert costs == [5.0, 1.0]
-        assert any("task(s) 2" in r.message for r in caplog.records)
+        assert costs == [5.0, 5.0]
+        assert any("Task(s): 2" in r.message for r in caplog.records)
+        assert any("TIMEOUT" in r.message for r in caplog.records)
+
+    def test_all_defaulted_costs_are_one(self, caplog):
+        with caplog.at_level("WARNING"):
+            assert task_costs([{"a": 1}, {"a": 2}], "T") == [1.0, 1.0]
+
+    def test_defaulted_cost_cannot_collapse_walltime(self):
+        # The review's EXP B: a defaulted task alone in a bin used to get
+        # walltime = base × (1/global_max). Now it carries max cost.
+        costs = task_costs(
+            [{"T": 16}, {"T": 16}, {"T": 5}], "T", {16: 23.0}  # 5 missing!
+        )
+        assert costs == [23.0, 23.0, 23.0]
+        plans = plan_gpu_split(
+            costs=costs,
+            gpu_types=["A100", "H200"],
+            speed_factors={"a100": 1.0, "h200": 0.4},
+            base_walltime="23:00:00",
+        )
+        for p in plans:
+            assert parse_walltime(p.walltime) >= parse_walltime("09:12:00") * 0.999
 
     def test_non_numeric_without_map_defaults(self, caplog):
         with caplog.at_level("WARNING"):
@@ -102,12 +125,21 @@ class TestPlanGpuSplitUniform:
         assert len(plans) == 1
         assert plans[0].indices == (0,)
 
-    def test_missing_factor_warns_and_assumes_one(self, caplog):
-        with caplog.at_level("WARNING"):
-            plans = plan_gpu_split(
+    def test_partial_factor_map_is_a_hard_error(self):
+        # The review's EXP I: a slow type missing from a PROVIDED map would
+        # default to 1.0 → over-assigned work + under-provisioned walltime
+        # → mass TIMEOUT. A partial map is a config bug: refuse.
+        with pytest.raises(ValueError, match="no entry for gpu type.*TIMEOUT"):
+            plan_gpu_split(
                 costs=[1.0, 1.0], gpu_types=["a", "b"], speed_factors={"a": 1.0}
             )
-        assert any("no speed_factor" in r.message for r in caplog.records)
+
+    def test_no_factor_map_warns_naming_timeout(self, caplog):
+        # No map at all = "all types equally fast" — allowed, but the
+        # warning must name the consequence.
+        with caplog.at_level("WARNING"):
+            plans = plan_gpu_split(costs=[1.0, 1.0], gpu_types=["a", "b"])
+        assert any("TIMEOUT" in r.message for r in caplog.records)
         assert {p.speed_factor for p in plans} == {1.0}
 
     def test_invalid_factor_raises(self):
@@ -313,6 +345,112 @@ class TestJobsManifestEntries:
         assert jobs_manifest_entries(["7"], {"7": {"seed": 1}}) == [
             {"job_id": "7", "gpu_type": None, "num_tasks": 1}
         ]
+
+
+class TestHardenings:
+    """Findings from the post-merge cold review of PR #10."""
+
+    def test_bool_param_never_matches_int_cost_map_key(self):
+        # True == 1 in Python; the map path must not exploit that.
+        assert task_costs([{"T": True}], "T", {1: 99.0}) == [1.0]
+
+    def test_token_collision_raises_not_clobbers(self):
+        # Two types sanitizing to one token would share a params file —
+        # the second write clobbers the first → silent wrong-config.
+        spec = ResourceSpec(gpus=1, gpu_type=("h100!", "h100"))
+        with pytest.raises(ValueError, match="collide after"):
+            build_array_submissions(
+                params_list=[{"s": 1}, {"s": 2}], effective_spec=spec, prefix="sw"
+            )
+
+    def test_two_part_base_walltime_rejected_in_multi_type(self):
+        # parse_walltime reads "48:00" as 48 MINUTES — scaled across
+        # sub-arrays that's a silent 60x under-provision.
+        with pytest.raises(ValueError, match="HH:MM:SS"):
+            plan_gpu_split(
+                costs=[1.0], gpu_types=["a"], base_walltime="48:00"
+            )
+
+    def test_all_zero_costs_no_zerodivision(self):
+        # Pure-API guard: task_costs never emits zeros, but direct callers can.
+        plans = plan_gpu_split(
+            costs=[0.0, 0.0], gpu_types=["a"], base_walltime="01:00:00"
+        )
+        assert plans[0].walltime is not None  # didn't raise
+
+    def test_submission_carries_planner_speed_factor(self):
+        # Display layers read THIS — never re-derive from config.
+        spec = ResourceSpec(gpus=1, gpu_type=("A100", "H200"), walltime="10:00:00")
+        subs = build_array_submissions(
+            params_list=[{"s": i} for i in range(4)],
+            effective_spec=spec,
+            prefix="sw",
+            speed_factors={"a100": 1.0, "h200": 0.5},
+        )
+        by_type = {s.gpu_type: s for s in subs}
+        assert by_type["A100"].speed_factor == 1.0
+        assert by_type["H200"].speed_factor == 0.5
+
+
+class TestNormalizeSpeedFactors:
+    def test_normalizes_keys_and_values(self):
+        from hpc_sweep_manager.core.hpc.gpu_planner import normalize_speed_factors
+
+        assert normalize_speed_factors({"A100": "1.0", "h200": 0.4}) == {
+            "a100": 1.0,
+            "h200": 0.4,
+        }
+
+    def test_drops_nonpositive_and_nonfinite(self, caplog):
+        from hpc_sweep_manager.core.hpc.gpu_planner import normalize_speed_factors
+
+        with caplog.at_level("WARNING"):
+            out = normalize_speed_factors(
+                {"a": 0, "b": -1, "c": float("inf"), "d": float("nan"), "e": 2.0}
+            )
+        assert out == {"e": 2.0}
+        assert len(caplog.records) == 4
+
+    def test_non_mapping_and_empty_are_none(self):
+        from hpc_sweep_manager.core.hpc.gpu_planner import normalize_speed_factors
+
+        assert normalize_speed_factors(None) is None
+        assert normalize_speed_factors({}) is None
+        assert normalize_speed_factors([("a", 1)]) is None
+        assert normalize_speed_factors({"a": "fast"}) is None
+
+
+class TestSweepConfigCostParamValidation:
+    def test_cost_param_must_be_swept(self):
+        from hpc_sweep_manager.core.common.config import SweepConfig
+
+        cfg = SweepConfig.from_dict(
+            {"sweep": {"grid": {"a": [1, 2]}, "cost_param": "typo.T"}}
+        )
+        errors = cfg.validate()
+        assert any("cost_param" in e for e in errors)
+
+    def test_cost_param_in_grid_ok(self):
+        from hpc_sweep_manager.core.common.config import SweepConfig
+
+        cfg = SweepConfig.from_dict(
+            {"sweep": {"grid": {"T": [1, 2]}, "cost_param": "T"}}
+        )
+        assert cfg.validate() == []
+
+    def test_cost_param_in_paired_ok(self):
+        from hpc_sweep_manager.core.common.config import SweepConfig
+
+        cfg = SweepConfig.from_dict(
+            {
+                "sweep": {
+                    "grid": {},
+                    "paired": [{"g": {"T": [1, 2], "alpha": [0.1, 0.2]}}],
+                    "cost_param": "T",
+                }
+            }
+        )
+        assert cfg.validate() == []
 
 
 class TestSweepConfigCostFields:

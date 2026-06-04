@@ -54,9 +54,52 @@ class GpuTypePlan:
     speed_factor: float
 
 
+def normalize_speed_factors(
+    factors: Optional[Mapping[Any, Any]],
+    *,
+    warn_context: str = "speed_factors",
+) -> Optional[Dict[str, float]]:
+    """Validate + normalize a speed_factors mapping (the ONE implementation).
+
+    Lowercased string keys, float values; entries that are non-numeric,
+    non-positive, or non-finite are dropped with a warning. Returns ``None``
+    for unset/empty/non-mapping input. Shared by the ``slurm:``-block
+    accessor, the per-remote factory, and (for display) the CLI — so the
+    validators cannot drift.
+    """
+    if not factors:
+        return None
+    if not isinstance(factors, Mapping):
+        logger.warning(
+            f"{warn_context} must be a mapping of gpu type → number; "
+            f"got {type(factors).__name__}. Ignoring."
+        )
+        return None
+    out: Dict[str, float] = {}
+    for k, v in factors.items():
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"{warn_context}[{k!r}] is not a number ({v!r}). Ignoring entry."
+            )
+            continue
+        if f <= 0 or not math.isfinite(f):
+            logger.warning(
+                f"{warn_context}[{k!r}] must be a finite number > 0, got {f}. "
+                f"Ignoring entry."
+            )
+            continue
+        out[str(k).lower()] = f
+    return out or None
+
+
 def _lookup_cost_map(raw: Any, cost_map: Mapping[Any, Any]) -> Optional[float]:
     """Tolerant cost_map lookup: exact key first, then string-equal match
-    (YAML round-trips can turn int keys into strings and vice versa)."""
+    (YAML round-trips can turn int keys into strings and vice versa).
+    Booleans are excluded — `True == 1` would silently match an int key."""
+    if isinstance(raw, bool):
+        return None
     try:
         if raw in cost_map:
             return float(cost_map[raw])
@@ -77,17 +120,21 @@ def task_costs(
 
     With ``cost_map``, the param's value is translated (e.g.
     ``{5: 7.0, 16: 23.0}`` — measured hours; only ratios matter). Without it,
-    the value itself is used (must be numeric). Tasks with no usable cost
-    (param missing, non-numeric without a map, value absent from the map, or
-    non-positive) default to 1.0 with a loud warning naming them — silent
-    mis-costing would skew the whole split.
+    the value itself is used (must be numeric).
+
+    Tasks with no usable cost (param missing, non-numeric without a map,
+    value absent from the map, or non-positive) default to the MAX usable
+    cost — an unknown cost is treated as expensive, so its bin's walltime
+    can never be scaled DOWN by it (under-provisioning → TIMEOUT is the
+    failure that burns real allocation; over-provisioning merely queues a
+    little longer). The warning names the tasks and the consequence.
 
     ``cost_param`` references an EXISTING swept param: costs never enter the
     hydra override string, so templating is untouched.
     """
     if not cost_param:
         return [1.0] * len(params_list)
-    costs: List[float] = []
+    costs: List[Optional[float]] = []
     defaulted: List[int] = []
     for i, params in enumerate(params_list):
         raw = params.get(cost_param)
@@ -97,19 +144,25 @@ def task_costs(
                 value = _lookup_cost_map(raw, cost_map)
             elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
                 value = float(raw)
-        if value is None or value <= 0 or not math.isfinite(value):
+        if value is not None and (value <= 0 or not math.isfinite(value)):
+            value = None
+        if value is None:
             defaulted.append(i + 1)
-            value = 1.0
         costs.append(value)
+    usable = [c for c in costs if c is not None]
+    fallback = max(usable) if usable else 1.0
     if defaulted:
         shown = ", ".join(str(t) for t in defaulted[:10])
         more = f" (+{len(defaulted) - 10} more)" if len(defaulted) > 10 else ""
         logger.warning(
             f"cost_param {cost_param!r}: {len(defaulted)} task(s) had no usable "
             f"cost (missing, non-numeric, non-positive, or absent from "
-            f"cost_map) — defaulted to 1.0: task(s) {shown}{more}"
+            f"cost_map) — treating them as the MAX known cost ({fallback:g}) so "
+            f"their sub-array's walltime cannot be under-provisioned (TIMEOUT "
+            f"risk). Fix the cost_map/param and re-check with --dry-run. "
+            f"Task(s): {shown}{more}"
         )
-    return costs
+    return [c if c is not None else fallback for c in costs]
 
 
 def plan_gpu_split(
@@ -128,6 +181,15 @@ def plan_gpu_split(
     """
     if not gpu_types:
         raise ValueError("plan_gpu_split: gpu_types must be non-empty")
+    if base_walltime and len(base_walltime.split(":")) != 3:
+        # parse_walltime reads "48:00" as 48 MINUTES (MM:SS) — scaled and
+        # multiplied across sub-arrays, that silent 60x under-provision
+        # would TIMEOUT everything. Multi-type mode demands the explicit form.
+        raise ValueError(
+            f"plan_gpu_split: base walltime must be HH:MM:SS when gpu_type "
+            f"is a list, got {base_walltime!r} (ambiguous — '48:00' would "
+            f"mean 48 minutes, not 48 hours)"
+        )
     factors_norm = {
         str(k).lower(): float(v) for k, v in (speed_factors or {}).items()
     }
@@ -143,11 +205,23 @@ def plan_gpu_split(
                 f"plan_gpu_split: speed factor for {t!r} must be > 0, got {factor}"
             )
         bins.append({"type": t, "factor": factor, "indices": [], "load": 0.0})
+    if missing and factors_norm:
+        # The user IS using speed factors but didn't cover these types —
+        # defaulting a genuinely-slower type to 1.0 would over-assign work
+        # to it AND under-provision its walltime (mass TIMEOUT, the
+        # expensive failure). A partial map is a config bug: refuse.
+        raise ValueError(
+            f"plan_gpu_split: speed_factors is set but has no entry for gpu "
+            f"type(s) {missing} — add them (relative runtime multipliers; "
+            f"reference type = 1.0). Refusing to guess: a wrong factor "
+            f"under-provisions walltime → TIMEOUT."
+        )
     if missing:
         logger.warning(
-            f"no speed_factor configured for gpu type(s) {missing} — assuming "
-            f"1.0 (same speed as the reference type). Add them under "
-            f"`speed_factors:` for honest walltimes and balanced splits."
+            f"no speed_factors configured — treating all of {list(gpu_types)} "
+            f"as equally fast (even split, unscaled walltime). If any of "
+            f"these types is slower, its tasks may TIMEOUT; set "
+            f"`speed_factors:` and re-check with --dry-run."
         )
 
     # LPT: costliest first; min() is stable → ties go to the earlier bin in
@@ -161,6 +235,8 @@ def plan_gpu_split(
         best["load"] += c
 
     max_cost = max(costs) if costs else 1.0
+    if max_cost <= 0:
+        max_cost = 1.0  # pure-API guard: explicit all-zero costs must not ZeroDivide
     plans: List[GpuTypePlan] = []
     for b in bins:
         if not b["indices"]:
@@ -200,6 +276,9 @@ class SubArraySubmission:
     entries: tuple[dict, ...]
     spec: ResourceSpec  # scalarized: gpu_type str|None, walltime already scaled
     gpu_type: Optional[str]  # None on the single-type path
+    # The factor the planner actually used (incl. defaults) — display layers
+    # must read THIS, not re-derive it from config (drift risk).
+    speed_factor: float = 1.0
 
 
 def _safe_type_token(gpu_type: str) -> str:
@@ -257,9 +336,21 @@ def build_array_submissions(
         speed_factors=speed_factors,
         base_walltime=effective_spec.walltime,
     )
+    tokens = [_safe_type_token(p.gpu_type) for p in plans]
+    if len(set(tokens)) != len(tokens):
+        # Two types sanitizing to the same token would share a params file
+        # (second write CLOBBERS the first) → one sub-array silently runs
+        # the other's parameter slice. Refuse — this is the repo's worst
+        # failure class (silent wrong-config, gotcha #11's cousin).
+        dupes = sorted({t for t in tokens if tokens.count(t) > 1})
+        raise ValueError(
+            f"build_array_submissions: gpu_type entries collide after "
+            f"sanitization ({dupes!r} from {list(effective_spec.gpu_type)!r}) "
+            f"— their params files/job names would overwrite each other. "
+            f"Use distinct type names."
+        )
     submissions: List[SubArraySubmission] = []
-    for plan in plans:
-        token = _safe_type_token(plan.gpu_type)
+    for plan, token in zip(plans, tokens):
         sub_spec = replace(
             effective_spec,
             gpu_type=plan.gpu_type,
@@ -276,6 +367,7 @@ def build_array_submissions(
                 entries=entries,
                 spec=sub_spec,
                 gpu_type=plan.gpu_type,
+                speed_factor=plan.speed_factor,
             )
         )
     return submissions

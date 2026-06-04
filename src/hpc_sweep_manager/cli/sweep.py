@@ -327,7 +327,15 @@ def _render_placement(
                     gres = rspec.get("gpus")
                     if gres:
                         gtype = rspec.get("gpu_type")
-                        gpu_desc = f"--gres=gpu:{gtype + ':' if gtype else ''}{gres}"
+                        if isinstance(gtype, (list, tuple)):
+                            # Multi-type child: show each alternative — the
+                            # old `gtype + ':'` concat raised TypeError on a
+                            # list, which the preview guard silently ate.
+                            gpu_desc = " | ".join(
+                                f"--gres=gpu:{t}:{gres}" for t in gtype
+                            ) + " (one sub-array per type)"
+                        else:
+                            gpu_desc = f"--gres=gpu:{gtype + ':' if gtype else ''}{gres}"
                     else:
                         gpu_desc = "scheduler-managed"
                     console.print(
@@ -400,7 +408,9 @@ def _render_gpu_type_plan(
         bin_costs = [cost_seq[i] for i in indices]
         table.add_row(
             sub.gpu_type or "?",
-            _fmt_num(_factor_of(sub, speed_factors)),
+            # The factor the planner ACTUALLY used (incl. defaults) — read
+            # from the plan, never re-derived from config (drift risk).
+            _fmt_num(sub.speed_factor),
             str(len(sub.entries)),
             _fmt_num(sum(bin_costs)),
             _fmt_num(max(bin_costs)),
@@ -413,13 +423,6 @@ def _render_gpu_type_plan(
         "the smallest (load + cost) × factor. Walltime = base × factor × "
         "(bin max cost / global max cost).[/dim]"
     )
-
-
-def _factor_of(sub, speed_factors) -> float:
-    if not speed_factors or not sub.gpu_type:
-        return 1.0
-    norm = {str(k).lower(): float(v) for k, v in speed_factors.items()}
-    return norm.get(sub.gpu_type.lower(), 1.0)
 
 
 def _fmt_num(x: float) -> str:

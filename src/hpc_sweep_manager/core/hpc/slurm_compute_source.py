@@ -252,10 +252,21 @@ class SlurmComputeSource(ComputeSource):
             speed_factors=self.speed_factors,
             costs=costs,
         )
-        return [
-            await self._submit_one_array(sub, sweep_id, wandb_group)
-            for sub in submissions
-        ]
+        job_ids: List[str] = []
+        try:
+            for sub in submissions:
+                job_ids.append(await self._submit_one_array(sub, sweep_id, wandb_group))
+        except Exception:
+            if job_ids:
+                # Earlier sub-arrays are LIVE — name them so the user can
+                # decide (no manifest machinery on the native-local path).
+                logger.error(
+                    f"array submission failed partway — {len(job_ids)} "
+                    f"sub-array(s) already live: {', '.join(job_ids)}. "
+                    f"Cancel with: scancel {' '.join(job_ids)}"
+                )
+            raise
+        return job_ids
 
     async def _submit_one_array(
         self,

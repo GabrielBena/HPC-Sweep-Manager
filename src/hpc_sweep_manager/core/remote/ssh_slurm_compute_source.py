@@ -61,6 +61,7 @@ from ..hpc.gpu_planner import (
     SubArraySubmission,
     build_array_submissions,
     jobs_manifest_entries,
+    normalize_speed_factors,
 )
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
@@ -446,9 +447,28 @@ class SSHSlurmComputeSource(ComputeSource):
         costs: Optional[Sequence[float]] = None,
     ) -> List[str]:
         if mode == "array":
-            job_ids = await self._submit_array(
-                params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
-            )
+            try:
+                job_ids = await self._submit_array(
+                    params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
+                )
+            except Exception:
+                # Multi-type submission is a LOOP of sbatch calls — a
+                # mid-sequence failure leaves earlier sub-arrays LIVE on the
+                # cluster. Without a manifest they'd be invisible to
+                # `hsm sweep collect` (the field-report-#8 recovery anchor),
+                # so persist whatever DID submit before re-raising.
+                if self.active_jobs:
+                    submitted = list(self.active_jobs)
+                    logger.error(
+                        f"array submission failed partway — "
+                        f"{len(submitted)} sub-array(s) already live on "
+                        f"{self.host}: {', '.join(submitted)}. Writing the "
+                        f"manifest so `hsm sweep collect {sweep_id}` can "
+                        f"re-attach; to abort instead: "
+                        f"ssh {self.host} scancel {' '.join(submitted)}"
+                    )
+                    await self._write_manifest(submitted, mode, len(params_list))
+                raise
         else:
             effective = self._effective_spec(spec)
             if isinstance(effective.gpu_type, tuple):
@@ -1028,6 +1048,19 @@ def build_ssh_slurm_source(
 
     remote_spec_dict = remote_cfg.get("spec")
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:
+        if "speed_factors" in remote_spec_dict:
+            # Plausible misplacement: it belongs BESIDE spec:, not inside it
+            # (per-source planner knob, not a per-job resource). Dropping it
+            # here would otherwise surface as an opaque "unexpected keyword
+            # argument" that nukes the whole spec block.
+            logger.warning(
+                f"remote {name!r}: `speed_factors` belongs at the remote "
+                f"level (sibling of `spec:`), not inside it — ignoring the "
+                f"misplaced entry. Move it up one level."
+            )
+            remote_spec_dict = {
+                k: v for k, v in remote_spec_dict.items() if k != "speed_factors"
+            }
         try:
             per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
         except (TypeError, ValueError) as e:
@@ -1077,32 +1110,10 @@ def build_ssh_slurm_source(
 
     # GPU type → relative runtime multiplier for multi-gpu_type planning
     # (qos_whitelist pattern: per-remote key beside spec:, not inside it).
-    speed_factors_raw = remote_cfg.get("speed_factors")
-    speed_factors: Optional[Dict[str, float]] = None
-    if isinstance(speed_factors_raw, dict) and speed_factors_raw:
-        speed_factors = {}
-        for k, v in speed_factors_raw.items():
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                logger.warning(
-                    f"remote {name!r}: speed_factors[{k!r}] is not a number "
-                    f"({v!r}). Ignoring entry."
-                )
-                continue
-            if f <= 0:
-                logger.warning(
-                    f"remote {name!r}: speed_factors[{k!r}] must be > 0, "
-                    f"got {f}. Ignoring entry."
-                )
-                continue
-            speed_factors[str(k)] = f
-        speed_factors = speed_factors or None
-    elif speed_factors_raw is not None:
-        logger.warning(
-            f"remote {name!r}: speed_factors must be a mapping of gpu type → "
-            f"number; got {type(speed_factors_raw).__name__}. Ignoring."
-        )
+    speed_factors = normalize_speed_factors(
+        remote_cfg.get("speed_factors"),
+        warn_context=f"remote {name!r}: speed_factors",
+    )
 
     return SSHSlurmComputeSource(
         name=name,

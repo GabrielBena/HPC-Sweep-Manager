@@ -599,3 +599,117 @@ class TestArrayParamsExtractionFunctional:
         # The task never got as far as creating its dir or running anything.
         assert not (tasks_dir / "task_1").exists()
         assert not args_out.exists()
+
+
+class TestMultiGpuTypeLocal:
+    """Review finding: the local source's multi-type wiring was untested —
+    only the SSH twin was. Same invariants, local transport."""
+
+    @pytest.mark.asyncio
+    async def test_submit_array_multi_type_splits_locally(self, tmp_path, monkeypatch):
+        import hpc_sweep_manager.core.hpc.slurm_compute_source as mod
+
+        submitted_scripts = []
+        next_id = iter(["201", "202"])
+
+        def fake_run(cmd, **kwargs):
+            class R:
+                returncode = 0
+                stdout = f"Submitted batch job {next(next_id)}\n"
+                stderr = ""
+            submitted_scripts.append(cmd[-1])
+            return R()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        src = SlurmComputeSource(
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
+            ),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+        )
+        src.sweep_dir = tmp_path  # bypass setup(); _ensure_dirs derives from it
+        src.sweep_id = "sweep_1"
+
+        ids = await src.submit_batch(
+            params_list=[{"seed": i} for i in range(4)],
+            sweep_id="sweep_1",
+            mode="array",
+            job_name_prefix="sweep_1",
+        )
+        assert ids == ["201", "202"]
+
+        # Two params files; disjoint global_index union; array-local index.
+        import json as _json
+
+        files = sorted(tmp_path.glob("parameter_combinations_*.json"))
+        assert len(files) == 2
+        all_globals = []
+        for f in files:
+            entries = _json.loads(f.read_text())
+            assert [e["index"] for e in entries] == list(range(1, len(entries) + 1))
+            all_globals.extend(e["global_index"] for e in entries)
+        assert sorted(all_globals) == [1, 2, 3, 4]
+
+        # Two rendered scripts with per-type GRES + scaled walltime.
+        rendered = "\n".join(
+            p.read_text() for p in (tmp_path / "scripts").glob("*.slurm")
+        )
+        assert "--gres=gpu:A100:1" in rendered
+        assert "--gres=gpu:H200:1" in rendered
+        assert "#SBATCH --time=10:00:00" in rendered
+        assert "#SBATCH --time=05:00:00" in rendered
+        assert 'echo "GPU Type: A100"' in rendered
+
+        # JobInfo carries the type; totals count tasks.
+        types = {src.active_jobs[j].params.get("_gpu_type") for j in ids}
+        assert types == {"A100", "H200"}
+        assert src.stats.total_submitted == 4
+
+    @pytest.mark.asyncio
+    async def test_multi_type_individual_mode_rejected_locally(self, tmp_path):
+        src = SlurmComputeSource(
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(gpus=1, gpu_type=("A100", "H200")),
+        )
+        src.sweep_dir = tmp_path
+        with pytest.raises(ValueError, match="array mode"):
+            await src.submit_batch(
+                params_list=[{"seed": 0}], sweep_id="s", mode="individual"
+            )
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_names_live_arrays(self, tmp_path, monkeypatch, caplog):
+        import hpc_sweep_manager.core.hpc.slurm_compute_source as mod
+
+        calls = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            calls["n"] += 1
+
+            class R:
+                returncode = 0 if calls["n"] == 1 else 1
+                stdout = "Submitted batch job 301\n" if calls["n"] == 1 else ""
+                stderr = "sbatch: error: limit"
+            return R()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        src = SlurmComputeSource(
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
+            ),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+        )
+        src.sweep_dir = tmp_path
+        with caplog.at_level("ERROR"):
+            with pytest.raises(RuntimeError, match="sbatch"):
+                await src.submit_batch(
+                    params_list=[{"seed": i} for i in range(4)],
+                    sweep_id="s",
+                    mode="array",
+                )
+        assert any("301" in r.message and "scancel" in r.message for r in caplog.records)

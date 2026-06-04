@@ -208,14 +208,34 @@ planner the submission uses):
 **`speed_factors` are workload-specific** — measure them (a short probe
 of your actual training loop per type), don't trust spec sheets: e.g.
 V100 lacks TF32/bf16, so its honest factor for a small fp32 model can be
-anywhere from 1.5× to 10× depending on saturation. Missing factors warn
-and default to 1.0. A singleton list (`gpu_type: [A100]`) degenerates to
-the plain scalar path — no planner, no scaling.
+anywhere from 1.5× to 10× depending on saturation. A singleton list
+(`gpu_type: [A100]`) degenerates to the plain scalar path — no planner,
+no scaling.
+
+**Safety semantics (under-provisioned walltime = mass TIMEOUT, the
+failure that burns allocation — every default is biased the other way):**
+
+- A **partial** `speed_factors` map (set, but missing one of the listed
+  types) is a hard error — a slow type defaulting to 1.0 would get too
+  much work AND too little walltime. No map at all = "all types equally
+  fast" (allowed, warned).
+- A task whose cost can't be resolved (param missing, value absent from
+  `cost_map`, non-numeric) is treated as the **max** known cost — its
+  sub-array's walltime can never be scaled down by an unknown; you get a
+  warning naming the tasks.
+- The base `walltime` must be explicit `HH:MM:SS` in multi-type mode
+  (`"48:00"` parses as 48 *minutes* and would silently 60×
+  under-provision).
 
 Caveats: array mode only (`--mode individual` errors); all sub-arrays
 share the spec's single `partition`/`qos` (per-type partitions are a
 known follow-up — relevant if you mix `standard`-partition types with
-`lowprio`-only ones like S3IT's V100).
+`lowprio`-only ones like S3IT's V100); archive/cleanup decisions treat
+the sweep as a whole — one failed sub-array keeps the entire remote
+sweep dir for inspection. If submission fails partway (sub-array 1
+live, sub-array 2's sbatch rejected), the manifest is still written so
+`hsm sweep collect <id>` can re-attach — the error names the live job
+ids and the `scancel` command to abort them instead.
 
 ## The typed `local:` block — defaults for `--mode local`
 
