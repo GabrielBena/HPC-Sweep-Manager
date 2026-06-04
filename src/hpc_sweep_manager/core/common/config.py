@@ -202,6 +202,23 @@ class SweepConfig:
                     f"All parameters in paired group {i} must have the same length. Found lengths: {lengths}"
                 )
 
+        # cost_param must name a SWEPT param — a typo here would silently
+        # degrade the whole GPU-type split to uniform costs (runtime warning
+        # only); pre-flight is the right place to catch it hard.
+        if self.cost_param:
+            swept = set(self.grid.keys())
+            for group in self.paired:
+                if isinstance(group, dict):
+                    for params in group.values():
+                        if isinstance(params, dict):
+                            swept.update(params.keys())
+            if self.cost_param not in swept:
+                errors.append(
+                    f"cost_param '{self.cost_param}' is not a swept parameter "
+                    f"(not in grid or paired groups) — every task would get "
+                    f"the same default cost"
+                )
+
         return errors
 
     def get_total_combinations(self) -> int:
@@ -560,34 +577,14 @@ class HSMConfig:
               gpu_type: [A100, H200]
               speed_factors: {a100: 1.0, h200: 0.4}
         """
+        from ..hpc.gpu_planner import normalize_speed_factors
+
         block = self.config_data.get("slurm")
         if not isinstance(block, dict):
             return None
-        factors = block.get("speed_factors")
-        if not factors:
-            return None
-        if not isinstance(factors, dict):
-            logger.warning(
-                f"`slurm.speed_factors` must be a mapping of gpu type → "
-                f"number; got {type(factors).__name__}. Ignoring."
-            )
-            return None
-        out: Dict[str, float] = {}
-        for k, v in factors.items():
-            try:
-                f = float(v)
-            except (TypeError, ValueError):
-                logger.warning(
-                    f"`slurm.speed_factors[{k!r}]` is not a number ({v!r}). Ignoring entry."
-                )
-                continue
-            if f <= 0:
-                logger.warning(
-                    f"`slurm.speed_factors[{k!r}]` must be > 0, got {f}. Ignoring entry."
-                )
-                continue
-            out[str(k)] = f
-        return out or None
+        return normalize_speed_factors(
+            block.get("speed_factors"), warn_context="`slurm.speed_factors`"
+        )
 
 
 def resolve_sweep_dir(

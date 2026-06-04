@@ -30,6 +30,40 @@ Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
 - **`position` silently hid CPU-only pending jobs** — now surfaced as a
   note; the reason-code legend covers `(QOSMaxJobsPerUserLimit)`.
 
+### Fixed (GPU-planner hardening — post-merge cold review of #10, 2026-06-04)
+
+Three clean-slate review agents on the merged #10; all real findings
+addressed. Theme: every default now biases toward OVER-provisioning
+(harmless queue time) instead of UNDER-provisioning (mass TIMEOUT):
+
+- **Partial `speed_factors` map → hard error** (a listed type missing from
+  a provided map used to default to 1.0 — over-assigned work + unscaled
+  walltime on a genuinely slower type). No map at all stays allowed
+  ("equally fast"), with a warning that now names the TIMEOUT risk.
+- **Unknown task costs default to the MAX known cost** (was 1.0 — a task
+  missing from `cost_map` landing alone in a bin collapsed that bin's
+  walltime to base/global_max). Warning names tasks + consequence.
+- **Partial sub-array submission failure now writes the manifest** for
+  whatever DID submit (was: orphaned live arrays invisible to
+  `hsm sweep collect`) and names the live job ids + `scancel` hint; the
+  native-local source logs the same.
+- Multi-type base walltime must be `HH:MM:SS` (`"48:00"` = 48 *minutes*
+  via the two-part parse — a silent 60× under-provision); gpu_type names
+  colliding after sanitization error instead of clobbering each other's
+  params files; all-zero-cost pure-API ZeroDivision guarded; bool param
+  values no longer match int `cost_map` keys (`True == 1`).
+- `cost_param` naming a non-swept param is now a `validate()` **error**
+  (was a buried runtime warning that silently degraded to uniform costs).
+- Speed-factor validation consolidated into one shared
+  `normalize_speed_factors` (was 4 near-copies; NaN/inf now rejected at
+  the config layer too); the dry-run Factor column reads the planner's
+  actual `SubArraySubmission.speed_factor` instead of re-deriving from
+  config; misplaced `speed_factors` inside `spec:` warns with the fix
+  instead of nuking the spec block with an opaque TypeError; the
+  distributed dry-run preview no longer crashes (silently) on list
+  gpu_type. Local `SlurmComputeSource` multi-type path now has its own
+  test coverage (was SSH-twin only).
+
 ### Added (heterogeneous GPU-type scheduling, issue #7 v0+v1, 2026-06-04)
 
 - **`spec.gpu_type` accepts a list** (array mode): the sweep splits into one

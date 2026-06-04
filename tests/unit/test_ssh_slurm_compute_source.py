@@ -369,6 +369,39 @@ class TestSubmit:
         assert sum(j["num_tasks"] for j in manifest["jobs"]) == 4
 
     @pytest.mark.asyncio
+    async def test_partial_submission_failure_still_writes_manifest(self, tmp_path):
+        """Review finding: sub-array 1 live + sub-array 2's sbatch failing
+        used to leave NO manifest → `hsm sweep collect` impossible, orphaned
+        jobs invisible. The error path must persist what DID submit."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", _Result(1, "", "sbatch: error: budget exceeded"))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
+            ),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+            fake_conn=conn,
+        )
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_1"
+        await src.setup(sweep_dir, "sweep_1")
+        with pytest.raises(RuntimeError, match="sbatch"):
+            await src.submit_batch(
+                params_list=[{"seed": i} for i in range(4)],
+                sweep_id="sweep_1",
+                mode="array",
+                job_name_prefix="sweep_1",
+            )
+        # The recovery anchor exists and names the LIVE sub-array.
+        manifest = json.loads((sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["job_ids"] == ["111"]
+        assert manifest["jobs"][0]["job_id"] == "111"
+
+    @pytest.mark.asyncio
     async def test_multi_gpu_type_individual_mode_rejected(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
