@@ -30,6 +30,32 @@ Live audit against S3IT (Slurm 25.05) with two sweeps in flight found
 - **`position` silently hid CPU-only pending jobs** — now surfaced as a
   note; the reason-code legend covers `(QOSMaxJobsPerUserLimit)`.
 
+### Added (heterogeneous GPU-type scheduling, issue #7 v0+v1, 2026-06-04)
+
+- **`spec.gpu_type` accepts a list** (array mode): the sweep splits into one
+  Slurm array per type via greedy LPT — costliest tasks first, each to the
+  type minimizing `(load + cost) × factor`. With uniform costs this
+  degenerates to counts ∝ 1/factor. Pure planner shared by the local and
+  SSH-Slurm sources (`core/hpc/gpu_planner.py`); a multi-type spec reaching
+  `render_sbatch_directives` raises (unplanned-path guard). Singleton lists
+  degenerate to the plain scalar path.
+- **`speed_factors`** (per-remote key, or in the `slurm:` block): GPU type →
+  relative runtime multiplier; per-sub-array walltime = base × factor ×
+  (bin max cost / global max cost), ceiled to the minute, floored at 10 min,
+  uncapped. Workload-specific — measure, don't trust spec sheets; houses in
+  the key a future `hsm calibrate` will write.
+- **Per-task cost hints in the sweep YAML**: `cost_param` names a swept
+  param; optional `cost_map` translates values to measured costs (ratios
+  matter). Unusable costs default to 1.0 with a loud warning. Costs never
+  enter the hydra override string.
+- **`--dry-run` shows the exact split plan** (same planner call as
+  submission): type / factor / tasks / Σcost / max cost / scaled walltime.
+- Task layout unchanged (`tasks/task_%04d` stays globally numbered via
+  per-sub-array params files with original `global_index`); `task_info.txt`
+  records `GPU Type:` per task (arch-confound flag); manifest gains per-job
+  `jobs:` entries so `hsm queue mine` shows per-type sub-arrays with correct
+  per-array progress.
+
 ### Changed (`hsm queue gpus` capacity view, 2026-06-04)
 
 - **`hsm queue gpus` shows Total / In use / Free per GPU type**, from

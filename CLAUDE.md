@@ -108,6 +108,17 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
+- [`core/hpc/gpu_planner.py`](src/hpc_sweep_manager/core/hpc/gpu_planner.py) —
+  pure heterogeneous-GPU planning (issue #7): `task_costs` (sweep YAML
+  `cost_param`/`cost_map`), `plan_gpu_split` (greedy LPT; walltime =
+  base × factor × bin-max-cost ratio, floor 10 min, uncapped),
+  `build_array_submissions` (per-type sub-array descriptors — single-type
+  specs yield byte-identical legacy shapes). Shared by BOTH Slurm sources
+  (anti-drift); `render_sbatch_directives` raises on a tuple `gpu_type`
+  so an unplanned path can't emit a broken `--gres`. `speed_factors`
+  keys are case-insensitive but the PLAN keeps the cased type for GRES
+  rendering (gotcha #6); factors are workload-specific — a future
+  `hsm calibrate` writes this config key.
 - [`core/hpc/scheduler_queue.py`](src/hpc_sweep_manager/core/hpc/scheduler_queue.py) —
   `SlurmQueue` (local subprocess) + `SSHSlurmQueue` (async, over an asyncssh
   conn) + `QueueJob` / `JobGroup` / `Reservation` dataclasses, built on
@@ -547,6 +558,24 @@ whole group drivable from the workstation. Plan:
 User-facing docs: [docs/user_guide/QUEUE.md](docs/user_guide/QUEUE.md);
 monitor-from-HQ section in
 [MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md#monitoring-the-cluster-queue-from-hq).
+
+## Recently landed (2026-06-04) — heterogeneous GPU-type scheduling (issue #7 v0+v1)
+
+One sweep → K typed Slurm sub-arrays. Filed by Gabriel from production
+pain (A100-pinned sweep queuing against itself with bimodal 7h/23h task
+costs). Issue #7 stays OPEN for the deferred stages.
+
+| What | Where |
+|---|---|
+| `spec.gpu_type: [A100, H200]` + per-remote/`slurm:` `speed_factors` → LPT split, per-type walltimes, `--dry-run` plan table (same planner call as submit) | `gpu_planner.py` (new), both Slurm sources, `resource_spec.py`, `cli/sweep.py` |
+| Sweep YAML `cost_param`/`cost_map` per-task cost hints (never enter hydra args) | `config.py` SweepConfig, `cli/sweep.py`, `submit_batch(costs=...)` through the ABC |
+| Per-sub-array params files keep `global_index` → `tasks/task_%04d` globally numbered; `task_info.txt` gets `GPU Type:`; manifest `jobs:` entries → per-array progress in `hsm queue mine` | sources, `slurm_array.sh.j2`, `cli/queue.py` |
+| Deferred (issue #7): v1.5 queue-aware placement (score = wait + runtime×factor from capacity probes, NOT typed-pending counts), `hsm calibrate` (measure factors via probe runs), per-type partitions (V100 is lowprio-only) | — |
+
+Live-validated: dry-run plan hand-checked on the real 22-task shape
+(8/11 long arms → H200, makespan 96 vs 330 cost-units pinned); smoke
+sweep on uzh split 2×L4 + 2×A100 with scaled walltimes and per-array
+progress rows in grouped `mine`.
 
 ## Cross-references
 

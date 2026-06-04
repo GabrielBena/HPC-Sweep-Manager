@@ -310,6 +310,49 @@ class TestRenderMine:
         _render_mine(console, "gbena", [_job("3710878_[1-5]", task_count=5, gpu_count=0)])
         assert "sweep_x" in buf.getvalue()
 
+    def test_manifest_jobs_entries_give_per_job_totals(self, tmp_path, monkeypatch):
+        """Multi-gpu_type sweeps submit SEVERAL arrays; the manifest's
+        `jobs:` entries carry per-job totals so progress works per array
+        (the old len(job_ids)==1 heuristic would have dropped them)."""
+        import json as _json
+
+        from hpc_sweep_manager.cli.queue import _build_sweep_meta_index
+
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_h"
+        sweep_dir.mkdir(parents=True)
+        (sweep_dir / ".hsm_manifest.json").write_text(
+            _json.dumps(
+                {
+                    "sweep_id": "sweep_h",
+                    "job_ids": ["111", "222"],
+                    "num_tasks": 22,
+                    "jobs": [
+                        {"job_id": "111", "gpu_type": "A100", "num_tasks": 6},
+                        {"job_id": "222", "gpu_type": "H200", "num_tasks": 16},
+                    ],
+                }
+            )
+        )
+        index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
+        assert index["111"] == ("sweep_h", 6)
+        assert index["222"] == ("sweep_h", 16)
+
+    def test_legacy_manifest_multi_job_has_no_total(self, tmp_path):
+        """Pre-`jobs:` manifests with several job ids stay attribution-free
+        (never guess a per-job total)."""
+        import json as _json
+
+        from hpc_sweep_manager.cli.queue import _build_sweep_meta_index
+
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_l"
+        sweep_dir.mkdir(parents=True)
+        (sweep_dir / ".hsm_manifest.json").write_text(
+            _json.dumps({"sweep_id": "sweep_l", "job_ids": ["9", "10"], "num_tasks": 8})
+        )
+        index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
+        assert index["9"] == ("sweep_l", None)
+        assert index["10"] == ("sweep_l", None)
+
 
 class TestRenderPosition:
     def test_single_exact_match(self):

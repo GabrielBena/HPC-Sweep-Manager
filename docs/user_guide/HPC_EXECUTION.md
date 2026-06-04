@@ -159,6 +159,64 @@ hsm sweep run --mode array --config sweeps/sweep.yaml
 parsed fields > `slurm:` block > defaults. So you can set base
 resources in the config and override `--walltime` per-run from the CLI.
 
+## Heterogeneous GPU types — one sweep, one Slurm array per type
+
+`gpu_type` accepts a **list** (array mode only). HSM splits the sweep into
+one Slurm array per type, assigns tasks with greedy LPT
+(longest-processing-time-first), and scales each sub-array's walltime:
+
+```yaml
+# .hsm/config.yaml (slurm: block — or distributed.remotes.<alias>.spec for SSH-Slurm)
+slurm:
+  walltime: "18:00:00"        # budget for the MAX-cost task on a factor-1.0 type
+  gpus: 1
+  gpu_type: [A100, H200]      # → one sub-array per type (cased per GRES!)
+  speed_factors:              # gpu type → relative RUNTIME multiplier
+    a100: 1.0                 #   (sibling of the spec fields; keys matched
+    h200: 0.4                 #    case-insensitively; 0.4 = runs in 40% of the time)
+```
+
+```yaml
+# sweeps/sweep.yaml — optional per-task cost hints (v1)
+script: train.py
+sweep:
+  cost_param: training.n_message_steps   # a swept param whose value tracks runtime
+  cost_map: {5: 7.0, 16: 23.0}           # optional value→cost translation
+                                         # (e.g. measured hours; only RATIOS matter)
+  grid:
+    training.n_message_steps: [5, 16]
+    seed: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+```
+
+What you get (`--dry-run` shows this exact plan — it calls the same
+planner the submission uses):
+
+- **Assignment:** costliest tasks first, each to the type with the
+  smallest resulting `(load + cost) × factor` — long arms land on the
+  fast pool, makespans balance across types. With no `cost_param`,
+  counts split ∝ 1/factor.
+- **Walltime per sub-array** = `base × factor × (bin max cost / global
+  max cost)`, ceiled to the minute, floored at 10 minutes, deliberately
+  uncapped (an `l4: 3.0` sub-array legitimately needs longer than base).
+- **Task layout unchanged:** `tasks/task_0001..N` stay globally
+  numbered; each sub-array gets its own `parameter_combinations_<TYPE>.json`;
+  `task_info.txt` records `GPU Type:` per task (cross-arch numerics
+  differ — check for arch confounds before pooling seeds).
+- `hsm queue mine` shows one row per typed sub-array with per-array
+  progress (the manifest records per-job task counts).
+
+**`speed_factors` are workload-specific** — measure them (a short probe
+of your actual training loop per type), don't trust spec sheets: e.g.
+V100 lacks TF32/bf16, so its honest factor for a small fp32 model can be
+anywhere from 1.5× to 10× depending on saturation. Missing factors warn
+and default to 1.0. A singleton list (`gpu_type: [A100]`) degenerates to
+the plain scalar path — no planner, no scaling.
+
+Caveats: array mode only (`--mode individual` errors); all sub-arrays
+share the spec's single `partition`/`qos` (per-type partitions are a
+known follow-up — relevant if you mix `standard`-partition types with
+`lowprio`-only ones like S3IT's V100).
+
 ## The typed `local:` block — defaults for `--mode local`
 
 Mirror of the `slurm:` block above, but for `--mode local`. Restricted

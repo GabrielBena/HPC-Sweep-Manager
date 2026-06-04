@@ -110,6 +110,12 @@ class SweepConfig:
     metadata: Dict[str, Any] = field(default_factory=dict)
     script: str = None  # Training script path (optional)
     complete: str = None  # Completion sweep ID (optional)
+    # Heterogeneous GPU scheduling (issue #7): name of a swept param whose
+    # value is each task's relative cost, plus an optional value→cost
+    # translation (e.g. {5: 7.0, 16: 23.0} — measured hours, ratios matter).
+    # Consumed by core/hpc/gpu_planner.task_costs; never enters hydra args.
+    cost_param: str = None
+    cost_map: Dict[Any, Any] = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, config_path: Union[str, Path]) -> "SweepConfig":
@@ -136,6 +142,8 @@ class SweepConfig:
             metadata=config_dict.get("metadata", {}),
             script=config_dict.get("script"),  # Extract script from top level
             complete=config_dict.get("complete"),  # Extract completion sweep ID from top level
+            cost_param=sweep_config.get("cost_param"),
+            cost_map=sweep_config.get("cost_map") or {},
         )
 
     @classmethod
@@ -396,7 +404,7 @@ class HSMConfig:
         if not isinstance(block, dict) or not block:
             return None
         # Strip orchestrator-/scheduler-only keys before handing to ResourceSpec.
-        _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size"}
+        _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size", "speed_factors"}
         filtered = {k: v for k, v in block.items() if k not in _NON_SPEC_KEYS}
         try:
             return ResourceSpec.from_dict(filtered)
@@ -534,6 +542,52 @@ class HSMConfig:
             )
             return None
         return frozenset(str(q) for q in whitelist)
+
+    def get_slurm_speed_factors(self) -> Optional[Dict[str, float]]:
+        """Read ``slurm.speed_factors`` — GPU type → relative runtime multiplier.
+
+        Same ``slurm:`` block as :meth:`get_slurm_spec`, consumed separately
+        (it parameterizes the multi-type planner, not a per-job resource —
+        the :meth:`get_slurm_qos_whitelist` pattern). Reference type = 1.0;
+        smaller is faster. Workload-specific: measure, don't trust spec
+        sheets (a future ``hsm calibrate`` will write this key from probe
+        runs). Returns ``None`` when unset/invalid.
+
+        Example::
+
+            slurm:
+              gpus: 1
+              gpu_type: [A100, H200]
+              speed_factors: {a100: 1.0, h200: 0.4}
+        """
+        block = self.config_data.get("slurm")
+        if not isinstance(block, dict):
+            return None
+        factors = block.get("speed_factors")
+        if not factors:
+            return None
+        if not isinstance(factors, dict):
+            logger.warning(
+                f"`slurm.speed_factors` must be a mapping of gpu type → "
+                f"number; got {type(factors).__name__}. Ignoring."
+            )
+            return None
+        out: Dict[str, float] = {}
+        for k, v in factors.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"`slurm.speed_factors[{k!r}]` is not a number ({v!r}). Ignoring entry."
+                )
+                continue
+            if f <= 0:
+                logger.warning(
+                    f"`slurm.speed_factors[{k!r}]` must be > 0, got {f}. Ignoring entry."
+                )
+                continue
+            out[str(k)] = f
+        return out or None
 
 
 def resolve_sweep_dir(

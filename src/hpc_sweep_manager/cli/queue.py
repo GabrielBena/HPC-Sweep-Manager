@@ -60,29 +60,44 @@ from ..core.hpc.scheduler_queue import (
 from .common import common_options
 
 
-def _manifest_meta(sweep_dir: Path) -> tuple[List[str], Optional[int]]:
-    """Job IDs + task total from ``.hsm_manifest.json`` (SSH-Slurm sweeps).
+def _manifest_meta(sweep_dir: Path) -> List[tuple]:
+    """``[(job_id, per_job_task_total|None), ...]`` from ``.hsm_manifest.json``.
 
-    Remote-submitted sweeps record their Slurm job ids (and ``num_tasks``)
-    in the manifest, not in ``submission_summary.txt`` — without this
-    fallback the job→sweep linkage is blank for exactly the sweeps you
-    monitor from the driving workstation.
+    Remote-submitted sweeps record their Slurm job ids in the manifest, not
+    in ``submission_summary.txt`` — without this fallback the job→sweep
+    linkage is blank for exactly the sweeps you monitor from the driving
+    workstation. Newer manifests carry per-job detail under ``jobs:``
+    (multi-gpu_type sweeps legitimately submit several arrays); legacy
+    manifests fall back to the sweep-level ``num_tasks``, attributable only
+    when there's a single job.
     """
     manifest = sweep_dir / ".hsm_manifest.json"
     if not manifest.exists():
-        return [], None
+        return []
     try:
         data = json.loads(manifest.read_text())
     except (OSError, ValueError):
-        return [], None
+        return []
     if not isinstance(data, dict):
-        return [], None
+        return []
+    jobs = data.get("jobs")
+    if isinstance(jobs, list) and jobs and all(isinstance(j, dict) for j in jobs):
+        out = []
+        for j in jobs:
+            jid = j.get("job_id")
+            if jid is None:
+                continue
+            n = j.get("num_tasks")
+            out.append((str(jid), n if isinstance(n, int) and n > 0 else None))
+        if out:
+            return out
     job_ids = data.get("job_ids")
     if not isinstance(job_ids, list):
-        return [], None  # corrupt manifest must not masquerade as a query failure
+        return []  # corrupt manifest must not masquerade as a query failure
     num_tasks = data.get("num_tasks")
     total = num_tasks if isinstance(num_tasks, int) and num_tasks > 0 else None
-    return [str(j) for j in job_ids], total
+    per_job = total if len(job_ids) == 1 else None
+    return [(str(j), per_job) for j in job_ids]
 
 
 def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
@@ -105,11 +120,13 @@ def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
             continue
         meta = _load_sweep_meta(sweep_dir)
         job_ids = [str(j) for j in (meta.get("job_ids") or [])]
-        total: Optional[int] = meta.get("total_combinations") or None
-        if not job_ids:
-            job_ids, total = _manifest_meta(sweep_dir)
-        per_job_total = total if len(job_ids) == 1 else None
-        for job_id in job_ids:
+        if job_ids:
+            total: Optional[int] = meta.get("total_combinations") or None
+            per_job_total = total if len(job_ids) == 1 else None
+            pairs = [(j, per_job_total) for j in job_ids]
+        else:
+            pairs = _manifest_meta(sweep_dir)
+        for job_id, per_job_total in pairs:
             index[strip_array_suffix(job_id)] = (meta["sweep_id"], per_job_total)
     return index
 

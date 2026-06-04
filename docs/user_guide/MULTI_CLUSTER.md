@@ -303,6 +303,12 @@ tasks, and `hsm queue mine` shows one entry (with a `×N` Tasks count)
 instead of N rows. Submission is also one ssh + sbatch round-trip
 instead of N.
 
+The per-remote `spec.gpu_type` also accepts a **list** (e.g.
+`[A100, H200]`) with a sibling `speed_factors:` map — HSM then splits
+the sweep into one Slurm array per GPU type, biasing expensive tasks
+toward fast types and scaling each sub-array's walltime. See
+[HPC_EXECUTION.md → Heterogeneous GPU types](HPC_EXECUTION.md#heterogeneous-gpu-types--one-sweep-one-slurm-array-per-type).
+
 Use distributed when you genuinely want heterogeneous fan-out (mix of
 local + SSH workstation + cluster). For "I just want this on S3IT,"
 `--remote uzh --mode array` is faster, cheaper, and easier to inspect.

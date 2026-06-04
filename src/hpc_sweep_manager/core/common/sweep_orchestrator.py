@@ -316,6 +316,9 @@ def build_compute_source(
         if effective_qos_whitelist is None and hsm_config is not None:
             effective_qos_whitelist = hsm_config.get_slurm_qos_whitelist()
 
+        speed_factors = (
+            hsm_config.get_slurm_speed_factors() if hsm_config is not None else None
+        )
         source = SlurmComputeSource(
             python_path=python_path,
             script_path=script_path,
@@ -323,6 +326,7 @@ def build_compute_source(
             default_spec=default_spec,
             qos_whitelist=effective_qos_whitelist,
             conda_env=project_conda_env,
+            speed_factors=speed_factors,
         )
         submission_mode: SubmissionMode = "array" if mode == "array" else "individual"
         return source, mode, submission_mode
@@ -343,12 +347,15 @@ async def run_sweep_async(
     wait: bool = True,
     poll_interval: float = 10.0,
     on_progress: Optional[Callable[[int, int], None]] = None,
+    costs: Optional[list[float]] = None,
 ) -> SweepResult:
     """Drive a sweep through setup → submit_batch → wait_for_all.
 
     This is the canonical lifecycle every ``ComputeSource`` is built around.
     Callers that already have a configured source should prefer this over
-    re-implementing the dance.
+    re-implementing the dance. ``costs`` (optional, parallel to
+    ``params_list``) are per-task relative cost hints for heterogeneous
+    placement — see ``core/hpc/gpu_planner``.
     """
     if not await source.setup(sweep_dir, sweep_id):
         raise RuntimeError(
@@ -362,6 +369,7 @@ async def run_sweep_async(
         spec=spec,
         wandb_group=wandb_group,
         job_name_prefix=job_name_prefix,
+        costs=costs,
     )
 
     final_statuses: dict[str, str] = {}
