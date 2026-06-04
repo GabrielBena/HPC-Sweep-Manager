@@ -25,7 +25,12 @@ class ResourceSpec:
     mem: str | None = None
     mem_per_cpu: str | None = None
     gpus: int | None = None
-    gpu_type: str | None = None
+    # A single GRES type name ("h100"), or a tuple of allowed types for
+    # heterogeneous scheduling ("multi-type spec", issue #7) — the Slurm
+    # sources split a multi-type array submission into one sub-array per
+    # type via core/hpc/gpu_planner.py. Backends render only SCALAR types;
+    # render_sbatch_directives raises on a tuple to catch unplanned paths.
+    gpu_type: str | tuple[str, ...] | None = None
     partition: str | None = None
     qos: str | None = None
     account: str | None = None
@@ -44,12 +49,29 @@ class ResourceSpec:
             raise ValueError(f"ResourceSpec: gpus must be >= 0, got {self.gpus}")
         if self.gpu_type is not None and (self.gpus is None or self.gpus < 1):
             raise ValueError("ResourceSpec: gpu_type requires gpus >= 1")
+        if isinstance(self.gpu_type, tuple):
+            if not self.gpu_type:
+                raise ValueError(
+                    "ResourceSpec: gpu_type list must be non-empty (omit the "
+                    "field for 'any GPU')"
+                )
+            for t in self.gpu_type:
+                if not isinstance(t, str) or not t:
+                    raise ValueError(
+                        f"ResourceSpec: gpu_type entries must be non-empty "
+                        f"strings, got {t!r}"
+                    )
         for mod in self.modules:
             if not isinstance(mod, str) or not mod:
                 raise ValueError(f"ResourceSpec: modules must be non-empty strings, got {mod!r}")
         for line in self.pre_script:
             if not isinstance(line, str):
                 raise ValueError(f"ResourceSpec: pre_script entries must be strings, got {line!r}")
+
+    @property
+    def is_multi_gpu_type(self) -> bool:
+        """True when this spec allows several GPU types (needs planning)."""
+        return isinstance(self.gpu_type, tuple) and len(self.gpu_type) > 1
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ResourceSpec:
@@ -64,6 +86,14 @@ class ResourceSpec:
                 normalized[k] = tuple(v) if not isinstance(v, str) else (v,)
             elif k == "pre_script":
                 normalized[k] = tuple(v) if not isinstance(v, str) else (v,)
+            elif k == "gpu_type":
+                if isinstance(v, (list, tuple)):
+                    items = tuple(v)
+                    # A singleton list IS the scalar case — keep the simple
+                    # path (no planner, no walltime scaling) for it.
+                    normalized[k] = items[0] if len(items) == 1 else items
+                else:
+                    normalized[k] = v
             elif k == "extra_directives":
                 if isinstance(v, dict):
                     normalized[k] = tuple((str(kk), str(vv)) for kk, vv in v.items())

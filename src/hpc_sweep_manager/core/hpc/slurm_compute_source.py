@@ -18,12 +18,13 @@ import logging
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.push_exec import resolve_run_prefix
+from .gpu_planner import SubArraySubmission, build_array_submissions
 from .slurm_protocol import (
     SLURM_STATE_MAP,
     parse_sacct_state,
@@ -62,6 +63,7 @@ class SlurmComputeSource(ComputeSource):
         default_spec: Optional[ResourceSpec] = None,
         qos_whitelist: Optional[frozenset[str]] = None,
         conda_env: Optional[str] = None,
+        speed_factors: Optional[Dict[str, float]] = None,
     ):
         # 0 means "no client-side cap" — the cluster's own scheduler decides.
         super().__init__(name, "slurm", max_parallel_jobs or 10_000)
@@ -80,6 +82,9 @@ class SlurmComputeSource(ComputeSource):
         self.project_dir = project_dir
         self.default_spec = default_spec or ResourceSpec()
         self.qos_whitelist = qos_whitelist
+        # GPU type → relative runtime multiplier; parameterizes the
+        # multi-gpu_type planner (core/hpc/gpu_planner). None = all 1.0.
+        self.speed_factors = dict(speed_factors) if speed_factors else None
         self.sweep_dir: Optional[Path] = None
         self.sweep_id: Optional[str] = None
 
@@ -205,13 +210,18 @@ class SlurmComputeSource(ComputeSource):
         spec: Optional[ResourceSpec] = None,
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
+        costs: Optional[Sequence[float]] = None,
     ) -> List[str]:
         if mode == "array":
-            return [
-                await self._submit_array(
-                    params_list, sweep_id, spec, wandb_group, job_name_prefix
-                )
-            ]
+            return await self._submit_array(
+                params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
+            )
+        effective = self._effective_spec(spec)
+        if isinstance(effective.gpu_type, tuple):
+            raise ValueError(
+                "Multi-type gpu_type lists are supported in array mode only "
+                "— use `--mode array` (one Slurm array per GPU type)."
+            )
         return await super().submit_batch(
             params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
         )
@@ -223,41 +233,64 @@ class SlurmComputeSource(ComputeSource):
         spec: Optional[ResourceSpec],
         wandb_group: Optional[str],
         job_name_prefix: Optional[str],
-    ) -> str:
+        costs: Optional[Sequence[float]] = None,
+    ) -> List[str]:
+        """Submit the sweep as 1..K Slurm arrays (K > 1 for multi-type specs).
+
+        Mirrors ``SSHSlurmComputeSource._submit_array`` — both build their
+        sub-array descriptors from the same pure
+        :func:`gpu_planner.build_array_submissions`, so the partitioning
+        cannot drift between transports.
+        """
         if not params_list:
             raise ValueError("Cannot submit an empty array")
         effective = self._effective_spec(spec)
-        directives = render_sbatch_directives(effective)
+        submissions = build_array_submissions(
+            params_list=params_list,
+            effective_spec=effective,
+            prefix=job_name_prefix or sweep_id,
+            speed_factors=self.speed_factors,
+            costs=costs,
+        )
+        return [
+            await self._submit_one_array(sub, sweep_id, wandb_group)
+            for sub in submissions
+        ]
+
+    async def _submit_one_array(
+        self,
+        sub: SubArraySubmission,
+        sweep_id: str,
+        wandb_group: Optional[str],
+    ) -> str:
+        directives = render_sbatch_directives(sub.spec)
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
 
-        prefix = job_name_prefix or sweep_id
-        job_name = f"{prefix}_array"
-
-        params_file = self.sweep_dir / "parameter_combinations.json"  # type: ignore[union-attr]
-        indexed = [
-            {"index": i + 1, "global_index": i + 1, "params": p}
-            for i, p in enumerate(params_list)
-        ]
-        params_file.write_text(json.dumps(indexed, indent=2))
+        # "index" is array-local (matched against $SLURM_ARRAY_TASK_ID);
+        # "global_index" keeps the task's original 1..N position so
+        # tasks/task_%04d stays globally numbered across sub-arrays.
+        params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
+        params_file.write_text(json.dumps(list(sub.entries), indent=2))
 
         script_content = render_template(
             "slurm_array.sh.j2",
-            job_name=job_name,
+            job_name=sub.job_name,
             sweep_id=sweep_id,
-            num_jobs=len(params_list),
+            num_jobs=len(sub.entries),
             logs_dir=str(logs_dir),
             tasks_dir=str(tasks_dir),
             params_file=str(params_file),
             sbatch_directives=directives,
-            modules=list(effective.modules),
-            pre_script=list(effective.pre_script),
+            modules=list(sub.spec.modules),
+            pre_script=list(sub.spec.pre_script),
             project_dir=self.project_dir,
             python_path=self.python_path,
             script_path=self.script_path,
             wandb_group=wandb_group,
             uses_conda=_python_needs_conda_init(self.python_path),
+            gpu_type=sub.gpu_type,
         )
-        script_path = scripts_dir / f"{job_name}.slurm"
+        script_path = scripts_dir / f"{sub.job_name}.slurm"
         script_path.write_text(script_content)
 
         result = await asyncio.to_thread(
@@ -272,18 +305,23 @@ class SlurmComputeSource(ComputeSource):
             )
         job_id = parse_sbatch_job_id(result.stdout)
 
+        params: Dict[str, Any] = {"_array_size": len(sub.entries)}
+        if sub.gpu_type:
+            params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
             job_id=job_id,
-            job_name=job_name,
-            params={"_array_size": len(params_list)},
+            job_name=sub.job_name,
+            params=params,
             source_name=self.name,
             status="PENDING",
             submit_time=datetime.now(),
             task_dir=str(tasks_dir),
         )
-        self.stats.total_submitted += len(params_list)
+        self.stats.total_submitted += len(sub.entries)
+        gpu_note = f", gpu_type={sub.gpu_type}" if sub.gpu_type else ""
         logger.info(
-            f"Submitted Slurm array job {job_id} ({job_name}, {len(params_list)} tasks)"
+            f"Submitted Slurm array job {job_id} ({sub.job_name}, "
+            f"{len(sub.entries)} tasks{gpu_note})"
         )
         return job_id
 

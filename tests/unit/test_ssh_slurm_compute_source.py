@@ -300,6 +300,92 @@ class TestSubmit:
         assert loaded[0] == {"index": 1, "global_index": 1, "params": {"seed": 0}}
 
     @pytest.mark.asyncio
+    async def test_submit_array_multi_gpu_type_splits(self, tmp_path):
+        """Issue #7: gpu_type tuple → one sub-array per type, partitioned
+        params files (array-local index, original global_index), per-type
+        walltimes, and a manifest with per-job detail."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 222\n"))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
+            ),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+            fake_conn=conn,
+        )
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_1"
+        await src.setup(sweep_dir, "sweep_1")
+        ids = await src.submit_batch(
+            params_list=[{"seed": i} for i in range(4)],
+            sweep_id="sweep_1",
+            mode="array",
+            job_name_prefix="sweep_1",
+        )
+        assert ids == ["111", "222"]
+
+        # Two params files, one per type, with array-local `index` and
+        # original `global_index` (union covers every task exactly once).
+        cat_params = [
+            c for c in conn.run_calls
+            if c["cmd"].startswith("cat > ") and "parameter_combinations_" in c["cmd"]
+        ]
+        assert len(cat_params) == 2
+        all_globals = []
+        for c in cat_params:
+            entries = json.loads(c["input"])
+            assert [e["index"] for e in entries] == list(range(1, len(entries) + 1))
+            all_globals.extend(e["global_index"] for e in entries)
+        assert sorted(all_globals) == [1, 2, 3, 4]
+
+        # Rendered scripts carry per-type --gres and SCALED walltime.
+        cat_scripts = [
+            c for c in conn.run_calls
+            if c["cmd"].startswith("cat > ") and c["cmd"].rstrip("'\"").endswith(".slurm")
+        ]
+        assert len(cat_scripts) == 2
+        rendered = "\n".join(c["input"] for c in cat_scripts)
+        assert "--gres=gpu:A100:1" in rendered
+        assert "--gres=gpu:H200:1" in rendered
+        assert "#SBATCH --time=10:00:00" in rendered  # a100 (factor 1.0)
+        assert "#SBATCH --time=05:00:00" in rendered  # h200 (factor 0.5)
+        assert 'echo "GPU Type: A100"' in rendered
+        assert 'echo "GPU Type: H200"' in rendered
+
+        # JobInfo per sub-array records its type + size.
+        types = {src.active_jobs[j].params.get("_gpu_type") for j in ids}
+        assert types == {"A100", "H200"}
+
+        # Manifest gains per-job detail (and keeps the legacy fields).
+        manifest = json.loads((sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["job_ids"] == ["111", "222"]
+        assert manifest["num_tasks"] == 4
+        jobs = {j["job_id"]: j for j in manifest["jobs"]}
+        assert jobs["111"]["gpu_type"] in ("A100", "H200")
+        assert sum(j["num_tasks"] for j in manifest["jobs"]) == 4
+
+    @pytest.mark.asyncio
+    async def test_multi_gpu_type_individual_mode_rejected(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(gpus=1, gpu_type=("A100", "H200")),
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        with pytest.raises(ValueError, match="array mode"):
+            await src.submit_batch(
+                params_list=[{"seed": 0}], sweep_id="sweep_1", mode="individual"
+            )
+
+    @pytest.mark.asyncio
     async def test_submit_array_rejects_empty(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(

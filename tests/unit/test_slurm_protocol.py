@@ -65,3 +65,29 @@ class TestParseSacctState:
 
     def test_array_failed_beats_cancelled(self):
         assert parse_sacct_state("FAILED\nCANCELLED\nCOMPLETED\n") == "FAILED"
+
+
+class TestRenderRejectsMultiType:
+    """A multi-type spec reaching the renderer means some path skipped the
+    planner — refuse loudly instead of emitting a broken --gres."""
+
+    def test_tuple_gpu_type_raises(self):
+        import pytest
+
+        from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+        from hpc_sweep_manager.core.hpc.slurm_protocol import (
+            render_sbatch_directives,
+        )
+
+        spec = ResourceSpec(gpus=1, gpu_type=("A100", "H200"))
+        with pytest.raises(ValueError, match="scalarize via gpu_planner"):
+            render_sbatch_directives(spec)
+
+    def test_scalar_gpu_type_still_renders(self):
+        from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+        from hpc_sweep_manager.core.hpc.slurm_protocol import (
+            render_sbatch_directives,
+        )
+
+        out = render_sbatch_directives(ResourceSpec(gpus=2, gpu_type="H100"))
+        assert "#SBATCH --gres=gpu:H100:2" in out

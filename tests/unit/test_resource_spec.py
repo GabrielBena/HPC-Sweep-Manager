@@ -132,6 +132,49 @@ class TestResourceSpecFromDict:
         assert spec.qos is None
 
 
+class TestMultiGpuType:
+    """gpu_type as a LIST — heterogeneous scheduling (issue #7)."""
+
+    def test_list_normalizes_to_tuple(self):
+        spec = ResourceSpec.from_dict({"gpus": 1, "gpu_type": ["A100", "H200"]})
+        assert spec.gpu_type == ("A100", "H200")
+        assert spec.is_multi_gpu_type
+
+    def test_singleton_list_degenerates_to_scalar(self):
+        # [A100] ≡ A100 — keeps the simple no-planner path.
+        spec = ResourceSpec.from_dict({"gpus": 1, "gpu_type": ["A100"]})
+        assert spec.gpu_type == "A100"
+        assert not spec.is_multi_gpu_type
+
+    def test_scalar_unchanged(self):
+        spec = ResourceSpec.from_dict({"gpus": 1, "gpu_type": "H100"})
+        assert spec.gpu_type == "H100"
+        assert not spec.is_multi_gpu_type
+
+    def test_empty_list_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="non-empty"):
+            ResourceSpec(gpus=1, gpu_type=())
+
+    def test_non_string_entries_rejected(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="non-empty strings"):
+            ResourceSpec(gpus=1, gpu_type=("A100", 7))
+
+    def test_tuple_still_requires_gpus(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="gpus >= 1"):
+            ResourceSpec(gpu_type=("A100", "H200"))
+
+    def test_merge_overrides_wholesale(self):
+        base = ResourceSpec(gpus=1, gpu_type="A100")
+        merged = base.merge({"gpus": 1, "gpu_type": ["A100", "H200"]})
+        assert merged.gpu_type == ("A100", "H200")
+
+
 class TestResourceSpecMerge:
     def test_merge_none_returns_self(self):
         spec = ResourceSpec(walltime="04:00:00")

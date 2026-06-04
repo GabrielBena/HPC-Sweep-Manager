@@ -54,6 +54,15 @@ def render_sbatch_directives(spec: ResourceSpec) -> str:
     if spec.mem_per_cpu:
         lines.append(f"#SBATCH --mem-per-cpu={spec.mem_per_cpu}")
     if spec.gpus is not None and spec.gpus > 0:
+        if isinstance(spec.gpu_type, tuple):
+            # Multi-type specs must be split into one sub-array per type
+            # (core/hpc/gpu_planner.plan_gpu_split) and scalarized BEFORE
+            # rendering — refusing here catches any path that forgot.
+            raise ValueError(
+                "render_sbatch_directives: gpu_type is a multi-type list "
+                f"({list(spec.gpu_type)}); scalarize via gpu_planner before "
+                "rendering (array mode splits one sub-array per type)"
+            )
         if spec.gpu_type:
             lines.append(f"#SBATCH --gres=gpu:{spec.gpu_type}:{spec.gpus}")
         else:

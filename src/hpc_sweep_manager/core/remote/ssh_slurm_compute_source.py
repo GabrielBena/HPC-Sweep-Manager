@@ -57,6 +57,11 @@ from ..common.compute_source import (
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..hpc.scheduler_queue import parse_reservations_output
+from ..hpc.gpu_planner import (
+    SubArraySubmission,
+    build_array_submissions,
+    jobs_manifest_entries,
+)
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
     parse_sacct_state,
@@ -100,6 +105,7 @@ class SSHSlurmComputeSource(ComputeSource):
         rsync_excludes: Optional[Sequence[str]] = None,
         keep_remote_on_success: bool = False,
         qos_whitelist: Optional[frozenset[str]] = None,
+        speed_factors: Optional[Dict[str, float]] = None,
     ):
         # max_parallel_jobs=0 -> "no client-side cap" (Slurm's own scheduler
         # decides). Matches SlurmComputeSource's convention.
@@ -147,6 +153,9 @@ class SSHSlurmComputeSource(ComputeSource):
         )
         self.keep_remote_on_success = keep_remote_on_success
         self.qos_whitelist = qos_whitelist
+        # GPU type → relative runtime multiplier; parameterizes the
+        # multi-gpu_type planner (core/hpc/gpu_planner). None = all 1.0.
+        self.speed_factors = dict(speed_factors) if speed_factors else None
 
         # Populated by setup()
         self._conn: Any = None
@@ -434,14 +443,19 @@ class SSHSlurmComputeSource(ComputeSource):
         spec: Optional[ResourceSpec] = None,
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
+        costs: Optional[Sequence[float]] = None,
     ) -> List[str]:
         if mode == "array":
-            job_ids = [
-                await self._submit_array(
-                    params_list, sweep_id, spec, wandb_group, job_name_prefix
-                )
-            ]
+            job_ids = await self._submit_array(
+                params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
+            )
         else:
+            effective = self._effective_spec(spec)
+            if isinstance(effective.gpu_type, tuple):
+                raise ValueError(
+                    "Multi-type gpu_type lists are supported in array mode "
+                    "only — use `--mode array` (one Slurm array per GPU type)."
+                )
             job_ids = await super().submit_batch(
                 params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
             )
@@ -481,6 +495,16 @@ class SSHSlurmComputeSource(ComputeSource):
             "submission_mode": submission_mode,
             "job_ids": list(job_ids),
             "num_tasks": num_tasks,
+            # Per-job detail (gpu_type, task count) — lets consumers stop
+            # guessing per-job totals from len(job_ids)==1 (multi-type
+            # sweeps legitimately have several arrays).
+            "jobs": jobs_manifest_entries(
+                job_ids,
+                {
+                    jid: (info.params or {})
+                    for jid, info in self.active_jobs.items()
+                },
+            ),
             "submitted_at": datetime.now().isoformat(),
         }
         content = json.dumps(manifest, indent=2, default=str)
@@ -552,7 +576,16 @@ class SSHSlurmComputeSource(ComputeSource):
         spec: Optional[ResourceSpec],
         wandb_group: Optional[str],
         job_name_prefix: Optional[str],
-    ) -> str:
+        costs: Optional[Sequence[float]] = None,
+    ) -> List[str]:
+        """Submit the sweep as 1..K Slurm arrays.
+
+        Single-type specs submit exactly one array (today's behavior).
+        Multi-type specs (``gpu_type`` tuple) are planned into one
+        sub-array per GPU type via :func:`gpu_planner.build_array_submissions`
+        — LPT task assignment by relative ``costs``, per-type walltimes from
+        ``speed_factors``.
+        """
         if not params_list:
             raise ValueError("Cannot submit an empty array")
         if self._conn is None or self._remote_sweep_dir is None:
@@ -560,40 +593,55 @@ class SSHSlurmComputeSource(ComputeSource):
                 f"SSHSlurmComputeSource {self.name!r} not set up; call setup() first"
             )
         effective = self._effective_spec(spec)
-        directives = render_sbatch_directives(effective)
-        prefix = job_name_prefix or sweep_id
-        job_name = f"{prefix}_array"
-
-        # parameter_combinations.json — written to the remote sweep dir
-        # so the array template's $SLURM_ARRAY_TASK_ID python helper can
-        # find it. The local mirror is created on collect_results().
-        indexed = [
-            {"index": i + 1, "global_index": i + 1, "params": p}
-            for i, p in enumerate(params_list)
+        submissions = build_array_submissions(
+            params_list=params_list,
+            effective_spec=effective,
+            prefix=job_name_prefix or sweep_id,
+            speed_factors=self.speed_factors,
+            costs=costs,
+        )
+        return [
+            await self._submit_one_array(sub, sweep_id, wandb_group)
+            for sub in submissions
         ]
-        remote_params_file = f"{self._remote_sweep_dir}/parameter_combinations.json"
+
+    async def _submit_one_array(
+        self,
+        sub: SubArraySubmission,
+        sweep_id: str,
+        wandb_group: Optional[str],
+    ) -> str:
+        directives = render_sbatch_directives(sub.spec)
+
+        # Per-(sub-)array params file — written to the remote sweep dir so
+        # the array template's $SLURM_ARRAY_TASK_ID python helper can find
+        # it ("index" is array-local; "global_index" keeps the task's
+        # original 1..N position so tasks/task_%04d stays globally
+        # numbered). The local mirror is created on collect_results().
+        remote_params_file = f"{self._remote_sweep_dir}/{sub.params_filename}"
         await self._write_remote_file(
-            remote_params_file, json.dumps(indexed, indent=2)
+            remote_params_file, json.dumps(list(sub.entries), indent=2)
         )
 
         script_content = render_template(
             "slurm_array.sh.j2",
-            job_name=job_name,
+            job_name=sub.job_name,
             sweep_id=sweep_id,
-            num_jobs=len(params_list),
+            num_jobs=len(sub.entries),
             logs_dir=self._remote_logs_dir,
             tasks_dir=self._remote_tasks_dir,
             params_file=remote_params_file,
             sbatch_directives=directives,
-            modules=list(effective.modules),
-            pre_script=list(effective.pre_script),
+            modules=list(sub.spec.modules),
+            pre_script=list(sub.spec.pre_script),
             project_dir=self._remote_code_dir,
             python_path=self._run_prefix,
             script_path=self.script_path,
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
+            gpu_type=sub.gpu_type,
         )
-        remote_script_path = f"{self._remote_scripts_dir}/{job_name}.slurm"
+        remote_script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)
 
         result = await self._ssh_run(
@@ -609,19 +657,23 @@ class SSHSlurmComputeSource(ComputeSource):
         local_tasks_dir = self.sweep_dir / "tasks"  # type: ignore[union-attr]
         local_tasks_dir.mkdir(parents=True, exist_ok=True)
 
+        params: Dict[str, Any] = {"_array_size": len(sub.entries)}
+        if sub.gpu_type:
+            params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
             job_id=job_id,
-            job_name=job_name,
-            params={"_array_size": len(params_list)},
+            job_name=sub.job_name,
+            params=params,
             source_name=self.name,
             status="PENDING",
             submit_time=datetime.now(),
             task_dir=str(local_tasks_dir),
         )
-        self.stats.total_submitted += len(params_list)
+        self.stats.total_submitted += len(sub.entries)
+        gpu_note = f", gpu_type={sub.gpu_type}" if sub.gpu_type else ""
         logger.info(
-            f"Submitted Slurm array job {job_id} ({job_name}, "
-            f"{len(params_list)} tasks) on {self.host} via SSH"
+            f"Submitted Slurm array job {job_id} ({sub.job_name}, "
+            f"{len(sub.entries)} tasks{gpu_note}) on {self.host} via SSH"
         )
         return job_id
 
@@ -1023,6 +1075,35 @@ def build_ssh_slurm_source(
     else:
         qos_whitelist = None
 
+    # GPU type → relative runtime multiplier for multi-gpu_type planning
+    # (qos_whitelist pattern: per-remote key beside spec:, not inside it).
+    speed_factors_raw = remote_cfg.get("speed_factors")
+    speed_factors: Optional[Dict[str, float]] = None
+    if isinstance(speed_factors_raw, dict) and speed_factors_raw:
+        speed_factors = {}
+        for k, v in speed_factors_raw.items():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"remote {name!r}: speed_factors[{k!r}] is not a number "
+                    f"({v!r}). Ignoring entry."
+                )
+                continue
+            if f <= 0:
+                logger.warning(
+                    f"remote {name!r}: speed_factors[{k!r}] must be > 0, "
+                    f"got {f}. Ignoring entry."
+                )
+                continue
+            speed_factors[str(k)] = f
+        speed_factors = speed_factors or None
+    elif speed_factors_raw is not None:
+        logger.warning(
+            f"remote {name!r}: speed_factors must be a mapping of gpu type → "
+            f"number; got {type(speed_factors_raw).__name__}. Ignoring."
+        )
+
     return SSHSlurmComputeSource(
         name=name,
         host=host,
@@ -1041,4 +1122,5 @@ def build_ssh_slurm_source(
         rsync_excludes=rsync_excludes,
         keep_remote_on_success=keep_remote_on_success,
         qos_whitelist=qos_whitelist,
+        speed_factors=speed_factors,
     )

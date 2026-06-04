@@ -262,9 +262,8 @@ def _render_placement(
             else:
                 console.print(f"  Submission: {num_tasks} individual sbatch job(s)")
             if gpus_per_task:
-                gtype = f"{spec.gpu_type}:" if getattr(spec, "gpu_type", None) else ""
                 console.print(
-                    f"  GPUs: --gres=gpu:{gtype}{gpus_per_task} per task "
+                    f"  GPUs: {_describe_gres(spec, gpus_per_task)} per task "
                     "(Slurm schedules across the partition)"
                 )
             else:
@@ -287,8 +286,7 @@ def _render_placement(
                 )
                 console.print(f"  Concurrency: bounded by the remote Slurm scheduler{bound}")
                 if gpus_per_task:
-                    gtype = f"{spec.gpu_type}:" if getattr(spec, "gpu_type", None) else ""
-                    console.print(f"  GPUs/task: --gres=gpu:{gtype}{gpus_per_task}")
+                    console.print(f"  GPUs/task: {_describe_gres(spec, gpus_per_task)}")
                 else:
                     console.print("  GPUs: none requested (spec.gpus=0)")
             else:
@@ -353,6 +351,81 @@ def _render_placement(
         logger.debug(f"placement preview failed: {e}")
 
 
+def _describe_gres(spec, gpus_per_task: int) -> str:
+    """Human-readable GRES for placement display — multi-type specs show the
+    split intent instead of a bogus literal-tuple directive."""
+    gtype = getattr(spec, "gpu_type", None)
+    if isinstance(gtype, tuple):
+        alts = " | ".join(f"--gres=gpu:{t}:{gpus_per_task}" for t in gtype)
+        return f"{alts} (one sub-array per type — see split plan)"
+    prefix = f"{gtype}:" if gtype else ""
+    return f"--gres=gpu:{prefix}{gpus_per_task}"
+
+
+def _render_gpu_type_plan(
+    console: Console,
+    *,
+    combinations: list,
+    effective_spec,
+    speed_factors,
+    costs,
+) -> None:
+    """Dry-run preview of the multi-gpu_type split.
+
+    Calls the SAME ``build_array_submissions`` the Slurm sources use at
+    submit time — what's shown is exactly what would submit (single source
+    of truth, no parallel re-implementation to drift).
+    """
+    from rich.table import Table
+
+    from ..core.hpc.gpu_planner import build_array_submissions
+
+    submissions = build_array_submissions(
+        params_list=combinations,
+        effective_spec=effective_spec,
+        prefix="<sweep_id>",
+        speed_factors=speed_factors,
+        costs=costs,
+    )
+    cost_seq = costs or [1.0] * len(combinations)
+    table = Table(title="GPU-type split plan (one Slurm array per type)")
+    table.add_column("Type", style="cyan")
+    table.add_column("Factor", justify="right")
+    table.add_column("Tasks", justify="right")
+    table.add_column("Σ cost", justify="right")
+    table.add_column("Max cost", justify="right")
+    table.add_column("Walltime", justify="right")
+    for sub in submissions:
+        indices = [e["global_index"] - 1 for e in sub.entries]
+        bin_costs = [cost_seq[i] for i in indices]
+        table.add_row(
+            sub.gpu_type or "?",
+            _fmt_num(_factor_of(sub, speed_factors)),
+            str(len(sub.entries)),
+            _fmt_num(sum(bin_costs)),
+            _fmt_num(max(bin_costs)),
+            sub.spec.walltime or "-",
+        )
+    console.print()
+    console.print(table)
+    console.print(
+        "[dim]LPT assignment: costliest tasks first, each to the type with "
+        "the smallest (load + cost) × factor. Walltime = base × factor × "
+        "(bin max cost / global max cost).[/dim]"
+    )
+
+
+def _factor_of(sub, speed_factors) -> float:
+    if not speed_factors or not sub.gpu_type:
+        return 1.0
+    norm = {str(k).lower(): float(v) for k, v in speed_factors.items()}
+    return norm.get(sub.gpu_type.lower(), 1.0)
+
+
+def _fmt_num(x: float) -> str:
+    return f"{x:g}"
+
+
 def _run_sweep_via_orchestrator(
     *,
     config_path: Path,
@@ -373,6 +446,7 @@ def _run_sweep_via_orchestrator(
     remote_alias: Optional[str] = None,
     gpus_arg: Optional[str] = None,
     remote_submission: Optional[str] = None,
+    costs: Optional[list] = None,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
@@ -423,6 +497,17 @@ def _run_sweep_via_orchestrator(
     # local/native (default_spec == spec); falls back for distributed.
     effective_spec = getattr(source, "default_spec", None) or spec
 
+    # Multi-gpu_type specs split into one Slurm array per type — only array
+    # submission supports that. Fail here (before any dry-run/submission)
+    # with the actionable message rather than deep in submit_batch.
+    if isinstance(effective_spec.gpu_type, tuple) and sub_mode != "array":
+        console.print(
+            "[red]spec.gpu_type is a list — heterogeneous GPU scheduling "
+            "needs array mode (one Slurm array per type). "
+            "Pass `--mode array`.[/red]"
+        )
+        return
+
     console.print(
         f"[green]Execution backend: {source.source_type} "
         f"(mode={resolved_mode}, submission={sub_mode})[/green]"
@@ -453,6 +538,15 @@ def _run_sweep_via_orchestrator(
             if v in (None, [], {}, ()):
                 continue
             console.print(f"  {k:18s} = {v!r}")
+
+        if isinstance(effective_spec.gpu_type, tuple):
+            _render_gpu_type_plan(
+                console,
+                combinations=combinations,
+                effective_spec=effective_spec,
+                speed_factors=getattr(source, "speed_factors", None),
+                costs=costs,
+            )
 
         # Render the command as the wrapper actually runs it — including the
         # conda run-prefix. The bare interpreter path printed before bypassed
@@ -536,6 +630,7 @@ def _run_sweep_via_orchestrator(
                 wait=True,
                 poll_interval=10.0,
                 on_progress=progress_cb,
+                costs=costs,
             )
         )
     except Exception as e:
@@ -685,6 +780,15 @@ def run_sweep(
         if combinations is None:
             return
 
+        # Per-task cost hints for heterogeneous gpu_type placement (issue #7):
+        # sweep.cost_param names a swept param; sweep.cost_map optionally
+        # translates its values into measured relative costs.
+        costs = None
+        if getattr(config, "cost_param", None):
+            from ..core.hpc.gpu_planner import task_costs
+
+            costs = task_costs(combinations, config.cost_param, config.cost_map or None)
+
         python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
 
         if mode not in _ORCHESTRATOR_MODES:
@@ -712,6 +816,7 @@ def run_sweep(
             remote_alias=remote_alias,
             gpus_arg=gpus_arg,
             remote_submission=remote_submission,
+            costs=costs,
         )
 
     except FileNotFoundError:

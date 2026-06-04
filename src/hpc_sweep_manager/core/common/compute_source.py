@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
 
 from .resource_spec import ResourceSpec
 
@@ -123,6 +123,7 @@ class ComputeSource(ABC):
         spec: Optional[ResourceSpec] = None,
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
+        costs: Optional[Sequence[float]] = None,
     ) -> List[str]:
         """Submit a batch of jobs and return their IDs.
 
@@ -131,6 +132,11 @@ class ComputeSource(ABC):
         true scheduler-side array submission should override this method for
         ``mode="array"``; the default raises :class:`NotImplementedError` in
         that case.
+
+        ``costs`` (optional, parallel to ``params_list``) carries per-task
+        relative cost hints. Backends that place work across heterogeneous
+        resources (multi-``gpu_type`` Slurm sources) use them for LPT
+        assignment; everyone else ignores them.
         """
         if mode == "individual":
             prefix = job_name_prefix or sweep_id

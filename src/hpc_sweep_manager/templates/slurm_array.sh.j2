@@ -136,6 +136,11 @@ mkdir -p "$TASK_OUTPUT_DIR"
 
 echo "Slurm Array Index: $SLURM_ARRAY_TASK_ID" > "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Global Task Index: $GLOBAL_INDEX" >> "$TASK_OUTPUT_DIR/task_info.txt"
+{% if gpu_type %}
+{# Assigned by the multi-gpu_type planner — cross-arch numerics differ, so
+   analyses must be able to check for arch confounds per task. #}
+echo "GPU Type: {{ gpu_type }}" >> "$TASK_OUTPUT_DIR/task_info.txt"
+{% endif %}
 echo "Parameters: $PARAMS_JSON" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Started: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Node: $(hostname)" >> "$TASK_OUTPUT_DIR/task_info.txt"

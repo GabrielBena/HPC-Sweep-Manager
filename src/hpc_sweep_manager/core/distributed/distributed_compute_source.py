@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode, TERMINAL_STATES
 from ..common.resource_spec import ResourceSpec
@@ -248,13 +248,15 @@ class DistributedComputeSource(ComputeSource):
         spec: Optional[ResourceSpec] = None,
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
+        costs: Optional[Sequence[float]] = None,
     ) -> List[str]:
         """Run the whole sweep across children (blocks until all jobs finish).
 
         ``mode`` is ignored — distribution always fans individual jobs across
         sources; there is no scheduler-side array concept here. ``spec`` is
         likewise not applied at this level (each child source carries its own
-        ``default_spec``).
+        ``default_spec``), and ``costs`` is accepted-but-unused (per-child
+        multi-gpu_type planning is a per-remote concern, not a fan-out one).
         """
         if self._manager is None:
             raise RuntimeError(
