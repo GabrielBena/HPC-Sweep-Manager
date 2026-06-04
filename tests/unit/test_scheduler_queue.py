@@ -17,6 +17,7 @@ import pytest
 
 from hpc_sweep_manager.core.hpc.scheduler_queue import (
     SQUEUE_FORMAT,
+    JobGroup,
     QueueCommandError,
     QueueJob,
     Reservation,
@@ -24,8 +25,11 @@ from hpc_sweep_manager.core.hpc.scheduler_queue import (
     SSHSlurmQueue,
     _parse_gpu_from_tres,
     _parse_priority,
+    enrich_groups_with_accounting,
+    group_jobs_by_array,
     parse_array_task_count,
     parse_reservations_output,
+    parse_sacct_job_states,
     parse_squeue_output,
     positions_by_base,
     strip_array_suffix,
@@ -365,9 +369,10 @@ class TestArrayIdHelpers:
 
 
 def _job(job_id: str, state: str = "PENDING", gpu_count: int = 1,
-         gpu_type: Optional[str] = None, task_count: int = 1) -> QueueJob:
+         gpu_type: Optional[str] = None, task_count: int = 1,
+         reason: str = "(Priority)") -> QueueJob:
     return QueueJob(
-        job_id=job_id, name="n", user="u", state=state, reason="(Priority)",
+        job_id=job_id, name="n", user="u", state=state, reason=reason,
         partition="standard", tres_per_node="", expected_start="N/A",
         priority=0, gpu_count=gpu_count, gpu_type=gpu_type, task_count=task_count,
     )
@@ -420,6 +425,127 @@ class TestCountingPathsExpandArrays:
         cmd = self._capture_cmd(lambda: SlurmQueue().list_user_jobs("alice"))
         assert "-r" not in cmd
         assert "-u" in cmd and "alice" in cmd
+
+
+# ------------------------------------------------------- grouped mine helpers
+
+
+def _group(base_id: str, **kw) -> JobGroup:
+    defaults = dict(
+        name="n", user="u", partition="standard",
+        gpu_count=0, gpu_type=None, is_array=True,
+    )
+    defaults.update(kw)
+    return JobGroup(base_id=base_id, **defaults)
+
+
+class TestGroupJobsByArray:
+    def test_mixed_array_aggregation(self):
+        jobs = [
+            _job("9001_1", state="RUNNING", gpu_type="A100", reason="node-a"),
+            _job("9001_2", state="RUNNING", gpu_type="A100", reason="node-a"),
+            _job("9001_3", state="RUNNING", gpu_type="A100", reason="node-b"),
+            _job("9001_[5-10]", state="PENDING", gpu_type="A100", task_count=6),
+            _job("7777", state="PENDING", gpu_count=0, reason="(Resources)"),
+        ]
+        groups = group_jobs_by_array(jobs)
+        assert [g.base_id for g in groups] == ["9001", "7777"]  # first-seen order
+        arr, single = groups
+        assert arr.is_array and not single.is_array
+        assert arr.running == 3
+        assert arr.pending == 6  # task-weighted from the collapsed row
+        assert arr.in_queue == 9
+        assert arr.nodes == ("node-a", "node-b")  # deduped
+        assert arr.reason == "(Priority)"
+        assert arr.gpu_count == 1 and arr.gpu_type == "A100"
+        assert single.pending == 1 and single.gpu_count == 0
+        assert single.reason == "(Resources)"
+
+    def test_gpu_spec_from_first_gpu_bearing_row(self):
+        jobs = [
+            _job("1_1", state="COMPLETING", gpu_count=0),
+            _job("1_2", state="RUNNING", gpu_count=1, gpu_type="L4", reason="n1"),
+        ]
+        g = group_jobs_by_array(jobs)[0]
+        assert g.gpu_count == 1 and g.gpu_type == "L4"
+        assert g.other == 1 and g.running == 1
+
+    def test_unenriched_groups_have_unknown_accounting(self):
+        g = group_jobs_by_array([_job("5_1", state="RUNNING", reason="n")])[0]
+        assert g.completed is None and g.failed is None and g.total is None
+
+
+class TestParseSacctJobStates:
+    # Shaped like the live S3IT output (sacct -j a,b -n -X -P -o JobID,State).
+    _LIVE_SHAPED = "\n".join(
+        [
+            "3703585_1|COMPLETED",
+            "3703585_2|COMPLETED",
+            "3703585_11|FAILED",
+            "3703585_9|RUNNING",
+            "3703585_[19-22]|PENDING",
+            "3710878_5|CANCELLED by 123456",
+            "3710878_6|TIMEOUT+",
+            "3710878_[859-1920]|PENDING",
+        ]
+    )
+
+    def test_live_shaped_fixture(self):
+        states = parse_sacct_job_states(self._LIVE_SHAPED)
+        assert states["3703585"] == {
+            "COMPLETED": 2, "FAILED": 1, "RUNNING": 1, "PENDING": 4,
+        }
+        # CANCELLED-by long form parsed; TIMEOUT folds into FAILED; the
+        # collapsed pending range is task-counted.
+        assert states["3710878"] == {"CANCELLED": 1, "FAILED": 1, "PENDING": 1062}
+
+    def test_empty_and_garbage(self):
+        assert parse_sacct_job_states("") == {}
+        assert parse_sacct_job_states("no pipes here\n\n") == {}
+
+    def test_unknown_state_counts_as_running(self):
+        # Same default the sweep path uses: unknown → non-terminal.
+        assert parse_sacct_job_states("1|REQUEUED\n") == {"1": {"RUNNING": 1}}
+
+
+class TestEnrichGroupsWithAccounting:
+    def test_none_states_is_noop(self):
+        out = enrich_groups_with_accounting([_group("1")], None)
+        assert out[0].completed is None and out[0].total is None
+
+    def test_merges_counts_and_total(self):
+        states = {"3703585": {"COMPLETED": 8, "FAILED": 1, "RUNNING": 9, "PENDING": 4}}
+        e = enrich_groups_with_accounting([_group("3703585")], states)[0]
+        assert e.completed == 8
+        assert e.failed == 1
+        assert e.total == 22  # sum over every state — the array's true size
+
+    def test_cancelled_folds_into_failed(self):
+        states = {"1": {"COMPLETED": 1, "CANCELLED": 2, "FAILED": 1}}
+        e = enrich_groups_with_accounting([_group("1")], states)[0]
+        assert e.failed == 3 and e.total == 4
+
+    def test_base_missing_from_states_left_unenriched(self):
+        e = enrich_groups_with_accounting([_group("42")], {"other": {"COMPLETED": 1}})[0]
+        assert e.completed is None
+
+
+class TestSacctTransports:
+    def test_local_missing_binary_returns_none(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert SlurmQueue().sacct_job_states(["1"]) is None
+
+    def test_local_rc_nonzero_returns_none(self):
+        with patch("subprocess.run", return_value=_fake_completed("", "disabled", 1)):
+            assert SlurmQueue().sacct_job_states(["1"]) is None
+
+    def test_local_happy_path(self):
+        with patch("subprocess.run", return_value=_fake_completed("1_1|COMPLETED\n")):
+            assert SlurmQueue().sacct_job_states(["1"]) == {"1": {"COMPLETED": 1}}
+
+    def test_local_empty_ids_short_circuits(self):
+        with patch("subprocess.run", side_effect=AssertionError("must not run")):
+            assert SlurmQueue().sacct_job_states([]) == {}
 
 
 # --------------------------------------------------------------- SSHSlurmQueue
@@ -536,6 +662,27 @@ class TestSSHSlurmQueue:
         assert len(res) == 1 and res[0].node_count == 3
 
     @pytest.mark.asyncio
+    async def test_sacct_failure_returns_none_not_raise(self):
+        """Deliberate asymmetry: sacct is optional enrichment — a cluster
+        without accounting must degrade, not error (unlike squeue)."""
+        conn = FakeConn()
+        conn.add("sacct", _Result(1, "", "Slurm accounting storage is disabled"))
+        assert await SSHSlurmQueue(conn).sacct_job_states(["1"]) is None
+
+    @pytest.mark.asyncio
+    async def test_sacct_happy_path(self):
+        conn = FakeConn()
+        conn.add("sacct", _Result(0, "1_1|COMPLETED\n1_2|FAILED\n"))
+        states = await SSHSlurmQueue(conn).sacct_job_states(["1"])
+        assert states == {"1": {"COMPLETED": 1, "FAILED": 1}}
+
+    @pytest.mark.asyncio
+    async def test_sacct_empty_ids_short_circuits(self):
+        conn = FakeConn()
+        assert await SSHSlurmQueue(conn).sacct_job_states([]) == {}
+        assert conn.run_calls == []  # "nothing to ask" ≠ a remote round-trip
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "method,args",
         [
@@ -543,6 +690,7 @@ class TestSSHSlurmQueue:
             ("pending_gpu_jobs_sorted", ()),
             ("gpu_summary", ()),
             ("reservations", ()),
+            ("sacct_job_states", (["1", "2"],)),
         ],
     )
     async def test_same_commands_as_local_transport(self, method, args):

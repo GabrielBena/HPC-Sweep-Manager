@@ -46,22 +46,46 @@ throttle, not a count). `hsm queue` handles this in both directions:
 - **display paths** (`mine`) keep the compact collapsed row and show a
   `Tasks` column (`×1231`).
 
-## `hsm queue mine [--remote ALIAS] [--watch [--refresh N]]`
+## `hsm queue mine [--flat] [--remote ALIAS] [--watch [--refresh N]]`
 
-Your jobs (any state) in a single rich table with:
+**One row per array** (running array tasks would otherwise be one squeue
+row *each* — hundreds of near-identical lines mid-sweep):
 
-| Column | Meaning |
+```
+                                 My queue (gbena) — grouped by array
+┏━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━┓
+┃ Job ID  ┃ Name                        ┃ Tasks            ┃ Progress            ┃    GPU ┃ Where / Why ┃
+┡━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━┩
+│ 3703585 │ sweep_20260603_224456_array │ ▶9 ⏳4 ✓8 ✗1     │ ▰▰▰▰▱▱▱▱▱▱ 9/22     │ 1×A100 │ 3 nodes     │
+│ 3710878 │ sweep_20260604_092647_array │ ▶360 ⏳1062 ✓498 │ ▰▰▰▱▱▱▱▱▱▱ 498/1920 │        │ 65 nodes    │
+└─────────┴─────────────────────────────┴──────────────────┴─────────────────────┴────────┴─────────────┘
+2 array(s) · 1435 task(s) in queue (369 running, 1066 pending) · 507 finished · 1 FAILED
+```
+
+(A `Sweep` column — elided above for width — links each job to its local
+sweep dir; see below.)
+
+| Cell | Meaning / source |
 |---|---|
-| Job ID | Slurm job id, including `_N` (array task) or `_[a-b%t]` (collapsed pending range). |
-| State | `PENDING` / `RUNNING` / `COMPLETING` / `FAILED` / ... with color. |
-| Name | Slurm job name (HSM uses `<sweep_id>_array` for array submissions). |
-| Reason / Node | `(Resources)` = next-up; `(Priority)` = waiting on others; `(QOSMaxJobsPerUserLimit)` = your own QoS cap; or the running node list. |
-| Tasks | `×N` for collapsed pending array rows. |
-| GPU | `1×H100` etc.; blank for CPU-only jobs. |
-| Sweep | The local sweep ID this job belongs to. Looked up from `sweeps/outputs/*/submission_summary.txt` (local/array submissions) **and** `.hsm_manifest.json` (SSH-Slurm submissions). Blank if no match — e.g. when the sweep was driven from a different project or machine. |
+| Tasks | `▶` running + `⏳` pending (squeue, live, task-weighted) · `✓` completed + `✗` failed/cancelled (**sacct accounting** — these tasks already left the queue and are invisible to squeue). `✗` is omitted when 0; both are omitted when accounting is unavailable. |
+| Progress | 10-segment bar + `finished/total`. Total is the array's true size from sacct (or, failing that, the sweep's `num_tasks` from local metadata). No known total → `—`, never a guess. |
+| Where / Why | Running → node name (or `N nodes`); pending-only → squeue reason (`(Priority)`, `(QOSMaxJobsPerUserLimit)`, ...). |
+| GPU | Per-task GPU spec, `1×A100` etc. |
+| Sweep | The local sweep ID, from `sweeps/outputs/*/submission_summary.txt` (local/array submissions) **and** `.hsm_manifest.json` (SSH-Slurm). Blank when the sweep was driven from a different project/machine. |
 
-A footer totals it up (`2 queue rows · 1216 tasks`). Run it from the
-project directory that launched the sweeps to get the `Sweep` linkage.
+The footer aggregates everything and shouts `N FAILED` in red when
+accounting reports failures — a failed array task no longer hides among
+hundreds of running siblings.
+
+**`--flat`** restores the per-task view (one row per running task,
+collapsed pending ranges with a `×N` Tasks column) when you need to find
+a *specific* task.
+
+**Degradation:** clusters without accounting (`sacct` missing or
+disabled) lose only ✓/✗ and exact totals — the view falls back to sweep
+metadata for totals and notes `no accounting data`. Run from the project
+directory that launched the sweeps to get the `Sweep` linkage and the
+metadata fallback.
 
 ## `hsm queue position [JOB_ID] [--remote ALIAS]`
 

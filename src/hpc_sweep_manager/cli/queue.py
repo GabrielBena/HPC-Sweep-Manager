@@ -43,12 +43,15 @@ from rich.table import Table
 
 from ..core.common.config import HSMConfig
 from ..core.hpc.scheduler_queue import (
+    JobGroup,
     QueueCommandError,
     QueueJob,
     Reservation,
     SlurmQueue,
     SSHSlurmQueue,
+    enrich_groups_with_accounting,
     find_queue_position,
+    group_jobs_by_array,
     positions_by_base,
     slurm_available,
     strip_array_suffix,
@@ -56,47 +59,57 @@ from ..core.hpc.scheduler_queue import (
 from .common import common_options
 
 
-def _manifest_job_ids(sweep_dir: Path) -> List[str]:
-    """Job IDs from ``.hsm_manifest.json`` (SSH-Slurm sweeps).
+def _manifest_meta(sweep_dir: Path) -> tuple[List[str], Optional[int]]:
+    """Job IDs + task total from ``.hsm_manifest.json`` (SSH-Slurm sweeps).
 
-    Remote-submitted sweeps record their Slurm job ids in the manifest, not
-    in ``submission_summary.txt`` — without this fallback the job→sweep
-    linkage is blank for exactly the sweeps you monitor from the driving
-    workstation.
+    Remote-submitted sweeps record their Slurm job ids (and ``num_tasks``)
+    in the manifest, not in ``submission_summary.txt`` — without this
+    fallback the job→sweep linkage is blank for exactly the sweeps you
+    monitor from the driving workstation.
     """
     manifest = sweep_dir / ".hsm_manifest.json"
     if not manifest.exists():
-        return []
+        return [], None
     try:
         data = json.loads(manifest.read_text())
     except (OSError, ValueError):
-        return []
-    job_ids = data.get("job_ids") if isinstance(data, dict) else None
+        return [], None
+    if not isinstance(data, dict):
+        return [], None
+    job_ids = data.get("job_ids")
     if not isinstance(job_ids, list):
-        return []  # corrupt manifest must not masquerade as a query failure
-    return [str(j) for j in job_ids]
+        return [], None  # corrupt manifest must not masquerade as a query failure
+    num_tasks = data.get("num_tasks")
+    total = num_tasks if isinstance(num_tasks, int) and num_tasks > 0 else None
+    return [str(j) for j in job_ids], total
 
 
-def _build_sweep_id_index(sweeps_root: Path) -> Dict[str, str]:
-    """Walk local sweep dirs and build a ``{base_job_id: sweep_id}`` map.
+def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
+    """Walk local sweep dirs → ``{base_job_id: (sweep_id, array_total|None)}``.
 
-    Job IDs come from ``submission_summary.txt`` (local/array submissions,
-    via :func:`cli.sweep._load_sweep_meta` so we don't drift from the
-    canonical parser) with a fallback to ``.hsm_manifest.json`` (SSH-Slurm
-    submissions).
+    Job IDs and totals come from ``submission_summary.txt`` (local/array
+    submissions, via :func:`cli.sweep._load_sweep_meta` so we don't drift
+    from the canonical parser) with a fallback to ``.hsm_manifest.json``
+    (SSH-Slurm). A total is attributed only when the sweep maps to a SINGLE
+    job id (one array == whole sweep); for individual-mode sweeps (N
+    one-task jobs) a per-job total would be a lie.
     """
     from .sweep import _load_sweep_meta
 
-    index: Dict[str, str] = {}
+    index: Dict[str, tuple] = {}
     if not sweeps_root.exists():
         return index
     for sweep_dir in sorted(sweeps_root.iterdir()):
         if not sweep_dir.is_dir():
             continue
         meta = _load_sweep_meta(sweep_dir)
-        job_ids = meta.get("job_ids") or _manifest_job_ids(sweep_dir)
+        job_ids = [str(j) for j in (meta.get("job_ids") or [])]
+        total: Optional[int] = meta.get("total_combinations") or None
+        if not job_ids:
+            job_ids, total = _manifest_meta(sweep_dir)
+        per_job_total = total if len(job_ids) == 1 else None
         for job_id in job_ids:
-            index[strip_array_suffix(job_id)] = meta["sweep_id"]
+            index[strip_array_suffix(job_id)] = (meta["sweep_id"], per_job_total)
     return index
 
 
@@ -146,6 +159,9 @@ class _LocalQueueAsync:
         # a facade missing a twin's method is a local-mode-only AttributeError
         # waiting to happen.
         return self._q.position_in_gpu_queue(job_id)
+
+    async def sacct_job_states(self, base_ids) -> Optional[Dict[str, Dict[str, int]]]:
+        return self._q.sacct_job_states(base_ids)
 
     async def reservations(self) -> List[Reservation]:
         return self._q.reservations()
@@ -318,11 +334,12 @@ def _watch_options(func):
 
 
 def _render_mine(console: Console, user: str, jobs: List[QueueJob]) -> None:
+    """Flat (per-task) view — the `--flat` escape hatch."""
     if not jobs:
         console.print(f"[dim]No jobs in queue for {user!r}.[/dim]")
         return
 
-    sweep_index = _build_sweep_id_index(Path.cwd() / "sweeps" / "outputs")
+    meta_index = _build_sweep_meta_index(Path.cwd() / "sweeps" / "outputs")
 
     table = Table(title=f"My queue ({user})")
     table.add_column("Job ID", style="cyan", no_wrap=True)
@@ -337,7 +354,7 @@ def _render_mine(console: Console, user: str, jobs: List[QueueJob]) -> None:
         total_tasks += j.task_count
         gpu_cell = f"{j.gpu_count}×{j.gpu_type}" if j.gpu_type else str(j.gpu_count or "")
         tasks_cell = f"×{j.task_count}" if j.task_count > 1 else ""
-        sweep = sweep_index.get(strip_array_suffix(j.job_id), "")
+        sweep = meta_index.get(strip_array_suffix(j.job_id), ("", None))[0]
         table.add_row(
             j.job_id,
             f"[{_state_color(j.state)}]{j.state}[/{_state_color(j.state)}]",
@@ -349,6 +366,110 @@ def _render_mine(console: Console, user: str, jobs: List[QueueJob]) -> None:
         )
     console.print(table)
     console.print(f"[dim]{len(jobs)} queue rows · {total_tasks} tasks.[/dim]")
+
+
+def _bar(frac: float, width: int = 10) -> str:
+    k = max(0, min(width, round(frac * width)))
+    return "▰" * k + "▱" * (width - k)
+
+
+def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) -> None:
+    """Default `mine` view: one row per array, with live progress.
+
+    ▶/⏳ counts are squeue (live); ✓/✗ and the array total come from sacct
+    enrichment — when accounting is unavailable they're omitted and the
+    Progress bar falls back to the sweep-metadata total (or `—`): an
+    unknown is shown as unknown, never as zero.
+    """
+    if not groups:
+        console.print(f"[dim]No jobs in queue for {user!r}.[/dim]")
+        return
+
+    meta_index = _build_sweep_meta_index(Path.cwd() / "sweeps" / "outputs")
+
+    table = Table(title=f"My queue ({user}) — grouped by array")
+    table.add_column("Job ID", style="cyan", no_wrap=True)
+    table.add_column("Name", overflow="fold")
+    table.add_column("Tasks", no_wrap=True)
+    table.add_column("Progress", no_wrap=True)
+    table.add_column("GPU", justify="right")
+    table.add_column("Where / Why")
+    table.add_column("Sweep", style="magenta")
+
+    n_arrays = n_singles = 0
+    tot_running = tot_pending = tot_other = tot_finished = tot_failed = 0
+    accounting_seen = False
+    for g in groups:
+        sweep_id, meta_total = meta_index.get(g.base_id, ("", None))
+        n_arrays += 1 if g.is_array else 0
+        n_singles += 0 if g.is_array else 1
+        tot_running += g.running
+        tot_pending += g.pending
+        tot_other += g.other
+
+        parts = []
+        if g.running:
+            parts.append(f"[green]▶{g.running}[/green]")
+        if g.pending:
+            parts.append(f"[yellow]⏳{g.pending}[/yellow]")
+        if g.other:
+            parts.append(f"[dim]+{g.other}[/dim]")
+        if g.completed is not None:
+            accounting_seen = True
+            if g.completed:
+                parts.append(f"[green]✓{g.completed}[/green]")
+            if g.failed:
+                parts.append(f"[red]✗{g.failed}[/red]")
+                tot_failed += g.failed
+        tasks_cell = " ".join(parts) or "[dim]0[/dim]"
+
+        # Progress: sacct total preferred; sweep-metadata total as fallback
+        # (finished = left-the-queue, ✓/✗ split unknown); else no bar.
+        total = g.total or meta_total
+        if g.completed is not None:
+            finished: Optional[int] = g.completed + (g.failed or 0)
+        elif total:
+            finished = max(total - g.in_queue, 0)
+        else:
+            finished = None
+        if total and finished is not None:
+            frac = min(finished / total, 1.0)
+            progress_cell = f"{_bar(frac)} {finished}/{total}"
+            tot_finished += finished
+        else:
+            progress_cell = "[dim]—[/dim]"
+
+        gpu_cell = f"{g.gpu_count}×{g.gpu_type}" if g.gpu_type else str(g.gpu_count or "")
+        if g.nodes:
+            where = g.nodes[0] if len(g.nodes) == 1 else f"{len(g.nodes)} nodes"
+        else:
+            where = g.reason
+        table.add_row(
+            g.base_id, g.name, tasks_cell, progress_cell, gpu_cell, where, sweep_id
+        )
+
+    console.print(table)
+
+    footer = []
+    if n_arrays:
+        footer.append(f"{n_arrays} array(s)")
+    if n_singles:
+        footer.append(f"{n_singles} single job(s)")
+    in_queue = tot_running + tot_pending + tot_other
+    footer.append(
+        f"{in_queue} task(s) in queue ({tot_running} running, {tot_pending} pending"
+        + (f", {tot_other} other" if tot_other else "")
+        + ")"
+    )
+    if tot_finished:
+        footer.append(f"{tot_finished} finished")
+    line = "[dim]" + " · ".join(footer) + "[/dim]"
+    if tot_failed:
+        line += f" · [red]{tot_failed} FAILED[/red]"
+    elif not accounting_seen:
+        line += " [dim](no accounting data — ✓/✗ unavailable)[/dim]"
+    console.print(line)
+    console.print("[dim]`--flat` for individual tasks.[/dim]")
 
 
 _REASON_LEGEND = (
@@ -512,22 +633,46 @@ def queue():
 
 
 @queue.command("mine")
+@click.option("--flat", is_flag=True, help="One row per task (ungrouped legacy view)")
 @_remote_option
 @_watch_options
 @common_options
 @click.pass_context
-def queue_mine(ctx, remote_alias: str, watch: bool, refresh: int, verbose: bool, quiet: bool):
-    """List your jobs with sweep IDs linked back to local sweeps/outputs/."""
+def queue_mine(
+    ctx,
+    flat: bool,
+    remote_alias: str,
+    watch: bool,
+    refresh: int,
+    verbose: bool,
+    quiet: bool,
+):
+    """Your jobs grouped by array, with live progress and sweep linkage.
+
+    One row per array: running/pending counts from squeue (live),
+    completed/failed counts and the array total from sacct accounting
+    (gracefully omitted on clusters without it), sweep IDs linked back to
+    local sweeps/outputs/. Use --flat for the per-task rows.
+    """
     console = ctx.obj["console"]
     target = _resolve_queue_target(remote_alias, console)
 
     async def gather(q):
         user = await q.whoami()
-        return user, await q.list_user_jobs(user)
+        jobs = await q.list_user_jobs(user)
+        if flat:
+            return {"user": user, "jobs": jobs}
+        groups = group_jobs_by_array(jobs)
+        states = (
+            await q.sacct_job_states([g.base_id for g in groups]) if groups else {}
+        )
+        return {"user": user, "groups": enrich_groups_with_accounting(groups, states)}
 
     def render(data):
-        user, jobs = data
-        _render_mine(console, user, jobs)
+        if flat:
+            _render_mine(console, data["user"], data["jobs"])
+        else:
+            _render_mine_grouped(console, data["user"], data["groups"])
 
     _run_queue_command(
         console, target, gather, render, watch=watch, refresh=refresh, title="My queue"

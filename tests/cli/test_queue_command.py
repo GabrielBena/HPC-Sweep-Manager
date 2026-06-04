@@ -20,13 +20,19 @@ from hpc_sweep_manager.cli.queue import (
     _remote_params,
     _render_gpus,
     _render_mine,
+    _render_mine_grouped,
     _render_position_all,
     _render_position_single,
     _resolve_queue_target,
     _run_queue_command,
 )
 from hpc_sweep_manager.core.common.config import HSMConfig
-from hpc_sweep_manager.core.hpc.scheduler_queue import QueueJob
+from hpc_sweep_manager.core.hpc.scheduler_queue import (
+    JobGroup,
+    QueueJob,
+    enrich_groups_with_accounting,
+    group_jobs_by_array,
+)
 
 
 def _console_buf() -> tuple[Console, io.StringIO]:
@@ -343,6 +349,116 @@ class TestRenderPosition:
         assert "2 / 5" in out  # first task of the array sits at position 2
         assert "×4" in out
         assert "QOSMaxJobsPerUserLimit" in out  # legend mentions the QoS cap
+
+
+def _grp(base: str, running: int = 0, pending: int = 0, completed=None,
+         failed=None, total=None, gpu_type=None, is_array: bool = True,
+         nodes: tuple = (), reason: str = "") -> JobGroup:
+    return JobGroup(
+        base_id=base, name=f"name_{base}", user="gbena", partition="standard",
+        gpu_count=1 if gpu_type else 0, gpu_type=gpu_type, is_array=is_array,
+        running=running, pending=pending, nodes=nodes, reason=reason,
+        completed=completed, failed=failed, total=total,
+    )
+
+
+class TestRenderMineGrouped:
+    def test_failed_surfaced_with_progress_and_footer(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        console, buf = _console_buf()
+        _render_mine_grouped(console, "gbena", [
+            _grp("3703585", running=9, pending=4, completed=8, failed=1,
+                 total=22, gpu_type="A100", nodes=("a", "b", "c")),
+        ])
+        out = buf.getvalue()
+        assert "✓8" in out
+        assert "✗1" in out  # the whole point: failed tasks are in your face
+        assert "9/22" in out  # (✓8 + ✗1) / sacct total
+        assert "3 nodes" in out
+        assert "1 FAILED" in out  # footer aggregate
+        assert "▰" in out  # progress bar rendered
+
+    def test_zero_failed_omitted(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        console, buf = _console_buf()
+        _render_mine_grouped(console, "gbena", [
+            _grp("1", running=5, completed=5, failed=0, total=10),
+        ])
+        out = buf.getvalue()
+        assert "✗" not in out
+        assert "FAILED" not in out
+        assert "5/10" in out
+
+    def test_no_accounting_falls_back_to_manifest_total(self, tmp_path, monkeypatch):
+        """sacct unavailable → finished = manifest total − in-queue."""
+        import json as _json
+
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_y"
+        sweep_dir.mkdir(parents=True)
+        (sweep_dir / ".hsm_manifest.json").write_text(
+            _json.dumps({"sweep_id": "sweep_y", "job_ids": ["77"], "num_tasks": 10})
+        )
+        monkeypatch.chdir(tmp_path)
+        console, buf = _console_buf()
+        _render_mine_grouped(console, "gbena", [_grp("77", running=2, pending=3)])
+        out = buf.getvalue()
+        assert "5/10" in out  # 10 total − 5 in queue = 5 finished (✓/✗ unknown)
+        assert "sweep_y" in out
+        # No ✓N/✗N counts in the Tasks cell (the footer's "✓/✗ unavailable"
+        # explainer is expected to mention the glyphs themselves).
+        import re as _re
+
+        assert not _re.search(r"[✓✗]\d", out)
+        assert "no accounting data" in out
+
+    def test_no_accounting_no_total_shows_dash(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        console, buf = _console_buf()
+        _render_mine_grouped(console, "gbena", [_grp("9", running=1)])
+        out = buf.getvalue()
+        assert "—" in out  # never a faked total
+        assert "no accounting data" in out
+
+    def test_single_job_and_footer_counts(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        console, buf = _console_buf()
+        _render_mine_grouped(console, "gbena", [
+            _grp("1", running=3, pending=7, completed=2, failed=0, total=12),
+            _grp("2", pending=1, is_array=False, reason="(Resources)"),
+        ])
+        out = buf.getvalue()
+        assert "1 array(s)" in out
+        assert "1 single job(s)" in out
+        assert "11 task(s) in queue (3 running, 8 pending)" in out
+        assert "(Resources)" in out
+
+    def test_remote_grouped_end_to_end(self, monkeypatch, tmp_path):
+        """Full pipeline over FakeConn: squeue rows → groups → sacct → render."""
+        monkeypatch.chdir(tmp_path)
+        conn = FakeConn()
+        conn.add("whoami", _Result(0, "gbena\n"))
+        conn.add("squeue", _Result(0, _ROW + "\n"))  # one RUNNING A100 task
+        conn.add(
+            "sacct",
+            _Result(0, "3703585_1|COMPLETED\n3703585_11|FAILED\n3703585_14|RUNNING\n"),
+        )
+        _patch_connection(monkeypatch, conn)
+        console, buf = _console_buf()
+
+        async def gather(q):
+            user = await q.whoami()
+            groups = group_jobs_by_array(await q.list_user_jobs(user))
+            states = await q.sacct_job_states([g.base_id for g in groups])
+            return user, enrich_groups_with_accounting(groups, states)
+
+        _run_queue_command(
+            console, _TARGET, gather,
+            lambda d: _render_mine_grouped(console, d[0], d[1]),
+        )
+        out = buf.getvalue()
+        assert "3703585" in out
+        assert "✓1" in out and "✗1" in out
+        assert "2/3" in out  # 2 terminal of 3 total tasks
 
 
 class TestRenderGpus:
