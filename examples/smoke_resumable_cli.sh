@@ -15,6 +15,11 @@
 #     REMOTE=uzh bash examples/smoke_resumable_cli.sh
 #     REMOTE=uzh CONDA_ENV=hsm WORKDIR=/scratch/$USER/hsm-runs \
 #         bash examples/smoke_resumable_cli.sh
+#     # S3IT V100 lowprio (the motivating capped pool; schedules fast when idle):
+#     REMOTE=uzh CONDA_ENV=hsm MODULES=miniforge3/25.3.0-3 \
+#         WORKDIR=/scratch/$USER/hsm-runs PARTITION=lowprio QOS=normal \
+#         ACCOUNT=payvand.ini.uzh GPU_TYPE=V100 GPUS=1 \
+#         bash examples/smoke_resumable_cli.sh
 #     REMOTE=uzh bash examples/smoke_resumable_cli.sh --dry-only
 #
 # Prerequisites: `pip install -e .` of this repo locally; `ssh $REMOTE hostname`
@@ -46,6 +51,9 @@ ACCOUNT="${ACCOUNT:-}"
 PARTITION="${PARTITION:-}"
 GPU_TYPE="${GPU_TYPE:-}"          # e.g. V100 (lowprio pool on S3IT) — empty = CPU-only
 GPUS="${GPUS:-0}"                 # per-task GPU count (the probe ignores it; for pool routing)
+# Non-flavour modules to load before conda-init (S3IT: the conda provider).
+# e.g. MODULES=miniforge3/25.3.0-3 so `conda run -n $CONDA_ENV` resolves.
+MODULES="${MODULES:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${TMPDIR:-/tmp}/hsm-resumable-smoke"
 
@@ -60,18 +68,19 @@ cd "$WORK"
 cp "$HERE/resumable_probe.py" train.py
 
 # A single long "config" — the motivating case (one job that needs >1 chunk).
+# The probe's budget goes in the GRID (single-valued) so it's passed to the
+# script as a hydra override — a `defaults:` block is metadata, NOT passed.
 cat > sweeps/sweep.yaml <<EOF
 sweep:
   grid:
     seed: [0]
+    total_steps: [$TOTAL_STEPS]
+    step_seconds: [$STEP_SECONDS]
 resumable:
   enabled: true
   chunk_walltime: "$CHUNK_WALLTIME"
   signal_grace: $SIGNAL_GRACE
   max_chunks: 5
-defaults:
-  total_steps: $TOTAL_STEPS
-  step_seconds: $STEP_SECONDS
 EOF
 # Note: no resume_arg → the probe resumes via the HSM_RESUME_FROM env var (the
 # general, framework-agnostic default). Set resume_arg in the YAML to also pass
@@ -85,6 +94,7 @@ SPEC="    spec:\n      walltime: \"01:00:00\"\n      cpus_per_task: 1\n      mem
 [[ -n "$ACCOUNT" ]] && SPEC="$SPEC\n      account: $ACCOUNT"
 [[ "$GPUS" != "0" ]] && SPEC="$SPEC\n      gpus: $GPUS"
 [[ -n "$GPU_TYPE" ]] && SPEC="$SPEC\n      gpu_type: $GPU_TYPE"
+[[ -n "$MODULES" ]] && SPEC="$SPEC\n      modules: [$MODULES]"
 {
   echo "distributed:"
   echo "  remotes:"
