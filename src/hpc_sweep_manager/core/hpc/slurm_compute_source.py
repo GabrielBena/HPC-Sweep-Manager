@@ -16,17 +16,24 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
+from ..common.resumable import ChunkProgress, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.push_exec import resolve_run_prefix
-from .gpu_planner import SubArraySubmission, build_array_submissions
+from .gpu_planner import (
+    SubArraySubmission,
+    build_array_submissions,
+    replace_sub_walltime,
+)
 from .slurm_protocol import (
     SLURM_STATE_MAP,
+    format_signal,
     parse_sacct_state,
     parse_sbatch_job_id,
     render_sbatch_directives,
@@ -211,10 +218,25 @@ class SlurmComputeSource(ComputeSource):
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
         costs: Optional[Sequence[float]] = None,
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> List[str]:
+        if resumable is not None and mode != "array":
+            raise ValueError(
+                "resumable chains use array mode (one chunk = one Slurm array); "
+                f"got mode={mode!r}"
+            )
         if mode == "array":
             return await self._submit_array(
-                params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
+                params_list,
+                sweep_id,
+                spec,
+                wandb_group,
+                job_name_prefix,
+                costs,
+                dependency=dependency,
+                resumable=resumable,
             )
         effective = self._effective_spec(spec)
         if isinstance(effective.gpu_type, tuple):
@@ -234,13 +256,17 @@ class SlurmComputeSource(ComputeSource):
         wandb_group: Optional[str],
         job_name_prefix: Optional[str],
         costs: Optional[Sequence[float]] = None,
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> List[str]:
         """Submit the sweep as 1..K Slurm arrays (K > 1 for multi-type specs).
 
         Mirrors ``SSHSlurmComputeSource._submit_array`` — both build their
         sub-array descriptors from the same pure
         :func:`gpu_planner.build_array_submissions`, so the partitioning
-        cannot drift between transports.
+        cannot drift between transports. Resumable chunks (issue #12) cap every
+        sub-array's walltime at ``chunk_walltime`` and carry the dependency.
         """
         if not params_list:
             raise ValueError("Cannot submit an empty array")
@@ -252,10 +278,21 @@ class SlurmComputeSource(ComputeSource):
             speed_factors=self.speed_factors,
             costs=costs,
         )
+        if resumable is not None:
+            cap = resumable.config.chunk_walltime
+            submissions = [replace_sub_walltime(sub, cap) for sub in submissions]
         job_ids: List[str] = []
         try:
             for sub in submissions:
-                job_ids.append(await self._submit_one_array(sub, sweep_id, wandb_group))
+                job_ids.append(
+                    await self._submit_one_array(
+                        sub,
+                        sweep_id,
+                        wandb_group,
+                        dependency=dependency,
+                        resumable=resumable,
+                    )
+                )
         except Exception:
             if job_ids:
                 # Earlier sub-arrays are LIVE — name them so the user can
@@ -273,8 +310,14 @@ class SlurmComputeSource(ComputeSource):
         sub: SubArraySubmission,
         sweep_id: str,
         wandb_group: Optional[str],
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> str:
-        directives = render_sbatch_directives(sub.spec)
+        signal = format_signal(resumable.config.signal_grace) if resumable else None
+        directives = render_sbatch_directives(
+            sub.spec, dependency=dependency, signal=signal
+        )
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
 
         # "index" is array-local (matched against $SLURM_ARRAY_TASK_ID);
@@ -283,6 +326,7 @@ class SlurmComputeSource(ComputeSource):
         params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
         params_file.write_text(json.dumps(list(sub.entries), indent=2))
 
+        rcfg = resumable.config if resumable else None
         script_content = render_template(
             "slurm_array.sh.j2",
             job_name=sub.job_name,
@@ -300,6 +344,11 @@ class SlurmComputeSource(ComputeSource):
             wandb_group=wandb_group,
             uses_conda=_python_needs_conda_init(self.python_path),
             gpu_type=sub.gpu_type,
+            resumable=resumable is not None,
+            resume_from_present=(resumable.resume_from_present if resumable else False),
+            resume_arg=(rcfg.resume_arg if rcfg else None),
+            done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
+            checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
         )
         script_path = scripts_dir / f"{sub.job_name}.slurm"
         script_path.write_text(script_content)
@@ -399,9 +448,37 @@ class SlurmComputeSource(ComputeSource):
             self.update_job_status(job_id, "CANCELLED")
         return success
 
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
         # Slurm outputs land directly in the shared filesystem under tasks_dir.
+        # (defer_cleanup is a resumable-chain no-op: nothing to pull or tear down
+        # on the shared FS — checkpoints already persist in place across chunks.)
         return True
+
+    async def chunk_progress(
+        self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
+    ) -> ChunkProgress:
+        """Local-FS twin of the SSH probe (issue #12): scan the shared tasks dir
+        for done-sentinels + the newest checkpoint mtime. No pull needed — the
+        files are already on the filesystem the driver runs on."""
+        _, _, tasks_dir = self._ensure_dirs()
+        done: set[int] = set()
+        newest: Optional[float] = None
+        for task_dir in Path(tasks_dir).glob("task_*"):
+            if not task_dir.is_dir():
+                continue
+            m = re.match(r"task_(\d+)$", task_dir.name)
+            if m and (task_dir / done_sentinel).exists():
+                done.add(int(m.group(1)))
+            ckpt = task_dir / checkpoint_subdir
+            if ckpt.is_dir():
+                for f in ckpt.rglob("*"):
+                    if f.is_file():
+                        mt = f.stat().st_mtime
+                        if newest is None or mt > newest:
+                            newest = mt
+        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=newest)
 
     async def health_check(self) -> Dict[str, Any]:
         try:

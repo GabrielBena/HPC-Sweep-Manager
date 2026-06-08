@@ -281,6 +281,17 @@ class SubArraySubmission:
     speed_factor: float = 1.0
 
 
+def replace_sub_walltime(sub: SubArraySubmission, walltime: str) -> SubArraySubmission:
+    """Return a copy of ``sub`` with its spec's walltime overridden (issue #12).
+
+    Resumable chains CAP every chunk at ``chunk_walltime`` rather than letting
+    the planner's cost-SCALED per-type walltime stand: chunking caps, it does
+    not scale. #7's cost-based *placement* (which type a task lands on) still
+    applies — only the per-chunk wall-time is flattened to the cap.
+    """
+    return replace(sub, spec=replace(sub.spec, walltime=walltime))
+
+
 def _safe_type_token(gpu_type: str) -> str:
     """A gpu type as a filename/job-name fragment (defensive — GRES names
     are alphanumeric in practice)."""

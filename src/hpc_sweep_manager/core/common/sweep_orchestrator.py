@@ -23,8 +23,10 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, Union
 
+from .chain import ChainConfig, ChainDecision, ChainState, ChunkOutcome, decide_next
 from .compute_source import ComputeSource, SubmissionMode
 from .resource_spec import ResourceSpec, spec_from_legacy_resources
+from .resumable import ResumableConfig, ResumableContext
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,11 @@ class SweepResult:
     final_statuses: dict[str, str] = field(default_factory=dict)
     submission_mode: SubmissionMode = "individual"
     source_type: str = ""
+    # Resumable chains (issue #12): the terminal decision ("done"/"failed"/
+    # "advance" — "advance" means a non-blocking advance left a chunk running)
+    # and how many chunks this invocation submitted. Empty for normal sweeps.
+    chain_decision: str = ""
+    chunks_run: int = 0
 
 
 def resolve_auto_mode(mode: str) -> str:
@@ -150,6 +157,7 @@ def build_compute_source(
     gpus_override: Union[None, int, Sequence[int]] = None,
     conda_env_override: str | None = None,
     remote_submission: SubmissionMode | None = None,
+    resumable: bool = False,
 ) -> tuple[ComputeSource, str, SubmissionMode]:
     """Build a :class:`ComputeSource` for the requested mode.
 
@@ -170,6 +178,17 @@ def build_compute_source(
         )
 
     mode = resolve_auto_mode(mode)
+
+    # Resumable chains (issue #12) need Slurm dependencies + the pre-walltime
+    # signal — reject backends that have neither. The remote+ssh case is caught
+    # inside the remote branch (it depends on the per-remote backend field).
+    _RESUMABLE_HINT = (
+        "--resumable requires a Slurm backend: native `--mode array` on a login "
+        "node, or `--remote <alias>` where the remote has `backend: slurm`. The "
+        "local and ssh-bash backends have no scheduler dependency/signal mechanism."
+    )
+    if resumable and mode in ("local", "distributed", "individual"):
+        raise RuntimeError(_RESUMABLE_HINT)
 
     if mode == "distributed":
         from ..distributed.distributed_compute_source import DistributedComputeSource
@@ -243,6 +262,12 @@ def build_compute_source(
         elif backend == "ssh":
             from ..remote.ssh_compute_source import build_ssh_source
 
+            if resumable:
+                raise RuntimeError(
+                    f"--resumable needs `backend: slurm` on remote {remote_alias!r} "
+                    f"(it drives Slurm dependencies + the pre-walltime signal); "
+                    f"this remote is bash-over-SSH (`backend: ssh`)."
+                )
             if remote_submission == "array":
                 logger.warning(
                     f"--mode array is ignored for backend=ssh on {remote_alias!r} "
@@ -404,3 +429,263 @@ async def run_sweep_async(
         submission_mode=submission_mode,
         source_type=source.source_type,
     )
+
+
+async def run_resumable_sweep_async(
+    *,
+    source: ComputeSource,
+    sweep_dir: Path,
+    sweep_id: str,
+    params_list: list[dict[str, Any]],
+    spec: ResourceSpec | None,
+    resumable: ResumableConfig,
+    submission_mode: SubmissionMode = "array",
+    wandb_group: str | None = None,
+    job_name_prefix: str | None = None,
+    poll_interval: float = 10.0,
+    on_progress: Optional[Callable[[int, int], None]] = None,
+    costs: Optional[list[float]] = None,
+    chain_state: ChainState | None = None,
+    do_setup: bool = True,
+    initial_job_ids: list[str] | None = None,
+    initial_prev_done: int = 0,
+    initial_prev_mtime: float | None = None,
+    block: bool = True,
+) -> SweepResult:
+    """Drive a checkpoint-chained run (issue #12, option B = advance-on-poll).
+
+    Each chunk re-submits the FULL param set as one Slurm array (or K typed
+    sub-arrays); already-done tasks no-op via the ``.hsm_done`` sentinel, so the
+    chunk advances heterogeneous per-task lengths automatically. After a chunk
+    reaches a terminal Slurm state the driver probes per-task sentinels +
+    checkpoint mtime (:meth:`ComputeSource.chunk_progress`), turns successive
+    observations into the ``progressed`` bool, and consults the pure
+    :func:`chain.decide_next` — DONE / ADVANCE / FAILED.
+
+    ``block=True`` (foreground ``hsm sweep run --resumable``) drives to a
+    terminal decision. ``block=False`` (cron ``hsm sweep advance``) performs a
+    single transition: evaluate the current terminal chunk and, on ADVANCE,
+    submit the next chunk WITHOUT waiting (leaving it running). ``do_setup`` /
+    ``chain_state`` / ``initial_job_ids`` let ``advance`` re-attach mid-flight.
+    """
+    if submission_mode != "array":
+        raise ValueError("resumable chains require submission_mode='array'")
+
+    num_tasks = len(params_list)
+    if num_tasks == 0:
+        # A zero-task chain would otherwise report a vacuous DONE (done_count >=
+        # 0) and archive+clean an empty remote — surface the misconfig instead.
+        raise ValueError(
+            "resumable chain has 0 tasks — nothing to run (check the sweep grid "
+            "/ --max-runs)"
+        )
+    ckpt_subdir = resumable.checkpoint_subdir
+    # Make every tasks/ pull (the incremental ones in wait_for_all AND the final
+    # collect) skip the heavy checkpoint dir — it rides the cheap server-side
+    # archive, not the WAN. (No-op attr on the native source.)
+    if hasattr(source, "_pull_excludes"):
+        source._pull_excludes = (f"*/{ckpt_subdir}/",)
+
+    if do_setup:
+        if not await source.setup(sweep_dir, sweep_id):
+            raise RuntimeError(
+                f"setup() failed for source {source.name!r} ({source.source_type})"
+            )
+
+    state = chain_state or ChainState()
+    chain_cfg = ChainConfig(
+        max_chunks=resumable.max_chunks,
+        max_consecutive_failures=resumable.max_consecutive_failures,
+    )
+    rcfg_manifest = resumable.to_manifest()
+    chunks_meta: list[dict[str, Any]] = []
+    # Re-attach (advance): the seeded chunk is already submitted — record it so
+    # the manifest never persists an empty `chunks` list (a crash between the
+    # post-evaluate persist and the next submit would otherwise strand the
+    # chain: the next advance would see "no chunks recorded").
+    if initial_job_ids:
+        chunks_meta.append(
+            {
+                "index": state.chunk_index,
+                "job_ids": list(initial_job_ids),
+                "terminal_states": [],
+            }
+        )
+    prev_job_ids: list[str] = []
+    # The no-progress baseline. On a fresh foreground run it accumulates across
+    # chunks; on a detached `advance` re-attach it's RESTORED from the manifest
+    # (initial_prev_*) so the consecutive-failure cap fires just as promptly for
+    # a cron-driven chain as for the live launcher. `obs_*` track the latest
+    # observation so `_persist` can write the baseline for the next re-attach.
+    prev_done = initial_prev_done
+    prev_mtime: float | None = initial_prev_mtime
+    obs_done = initial_prev_done
+    obs_mtime: float | None = initial_prev_mtime
+    current: list[str] | None = initial_job_ids
+    decision: ChainDecision | None = None
+    submitted_this_call = 0
+    last_job_ids: list[str] = list(initial_job_ids or [])
+
+    async def _persist() -> None:
+        try:
+            await source.persist_chain_manifest(
+                resumable=rcfg_manifest,
+                chain={
+                    "state": state.to_dict(),
+                    "chunks": chunks_meta,
+                    "num_tasks": num_tasks,
+                    # Carry the no-progress baseline + the W&B group so a detached
+                    # `advance` resumes with the same failure-cap accounting and
+                    # the same group string (run-id continuity is the script's job).
+                    "last_done_count": obs_done,
+                    "last_checkpoint_mtime": obs_mtime,
+                    "wandb_group": wandb_group,
+                },
+                job_ids=last_job_ids,
+                num_tasks=num_tasks,
+            )
+        except Exception as e:  # noqa: BLE001 — manifest is a convenience, not load-bearing mid-run
+            logger.warning(f"could not persist chain manifest: {e}")
+
+    while True:
+        if current is None:
+            dependency = (
+                f"afterany:{':'.join(prev_job_ids)}" if prev_job_ids else None
+            )
+            ctx = ResumableContext(chunk_index=state.chunk_index, config=resumable)
+            logger.info(
+                f"chain {sweep_id}: submitting chunk {state.chunk_index + 1} "
+                f"(walltime cap {resumable.chunk_walltime}"
+                f"{', dep ' + dependency if dependency else ''})"
+            )
+            current = await source.submit_batch(
+                params_list=params_list,
+                sweep_id=sweep_id,
+                mode="array",
+                spec=spec,
+                wandb_group=wandb_group,
+                job_name_prefix=job_name_prefix,
+                costs=costs,
+                dependency=dependency,
+                resumable=ctx,
+            )
+            submitted_this_call += 1
+            last_job_ids = list(current)
+            chunks_meta.append(
+                {
+                    "index": state.chunk_index,
+                    "job_ids": list(current),
+                    "terminal_states": [],
+                }
+            )
+            await _persist()
+            if not block:
+                # Non-blocking advance: the next chunk is queued (afterany the
+                # prior); leave it running for the cluster / a later advance.
+                decision = ChainDecision.ADVANCE
+                break
+
+        # Wait for the current chunk to reach a terminal Slurm state. For a
+        # re-attached terminal chunk the caller seeded completed_jobs, so this
+        # returns at once.
+        last_statuses = await source.wait_for_all(poll_interval=poll_interval)
+        if chunks_meta:
+            chunks_meta[-1]["terminal_states"] = list(last_statuses.values())
+
+        progress = await source.chunk_progress(
+            num_tasks,
+            done_sentinel=resumable.done_sentinel,
+            checkpoint_subdir=ckpt_subdir,
+        )
+        done_count = len(progress.done_indices)
+        progressed = (done_count > prev_done) or (
+            progress.checkpoint_mtime is not None
+            and (prev_mtime is None or progress.checkpoint_mtime > prev_mtime)
+        )
+        # Record the latest observation so _persist writes a faithful baseline
+        # for the next re-attach (max mtime so it never goes backwards).
+        obs_done = done_count
+        if progress.checkpoint_mtime is not None:
+            obs_mtime = (
+                progress.checkpoint_mtime
+                if obs_mtime is None
+                else max(obs_mtime, progress.checkpoint_mtime)
+            )
+        outcome = ChunkOutcome(
+            chunk_index=state.chunk_index,
+            done_count=done_count,
+            num_tasks=num_tasks,
+            progressed=progressed,
+            terminal_states=tuple(last_statuses.values()),
+        )
+        step = decide_next(outcome, state, chain_cfg)
+        decision = step.decision
+        state = step.next_state
+        logger.info(f"chain {sweep_id}: {step.reason}")
+        if on_progress is not None:
+            on_progress(done_count, max(num_tasks, 1))
+        await _persist()
+
+        prev_job_ids = list(current)
+        prev_done = done_count
+        if progress.checkpoint_mtime is not None:
+            prev_mtime = progress.checkpoint_mtime
+
+        if decision is ChainDecision.DONE:
+            # DATA-LOSS GUARD: the intermediate pulls exclude the heavy
+            # checkpoint dir on the assumption it rides the server-side archive.
+            # If NO archive will actually run (no archive_dir, or archive_on:
+            # never), that dir holds the only copy of the trained result — so
+            # include it in the FINAL pull before collect_results rm -rf's the
+            # remote. (Native/shared-FS sources have no _should_archive and keep
+            # the checkpoint in place, so this is a no-op there.)
+            should_archive = getattr(source, "_should_archive", None)
+            if (
+                callable(should_archive)
+                and not should_archive(False)
+                and hasattr(source, "_pull_excludes")
+            ):
+                logger.info(
+                    f"chain {sweep_id}: no server-side archive configured — "
+                    f"pulling the final checkpoint dir so it isn't lost."
+                )
+                source._pull_excludes = ()
+            await _safe_collect(source, defer_cleanup=False)
+            break
+        if decision is ChainDecision.FAILED:
+            # Keep the remote for inspection (don't archive/clean a failed chain).
+            await _safe_collect(source, defer_cleanup=True)
+            break
+
+        # ADVANCE: clear per-chunk tracking so the next wait_for_all sees only
+        # the next chunk, then loop to submit it.
+        source.active_jobs.clear()
+        source.completed_jobs.clear()
+        current = None
+
+    try:
+        await source.cleanup()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"cleanup raised for source {source.name!r}: {e}")
+
+    return SweepResult(
+        sweep_id=sweep_id,
+        sweep_dir=sweep_dir,
+        job_ids=last_job_ids,
+        final_statuses={},
+        submission_mode="array",
+        source_type=source.source_type,
+        chain_decision=(decision.value if decision is not None else ""),
+        chunks_run=submitted_this_call,
+    )
+
+
+async def _safe_collect(source: ComputeSource, *, defer_cleanup: bool) -> None:
+    try:
+        ok = await source.collect_results(defer_cleanup=defer_cleanup)
+        if not ok:
+            logger.warning(
+                f"collect_results returned False for source {source.name!r}"
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"collect_results raised for source {source.name!r}: {e}")

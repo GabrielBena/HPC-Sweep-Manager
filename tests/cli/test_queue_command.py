@@ -334,8 +334,8 @@ class TestRenderMine:
             )
         )
         index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
-        assert index["111"] == ("sweep_h", 6)
-        assert index["222"] == ("sweep_h", 16)
+        assert index["111"] == ("sweep_h", 6, None)
+        assert index["222"] == ("sweep_h", 16, None)
 
     def test_legacy_manifest_multi_job_has_no_total(self, tmp_path):
         """Pre-`jobs:` manifests with several job ids stay attribution-free
@@ -350,8 +350,8 @@ class TestRenderMine:
             _json.dumps({"sweep_id": "sweep_l", "job_ids": ["9", "10"], "num_tasks": 8})
         )
         index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
-        assert index["9"] == ("sweep_l", None)
-        assert index["10"] == ("sweep_l", None)
+        assert index["9"] == ("sweep_l", None, None)
+        assert index["10"] == ("sweep_l", None, None)
 
 
 class TestRenderPosition:
@@ -594,3 +594,35 @@ class TestRenderGpus:
         _render_gpus(console, summary, None, capacity)
         out = buf.getvalue()
         assert "<untyped> = jobs requesting a GPU without a type" in out
+
+
+class TestChainLabel:
+    """Resumable-chain annotation in `hsm queue mine` (issue #12)."""
+
+    def _write(self, tmp_path, sweep_id, manifest):
+        import json
+
+        d = tmp_path / "sweeps" / "outputs" / sweep_id
+        d.mkdir(parents=True)
+        (d / ".hsm_manifest.json").write_text(json.dumps(manifest))
+        return d
+
+    def test_chain_label_in_index(self, tmp_path):
+        from hpc_sweep_manager.cli.queue import _build_sweep_meta_index
+
+        self._write(tmp_path, "swc", {
+            "sweep_id": "swc", "backend": "slurm",
+            "job_ids": ["500"], "num_tasks": 4,
+            "resumable": {"enabled": True, "chunk_walltime": "23:00:00", "max_chunks": 10},
+            "chain": {"state": {"chunk_index": 1}, "chunks": [], "num_tasks": 4},
+        })
+        index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
+        assert index["500"] == ("swc", 4, "chunk 2/10")
+
+    def test_no_label_for_ordinary_sweep(self, tmp_path):
+        from hpc_sweep_manager.cli.queue import _manifest_chain_meta
+
+        d = self._write(tmp_path, "swn", {
+            "sweep_id": "swn", "backend": "slurm", "job_ids": ["1"], "num_tasks": 1,
+        })
+        assert _manifest_chain_meta(d) is None

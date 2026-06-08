@@ -423,7 +423,9 @@ Or use the runnable smoke scripts:
 - [SSH_EXECUTION.md](SSH_EXECUTION.md) — the SSH push model in depth,
   both `backend: ssh` and `backend: slurm`.
 - [HPC_EXECUTION.md](HPC_EXECUTION.md) — the on-cluster Slurm flow
-  + `slurm:` config block reference.
+  + `slurm:` config block reference, heterogeneous GPU-type scheduling,
+  and [resumable chained runs](HPC_EXECUTION.md#resumable-chained-runs--finish-a-walltime-job-on-a-capped-pool)
+  (finish a >walltime job on a capped/preemptible pool like V100 `lowprio`).
 - [getting_started.md](getting_started.md) — first-time setup.
 - [../../CLAUDE.md](../../CLAUDE.md) — agent-on-boarding (read first if
   you're an AI assistant landing on this repo).

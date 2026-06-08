@@ -8,9 +8,12 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Sequence
 
 from .resource_spec import ResourceSpec
+
+if TYPE_CHECKING:
+    from .resumable import ChunkProgress
 
 logger = logging.getLogger(__name__)
 
@@ -169,9 +172,48 @@ class ComputeSource(ABC):
         pass
 
     @abstractmethod
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
-        """Collect results from completed jobs."""
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
+        """Collect results from completed jobs.
+
+        ``defer_cleanup`` (resumable chains, issue #12) asks a backend that
+        normally tears down its remote working dir to pull partial results but
+        KEEP the dir — the next chunk's checkpoints live there. Backends with
+        no teardown step ignore it.
+        """
         pass
+
+    # ----------------------------------------------------- resumable chains
+    # Default hooks so the resumable driver (issue #12) can treat every
+    # ComputeSource uniformly; only the Slurm sources override them.
+    async def chunk_progress(
+        self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
+    ) -> "ChunkProgress":
+        """Probe per-task done-sentinels + newest checkpoint mtime for a chunk.
+
+        Resumable chains are Slurm-only; the base raises so a mis-wired backend
+        fails loudly instead of silently never advancing.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support resumable chains "
+            f"(--resumable requires a Slurm backend)"
+        )
+
+    async def persist_chain_manifest(
+        self,
+        *,
+        resumable: Dict[str, Any],
+        chain: Dict[str, Any],
+        job_ids: List[str],
+        num_tasks: int,
+    ) -> None:
+        """Persist chain state for a detached re-attach (``hsm sweep advance``).
+
+        Default no-op — only SSH-Slurm has an off-box manifest to update; a
+        local Slurm chain is driven in-process and needs nothing persisted.
+        """
+        return None
 
     @abstractmethod
     async def health_check(self) -> Dict[str, Any]:

@@ -437,7 +437,11 @@ class SSHComputeSource(ComputeSource):
         return {jid: info.status for jid, info in self.completed_jobs.items()}
 
     # ----------------------------------------------------------- collection
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
+        # defer_cleanup is a resumable-chain no-op here (bash-over-SSH is not a
+        # chain backend — chains require Slurm dependencies/signals).
         if self._remote_sweep_dir is None or self.sweep_dir is None:
             logger.warning(f"collect_results called before setup on {self.name}")
             return False

@@ -377,16 +377,20 @@ def _render_gpu_type_plan(
     effective_spec,
     speed_factors,
     costs,
+    walltime_cap: Optional[str] = None,
 ) -> None:
     """Dry-run preview of the multi-gpu_type split.
 
     Calls the SAME ``build_array_submissions`` the Slurm sources use at
     submit time — what's shown is exactly what would submit (single source
-    of truth, no parallel re-implementation to drift).
+    of truth, no parallel re-implementation to drift). ``walltime_cap`` (set
+    for resumable chains) overrides every sub-array's displayed walltime to the
+    per-chunk cap — chunking caps, it doesn't scale (so the cost-scaled values
+    would mislead).
     """
     from rich.table import Table
 
-    from ..core.hpc.gpu_planner import build_array_submissions
+    from ..core.hpc.gpu_planner import build_array_submissions, replace_sub_walltime
 
     submissions = build_array_submissions(
         params_list=combinations,
@@ -395,6 +399,8 @@ def _render_gpu_type_plan(
         speed_factors=speed_factors,
         costs=costs,
     )
+    if walltime_cap:
+        submissions = [replace_sub_walltime(s, walltime_cap) for s in submissions]
     cost_seq = costs or [1.0] * len(combinations)
     table = Table(title="GPU-type split plan (one Slurm array per type)")
     table.add_column("Type", style="cyan")
@@ -450,6 +456,9 @@ def _run_sweep_via_orchestrator(
     gpus_arg: Optional[str] = None,
     remote_submission: Optional[str] = None,
     costs: Optional[list] = None,
+    sweep_resumable_block: Optional[dict] = None,
+    resumable_flag: bool = False,
+    chunk_walltime: Optional[str] = None,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
@@ -457,8 +466,35 @@ def _run_sweep_via_orchestrator(
     """
     import shutil
 
+    from ..core.common.resumable import resolve_resumable_config
+    from ..core.common.sweep_orchestrator import run_resumable_sweep_async
     from ..core.common.utils import create_sweep_id
     from ..core.remote.ssh_compute_source import parse_gpus_arg
+
+    # Resumable chains (issue #12): resolve the typed config (per-remote block
+    # ← sweep YAML ← CLI). The per-remote block carries only cluster-bound knobs
+    # (chunk_walltime/signal_grace/checkpoint_subdir).
+    remote_resumable_block = None
+    if remote_alias and hsm_config is not None:
+        remote_resumable_block = (
+            hsm_config.config_data.get("distributed", {})
+            .get("remotes", {})
+            .get(remote_alias, {})
+            .get("resumable")
+        )
+    rconf = resolve_resumable_config(
+        sweep_block=sweep_resumable_block,
+        remote_block=remote_resumable_block,
+        cli_enabled=(True if (resumable_flag or chunk_walltime) else None),
+        cli_chunk_walltime=chunk_walltime,
+    )
+    if rconf.enabled:
+        errs = rconf.validate()
+        if errs:
+            console.print("[red]Invalid resumable config:[/red]")
+            for e in errs:
+                console.print(f"  [red]- {e}[/red]")
+            return
 
     # Resolve auto BEFORE asking spec_from_cli which config block to read —
     # otherwise mode='auto' would silently read the slurm: block on every machine.
@@ -476,6 +512,9 @@ def _run_sweep_via_orchestrator(
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         return
+    # Resumable chunks are always array submissions (one chunk = one Slurm
+    # array of the full param set; done tasks no-op via the sentinel).
+    effective_remote_submission = "array" if rconf.enabled else remote_submission
     try:
         source, resolved_mode, sub_mode = build_compute_source(
             mode=mode,
@@ -487,11 +526,16 @@ def _run_sweep_via_orchestrator(
             parallel_jobs=parallel_jobs,
             remote_alias=remote_alias,
             gpus_override=gpus_override,
-            remote_submission=remote_submission,
+            remote_submission=effective_remote_submission,
+            resumable=rconf.enabled,
         )
     except (ValueError, RuntimeError) as e:
         console.print(f"[red]Error building compute source: {e}[/red]")
         return
+    if rconf.enabled and sub_mode != "array":
+        # Native array mode resolves to sub_mode="array"; a remote slurm backend
+        # may default to individual — force array for chains.
+        sub_mode = "array"
 
     # The per-remote `spec:` block is merged into the source's default_spec by
     # build_ssh_source / build_ssh_slurm_source (at construction, no connection
@@ -542,6 +586,24 @@ def _run_sweep_via_orchestrator(
                 continue
             console.print(f"  {k:18s} = {v!r}")
 
+        if rconf.enabled:
+            console.print("\n[bold]Resumable chain plan (issue #12):[/bold]")
+            console.print(
+                f"  chunk_walltime  = {rconf.chunk_walltime}  "
+                f"[dim](every chunk capped here; full spec.walltime "
+                f"{effective_spec.walltime!r} is NOT used)[/dim]"
+            )
+            console.print(f"  signal          = B:TERM@{rconf.signal_grace}")
+            console.print(
+                f"  resume pointer  = HSM_RESUME_FROM env"
+                + (f" + {rconf.resume_arg}=<path>" if rconf.resume_arg else " (env only)")
+            )
+            console.print(f"  done sentinel   = $HSM_WORKDIR/{rconf.done_sentinel}")
+            console.print(
+                f"  guards          = up to {rconf.max_chunks} chunks, "
+                f"{rconf.max_consecutive_failures} no-progress strikes → FAILED"
+            )
+
         if isinstance(effective_spec.gpu_type, tuple):
             _render_gpu_type_plan(
                 console,
@@ -549,6 +611,7 @@ def _run_sweep_via_orchestrator(
                 effective_spec=effective_spec,
                 speed_factors=getattr(source, "speed_factors", None),
                 costs=costs,
+                walltime_cap=(rconf.chunk_walltime if rconf.enabled else None),
             )
 
         # Render the command as the wrapper actually runs it — including the
@@ -618,6 +681,45 @@ def _run_sweep_via_orchestrator(
         def _progress(done: int, total: int) -> None:
             console.print(f"  {done}/{total} done", end="\r")
         progress_cb = _progress
+
+    if rconf.enabled:
+        console.print(
+            f"[cyan]Resumable chain: up to {rconf.max_chunks} chunks of "
+            f"≤{rconf.chunk_walltime} each. The launcher drives the chain while "
+            f"alive (run it under tmux/nohup); if it dies, resume with "
+            f"`hsm sweep advance {sweep_id}`.[/cyan]"
+        )
+        try:
+            result = asyncio.run(
+                run_resumable_sweep_async(
+                    source=source,
+                    sweep_dir=sweep_dir,
+                    sweep_id=sweep_id,
+                    params_list=combinations,
+                    spec=spec,
+                    resumable=rconf,
+                    wandb_group=group,
+                    job_name_prefix=sweep_id,
+                    poll_interval=10.0,
+                    on_progress=progress_cb,
+                    costs=costs,
+                )
+            )
+        except Exception as e:
+            console.print(f"[red]Resumable chain failed: {e}[/red]")
+            logger.exception("resumable chain run failed")
+            raise
+        console.print(
+            f"\n[bold]Chain {sweep_id}: {result.chain_decision.upper()} "
+            f"after {result.chunks_run} chunk(s)[/bold]"
+        )
+        if result.chain_decision == "failed":
+            console.print(
+                f"[red]Chain did not complete. Inspect "
+                f"{sweep_dir / 'tasks'} + {sweep_dir / 'logs'}.[/red]"
+            )
+            raise SystemExit(1)
+        return
 
     try:
         result = asyncio.run(
@@ -736,6 +838,8 @@ def run_sweep(
     remote_alias: Optional[str] = None,
     gpus_arg: Optional[str] = None,
     remote_submission: Optional[str] = None,
+    resumable_flag: bool = False,
+    chunk_walltime: Optional[str] = None,
 ):
     """Run parameter sweep (orchestrator-only path)."""
 
@@ -776,6 +880,21 @@ def run_sweep(
             console.print(
                 "[yellow]For now, use `hsm sweep status <id>` / `hsm sweep report <id>` "
                 "to inspect, then manually re-submit a filtered sweep.[/yellow]"
+            )
+            return
+
+        # Resumable chains re-derive the FULL param set every chunk (and on a
+        # detached `advance`); `--max-runs` would truncate the launcher's set but
+        # not advance's, drifting task_N→params. Reject the combination upfront.
+        resumable_on = bool(
+            resumable_flag or chunk_walltime or (config.resumable or {}).get("enabled")
+        )
+        if resumable_on and max_runs is not None:
+            console.print(
+                "[red]--max-runs cannot be combined with --resumable: a chain "
+                "re-submits the full param set each chunk (truncation would drift "
+                "across chunks / on `hsm sweep advance`). Filter the sweep grid "
+                "instead.[/red]"
             )
             return
 
@@ -820,6 +939,9 @@ def run_sweep(
             gpus_arg=gpus_arg,
             remote_submission=remote_submission,
             costs=costs,
+            sweep_resumable_block=config.resumable,
+            resumable_flag=resumable_flag,
+            chunk_walltime=chunk_walltime,
         )
 
     except FileNotFoundError:
@@ -876,6 +998,26 @@ def sweep_cmd(ctx):
 @click.option("--group", help="W&B group name for this sweep")
 @click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
 @click.option("--no-progress", is_flag=True, help="Disable progress tracking")
+@click.option(
+    "--resumable",
+    "resumable_flag",
+    is_flag=True,
+    default=False,
+    help=(
+        "Run a >walltime job as a checkpoint-chained sequence of "
+        "<=--chunk-walltime Slurm chunks (Slurm backends only; issue #12). "
+        "Your training script must honor the resume contract — see "
+        "`hsm docs` → HPC_EXECUTION → Resumable chained runs."
+    ),
+)
+@click.option(
+    "--chunk-walltime",
+    default=None,
+    help=(
+        "Per-chunk walltime cap (HH:MM:SS), e.g. 23:00:00. Overrides "
+        "resumable.chunk_walltime from config. Implies --resumable."
+    ),
+)
 @common_options
 @click.pass_context
 def run_cmd(
@@ -892,6 +1034,8 @@ def run_cmd(
     group,
     parallel_jobs,
     no_progress,
+    resumable_flag,
+    chunk_walltime,
     verbose,
     quiet,
 ):
@@ -941,6 +1085,8 @@ def run_cmd(
         remote_alias=remote_alias,
         gpus_arg=gpus_arg,
         remote_submission=remote_submission,
+        resumable_flag=resumable_flag,
+        chunk_walltime=chunk_walltime,
     )
 
 
@@ -1058,6 +1204,19 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
+    if (manifest.get("resumable") or {}).get("enabled"):
+        # collect would archive + rm -rf the remote dir on "all terminal" — but a
+        # chain's chunk is terminal between chunks, and deleting it loses the
+        # resume checkpoints. Refuse; point at advance (which is chain-aware).
+        console.print(
+            f"[red]{sweep_id} is a resumable chain — `hsm sweep collect` could "
+            f"delete the remote checkpoints between chunks.[/red]"
+        )
+        console.print(
+            f"[yellow]Use [bold]hsm sweep advance {sweep_id}[/bold] to drive it; "
+            f"it pulls/archives automatically when the chain completes.[/yellow]"
+        )
+        return
     missing = [k for k in ("remote_sweep_dir", "host", "job_ids") if not manifest.get(k)]
     if missing:
         console.print(
@@ -1070,6 +1229,180 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]collect failed: {e}[/red]")
         logger.exception("hsm sweep collect failed")
+        raise
+
+
+async def _advance_via_manifest(
+    sweep_dir: Path, manifest: dict, console: Console, *, block: bool
+) -> None:
+    """Re-attach to a resumable chain and take it forward by a chunk (issue #12).
+
+    Submits NEW Slurm jobs (unlike collect): if the current chunk is terminal
+    and the chain isn't done, submit the next chunk (``block=False`` returns
+    immediately; ``block=True`` drives to completion). Reuses the same
+    ``from_manifest``/``reattach`` machinery as collect, then restores the
+    extra fields a re-submission needs (script/code dirs + run prefix) and the
+    chain state, and re-derives the full param set from the sweep config.
+    """
+    from ..core.common.chain import ChainState
+    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.common.config import SweepConfig
+    from ..core.common.param_generator import ParameterGenerator
+    from ..core.common.resumable import ResumableConfig
+    from ..core.common.sweep_orchestrator import run_resumable_sweep_async
+    from ..core.remote.push_exec import resolve_run_prefix
+    from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
+
+    sweep_id = manifest["sweep_id"]
+    rconf = ResumableConfig.from_manifest(manifest.get("resumable"))
+    chain = manifest.get("chain") or {}
+    state = ChainState.from_dict(chain.get("state"))
+    chunks = chain.get("chunks") or []
+    if not chunks:
+        console.print("[red]Chain manifest has no chunks recorded — cannot advance.[/red]")
+        return
+    if state.done or state.failed:
+        verb = "completed" if state.done else "failed"
+        console.print(f"[yellow]Chain {sweep_id} already {verb} — nothing to advance.[/yellow]")
+        return
+    last_job_ids = [str(j) for j in (chunks[-1].get("job_ids") or [])]
+    if not last_job_ids:
+        console.print("[red]Last chunk records no job ids — cannot advance.[/red]")
+        return
+
+    cfg_path = sweep_dir / "sweep_config.yaml"
+    if not cfg_path.exists():
+        console.print(
+            f"[red]Missing {cfg_path} — cannot re-derive the param set to "
+            f"re-submit the next chunk.[/red]"
+        )
+        return
+    combinations = ParameterGenerator(
+        SweepConfig.from_yaml(cfg_path)
+    ).generate_combinations(None)
+
+    source = SSHSlurmComputeSource.from_manifest(manifest)
+    if not await source.reattach(sweep_dir, sweep_id, manifest):
+        console.print(f"[red]Could not connect to {source.host} to advance.[/red]")
+        return
+    try:
+        # reattach() is shared with pull-only collect, so restore the fields a
+        # re-submission additionally needs (logs/scripts are sweep-dir subdirs;
+        # code dir + run prefix come from the manifest / conda env).
+        source._remote_logs_dir = f"{source._remote_sweep_dir}/logs"
+        source._remote_scripts_dir = f"{source._remote_sweep_dir}/scripts"
+        source._remote_code_dir = manifest.get("remote_code_dir")
+        source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
+
+        statuses = {j: await source.get_job_status(j) for j in last_job_ids}
+        running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
+        if running:
+            console.print(
+                f"[yellow]Chain {sweep_id}: chunk {state.chunk_index + 1} still "
+                f"has {len(running)} running/pending job(s) "
+                f"({', '.join(running)}). Nothing to advance yet — re-run later "
+                f"(or it advances on its own while the launcher is alive).[/yellow]"
+            )
+            return
+        for j, s in statuses.items():
+            source.completed_jobs[j] = JobInfo(
+                job_id=j, job_name=j, params={}, source_name=source.name, status=s
+            )
+
+        result = await run_resumable_sweep_async(
+            source=source,
+            sweep_dir=sweep_dir,
+            sweep_id=sweep_id,
+            params_list=combinations,
+            spec=None,  # use the restored default_spec (effective spec from submit)
+            resumable=rconf,
+            # Restore the same W&B group + no-progress baseline the launcher used,
+            # so the chain stays one group and the failure cap accounts faithfully
+            # across re-attach (not reset each advance).
+            wandb_group=chain.get("wandb_group"),
+            job_name_prefix=sweep_id,
+            chain_state=state,
+            do_setup=False,
+            initial_job_ids=last_job_ids,
+            initial_prev_done=int(chain.get("last_done_count") or 0),
+            initial_prev_mtime=chain.get("last_checkpoint_mtime"),
+            block=block,
+        )
+        decision = (result.chain_decision or "").upper()
+        console.print(f"[bold]Chain {sweep_id}: {decision}[/bold]")
+        if result.chain_decision == "advance":
+            console.print(
+                f"[cyan]Next chunk submitted (running). Re-run "
+                f"[bold]hsm sweep advance {sweep_id}[/bold] when it finishes "
+                f"(or once via a cron).[/cyan]"
+            )
+        elif result.chain_decision == "failed":
+            console.print(
+                f"[red]Chain did not complete — inspect {sweep_dir / 'tasks'} "
+                f"+ {sweep_dir / 'logs'}.[/red]"
+            )
+    finally:
+        await source.cleanup()
+
+
+@sweep_cmd.command("advance")
+@click.argument("sweep_id")
+@click.option(
+    "--max-iterations",
+    default=1,
+    show_default=True,
+    type=int,
+    help=(
+        "1 = a single non-blocking transition (evaluate the current chunk, "
+        "submit the next if needed, return — cron-friendly). 0 = drive the "
+        "chain to completion (blocking)."
+    ),
+)
+@common_options
+@click.pass_context
+def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
+    """Advance a detached resumable chain (issue #12).
+
+    For a chain whose `hsm sweep run --resumable` launcher has exited. Reads
+    .hsm_manifest.json, re-attaches over SSH, and — if the current chunk is
+    terminal — submits the next chunk (default; non-blocking, cron-friendly) or
+    drives to completion (--max-iterations 0). Submits NEW Slurm jobs, so it is
+    DISTINCT from `hsm sweep collect` (which only pulls/archives). Intended for
+    a DETACHED chain — don't run it while a live launcher is still driving the
+    same chain (both could submit the next chunk).
+    """
+    import json
+
+    console = ctx.obj["console"]
+    logger = ctx.obj["logger"]
+    sweep_dir = Path("sweeps/outputs") / sweep_id
+    manifest_path = sweep_dir / ".hsm_manifest.json"
+    if not manifest_path.exists():
+        console.print(f"[red]No manifest at {manifest_path}.[/red]")
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, ValueError) as e:
+        console.print(f"[red]Could not read manifest {manifest_path}: {e}[/red]")
+        return
+    if not (manifest.get("resumable") or {}).get("enabled"):
+        console.print(
+            f"[red]{sweep_id} is not a resumable chain (no `resumable` block in "
+            f"its manifest). For an ordinary sweep use `hsm sweep collect`.[/red]"
+        )
+        return
+    if manifest.get("backend") != "slurm":
+        console.print("[red]advance supports backend=slurm chains only.[/red]")
+        return
+    try:
+        asyncio.run(
+            _advance_via_manifest(
+                sweep_dir, manifest, console, block=(max_iterations == 0)
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]advance failed: {e}[/red]")
+        logger.exception("hsm sweep advance failed")
         raise
 
 

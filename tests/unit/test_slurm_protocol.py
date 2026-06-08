@@ -91,3 +91,58 @@ class TestRenderRejectsMultiType:
 
         out = render_sbatch_directives(ResourceSpec(gpus=2, gpu_type="H100"))
         assert "#SBATCH --gres=gpu:H100:2" in out
+
+
+class TestRenderChainDirectives:
+    """Resumable-chain additions (issue #12): --dependency / --signal."""
+
+    def _spec(self):
+        from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+
+        return ResourceSpec(walltime="23:00:00", cpus_per_task=4)
+
+    def test_omitted_is_byte_identical(self):
+        from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
+
+        spec = self._spec()
+        assert render_sbatch_directives(spec) == render_sbatch_directives(
+            spec, dependency=None, signal=None
+        )
+        assert "--dependency" not in render_sbatch_directives(spec)
+        assert "--signal" not in render_sbatch_directives(spec)
+
+    def test_dependency_line(self):
+        from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
+
+        out = render_sbatch_directives(self._spec(), dependency="afterany:12345")
+        assert "#SBATCH --dependency=afterany:12345" in out
+
+    def test_signal_line(self):
+        from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
+
+        out = render_sbatch_directives(self._spec(), signal="B:TERM@120")
+        assert "#SBATCH --signal=B:TERM@120" in out
+
+    def test_both_appended_after_extra_directives(self):
+        from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+        from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
+
+        spec = ResourceSpec(
+            walltime="23:00:00", extra_directives=(("--exclusive", ""),)
+        )
+        out = render_sbatch_directives(
+            spec, dependency="afterany:9:10", signal="B:TERM@120"
+        )
+        lines = out.splitlines()
+        assert lines.index("#SBATCH --exclusive") < lines.index(
+            "#SBATCH --dependency=afterany:9:10"
+        )
+        assert lines.index("#SBATCH --dependency=afterany:9:10") < lines.index(
+            "#SBATCH --signal=B:TERM@120"
+        )
+
+    def test_format_signal(self):
+        from hpc_sweep_manager.core.hpc.slurm_protocol import format_signal
+
+        assert format_signal(120) == "B:TERM@120"
+        assert format_signal(60) == "B:TERM@60"

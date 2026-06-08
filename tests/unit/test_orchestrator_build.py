@@ -69,3 +69,50 @@ class TestRemoteSubmission:
             _src, _mode, sub = _build("ssh", "array", tmp_path)
         assert sub == "individual"
         assert any("array" in r.message.lower() for r in caplog.records)
+
+
+class TestResumableBackendGate:
+    """--resumable (issue #12) requires a Slurm backend."""
+
+    import pytest
+
+    @pytest.mark.parametrize("mode", ["local", "individual"])
+    def test_non_slurm_local_modes_rejected(self, tmp_path, mode):
+        import pytest as _pytest
+
+        with _pytest.raises(RuntimeError, match="requires a Slurm backend"):
+            build_compute_source(
+                mode=mode,
+                python_path="python",
+                script_path="train.py",
+                project_dir=str(tmp_path),
+                resumable=True,
+            )
+
+    def test_remote_ssh_backend_rejected(self, tmp_path):
+        import pytest as _pytest
+
+        with _pytest.raises(RuntimeError, match="backend: slurm"):
+            build_compute_source(
+                mode="remote",
+                python_path="python",
+                script_path="train.py",
+                project_dir=str(tmp_path),
+                hsm_config=_cfg("ssh"),
+                remote_alias="r",
+                resumable=True,
+            )
+
+    def test_remote_slurm_backend_allowed(self, tmp_path):
+        # backend=slurm + --resumable builds fine (array submission).
+        src, mode, _sub = build_compute_source(
+            mode="remote",
+            python_path="python",
+            script_path="train.py",
+            project_dir=str(tmp_path),
+            hsm_config=_cfg("slurm"),
+            remote_alias="r",
+            remote_submission="array",
+            resumable=True,
+        )
+        assert mode == "remote"

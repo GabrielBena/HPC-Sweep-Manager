@@ -1186,3 +1186,275 @@ class TestFactory:
         )
         # String falls back to None — we don't try to parse it.
         assert src.qos_whitelist is None
+
+
+# ----------------------------------------------------------- resumable chains
+
+
+class TestResumableSubmit:
+    """Resumable chains (issue #12): chunk submissions carry --signal, a
+    dependency on chunk >=2, the resume env/arg, the sentinel skip-check, and
+    cap every sub-array's walltime at chunk_walltime."""
+
+    def _ctx(self, chunk_index, **over):
+        from hpc_sweep_manager.core.common.resumable import (
+            ResumableConfig,
+            ResumableContext,
+        )
+
+        opts = dict(
+            enabled=True,
+            chunk_walltime="23:00:00",
+            signal_grace=120,
+            resume_arg="training.resume_from",  # opt into the hydra CLI override
+        )
+        opts.update(over)
+        return ResumableContext(chunk_index=chunk_index, config=ResumableConfig(**opts))
+
+    async def _make_src(self, tmp_path, conn, **spec_over):
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            default_spec=ResourceSpec(walltime="48:00:00", **spec_over),
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweeps" / "outputs" / "sw", "sw")
+        return src
+
+    def _rendered(self, conn):
+        scripts = [
+            c for c in conn.run_calls
+            if c["cmd"].startswith("cat > ") and c["cmd"].rstrip("'\"").endswith(".slurm")
+        ]
+        return "\n".join(c["input"] for c in scripts)
+
+    @pytest.mark.asyncio
+    async def test_chunk0_render(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        src = await self._make_src(tmp_path, conn)
+        ids = await src.submit_batch(
+            params_list=[{"seed": 0}, {"seed": 1}],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            dependency=None,
+            resumable=self._ctx(0),
+        )
+        assert ids == ["100"]
+        body = self._rendered(conn)
+        # Signal present; NO dependency on chunk 0; walltime capped at the chunk.
+        assert "#SBATCH --signal=B:TERM@120" in body
+        assert "--dependency" not in body
+        assert "#SBATCH --time=23:00:00" in body
+        assert "#SBATCH --time=48:00:00" not in body  # the full budget is NOT used
+        # Fresh start: empty resume pointer, no resume arg in the command.
+        assert 'export HSM_RESUME_FROM=""' in body
+        assert "training.resume_from=" not in body
+        # Sentinel skip-check, not the Status: grep.
+        assert 'if [[ -f "$HSM_DONE_SENTINEL" ]]; then' in body
+        # SIGTERM-forwarding run block.
+        assert 'eval "$COMMAND" &' in body
+        assert "set +e" in body
+        assert "Status: CHUNK_INCOMPLETE" in body
+
+    @pytest.mark.asyncio
+    async def test_chunk1_render_has_dependency_and_resume(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
+        src = await self._make_src(tmp_path, conn)
+        await src.submit_batch(
+            params_list=[{"seed": 0}, {"seed": 1}],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            dependency="afterany:100",
+            resumable=self._ctx(1),
+        )
+        body = self._rendered(conn)
+        assert "#SBATCH --dependency=afterany:100" in body
+        assert 'export HSM_RESUME_FROM="$HSM_RESUME_TO"' in body
+        assert "training.resume_from=$HSM_RESUME_FROM" in body
+
+    @pytest.mark.asyncio
+    async def test_budget_threading_identical_overrides(self, tmp_path):
+        """Same hydra overrides + output.dir/wandb.group every chunk; only the
+        resume pointer differs (faithful-budget contract)."""
+        conn0 = FakeConn(responder=_setup_ok_responder())
+        conn0.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        s0 = await self._make_src(tmp_path / "a", conn0)
+        await s0.submit_batch(
+            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
+            job_name_prefix="sw", resumable=self._ctx(0),
+        )
+        conn1 = FakeConn(responder=_setup_ok_responder())
+        conn1.add("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
+        s1 = await self._make_src(tmp_path / "b", conn1)
+        await s1.submit_batch(
+            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
+            job_name_prefix="sw", dependency="afterany:100", resumable=self._ctx(1),
+        )
+        # The params file (hydra overrides) is byte-identical across chunks.
+        def _params(conn):
+            return [
+                c["input"] for c in conn.run_calls
+                if c["cmd"].startswith("cat > ") and "parameter_combinations" in c["cmd"]
+            ][0]
+        assert _params(conn0) == _params(conn1)
+
+    @pytest.mark.asyncio
+    async def test_multi_type_resumable_caps_every_subarray(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 222\n"))
+        src = await self._make_src(
+            tmp_path, conn, gpus=1, gpu_type=("A100", "H200")
+        )
+        src.speed_factors = {"a100": 1.0, "h200": 0.5}
+        ids = await src.submit_batch(
+            params_list=[{"seed": i} for i in range(4)],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            dependency="afterany:90:91",
+            resumable=self._ctx(1),
+        )
+        assert ids == ["111", "222"]
+        body = self._rendered(conn)
+        # BOTH sub-arrays capped at chunk_walltime (NOT the cost-scaled 23/11.5h).
+        assert body.count("#SBATCH --time=23:00:00") == 2
+        assert "11:30:00" not in body
+        # Both carry the signal + the same dependency on the previous chunk.
+        assert body.count("#SBATCH --signal=B:TERM@120") == 2
+        assert body.count("#SBATCH --dependency=afterany:90:91") == 2
+        # Both still get their own --gres type.
+        assert "--gres=gpu:A100:1" in body and "--gres=gpu:H200:1" in body
+
+    @pytest.mark.asyncio
+    async def test_non_array_resumable_rejected(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = await self._make_src(tmp_path, conn)
+        with pytest.raises(ValueError, match="array mode"):
+            await src.submit_batch(
+                params_list=[{"seed": 0}], sweep_id="sw", mode="individual",
+                resumable=self._ctx(0),
+            )
+
+    @pytest.mark.asyncio
+    async def test_resumable_submit_skips_base_manifest(self, tmp_path):
+        """In resumable mode the chain driver owns the manifest, so submit_batch
+        does NOT write one itself."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        src = await self._make_src(tmp_path, conn)
+        await src.submit_batch(
+            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
+            job_name_prefix="sw", resumable=self._ctx(0),
+        )
+        assert not (src.sweep_dir / ".hsm_manifest.json").exists()
+        # ...but persist_chain_manifest writes it (with the chain block).
+        await src.persist_chain_manifest(
+            resumable=self._ctx(0).config.to_manifest(),
+            chain={"state": {"chunk_index": 0}, "chunks": [{"index": 0, "job_ids": ["100"]}], "num_tasks": 1},
+            job_ids=["100"],
+            num_tasks=1,
+        )
+        manifest = json.loads((src.sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["resumable"]["chunk_walltime"] == "23:00:00"
+        assert manifest["chain"]["chunks"][0]["job_ids"] == ["100"]
+
+
+class TestChunkProgress:
+    """The one-find sentinel + checkpoint-mtime probe (issue #12)."""
+
+    async def _src(self, tmp_path, stdout):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("find", _Result(0, stdout=stdout))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path),
+            script_path="train.py", fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sw", "sw")
+        return src
+
+    @pytest.mark.asyncio
+    async def test_parses_done_indices_and_mtime(self, tmp_path):
+        out = (
+            "/r/sw/tasks/task_1/.hsm_done\n"
+            "/r/sw/tasks/task_3/.hsm_done\n"
+            "HSM_SEP\n"
+            "1700000100.2\n"
+        )
+        src = await self._src(tmp_path, out)
+        prog = await src.chunk_progress(3, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.done_indices == frozenset({1, 3})
+        assert prog.checkpoint_mtime == 1700000100.2
+
+    @pytest.mark.asyncio
+    async def test_pad_agnostic_task_parse(self, tmp_path):
+        out = "/r/sw/tasks/task_07/.hsm_done\nHSM_SEP\n\n"
+        src = await self._src(tmp_path, out)
+        prog = await src.chunk_progress(8, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.done_indices == frozenset({7})
+        assert prog.checkpoint_mtime is None
+
+    @pytest.mark.asyncio
+    async def test_prefix_with_task_dir_not_mis_parsed(self, tmp_path):
+        # A workdir prefix containing a `/task_3/` component must NOT shadow the
+        # real (trailing) task index — anchor on the sentinel's parent.
+        out = "/scratch/task_3/runs/sw/tasks/task_9/.hsm_done\nHSM_SEP\n"
+        src = await self._src(tmp_path, out)
+        prog = await src.chunk_progress(9, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.done_indices == frozenset({9})
+
+    @pytest.mark.asyncio
+    async def test_empty_output(self, tmp_path):
+        src = await self._src(tmp_path, "HSM_SEP\n")
+        prog = await src.chunk_progress(2, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.done_indices == frozenset()
+        assert prog.checkpoint_mtime is None
+
+
+class TestChainManifestRoundTrip:
+    """The re-submit-critical fields (spec/script_path/remote_code_dir/chain
+    state) must survive persist -> from_manifest, or `advance` would re-submit
+    chunks with empty #SBATCH directives (issue #12)."""
+
+    @pytest.mark.asyncio
+    async def test_spec_and_chain_survive(self, tmp_path):
+        from hpc_sweep_manager.core.common.resumable import ResumableConfig
+        from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
+            SSHSlurmComputeSource,
+        )
+
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="48:00:00", gpus=1, gpu_type="V100",
+                qos="normal", partition="lowprio",
+            ),
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweeps" / "outputs" / "sw", "sw")
+        await src.persist_chain_manifest(
+            resumable=ResumableConfig(enabled=True, chunk_walltime="23:00:00").to_manifest(),
+            chain={"state": {"chunk_index": 1}, "chunks": [{"index": 0, "job_ids": ["100"]}],
+                   "num_tasks": 2, "last_done_count": 1, "last_checkpoint_mtime": 9.0,
+                   "wandb_group": "grp"},
+            job_ids=["100"], num_tasks=2,
+        )
+        manifest = json.loads((src.sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["spec"]["gpu_type"] == "V100"
+        assert manifest["script_path"] == "train.py"
+        assert manifest["remote_code_dir"]
+
+        restored = SSHSlurmComputeSource.from_manifest(manifest)
+        assert restored.default_spec.gpu_type == "V100"
+        assert restored.default_spec.partition == "lowprio"
+        assert restored.default_spec.walltime == "48:00:00"
+        assert restored.script_path == "train.py"
+        assert restored._chain_state.chunk_index == 1
+        assert restored._resumable_config.chunk_walltime == "23:00:00"
