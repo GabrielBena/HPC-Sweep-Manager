@@ -944,7 +944,10 @@ class SSHSlurmComputeSource(ComputeSource):
         before, _, after = (result.stdout or "").partition("HSM_SEP")
         done: set[int] = set()
         for line in before.splitlines():
-            m = re.search(r"/task_(\d+)/", line.strip())
+            # Anchor to the sentinel's PARENT (`.../task_<N>/<sentinel>` at the
+            # end), not the first `/task_N/` — a workdir prefix could itself
+            # contain a `/task_<digit>/` component and mis-parse the index.
+            m = re.search(r"task_(\d+)/[^/]+$", line.strip())
             if m:
                 done.add(int(m.group(1)))
         mtime: Optional[float] = None

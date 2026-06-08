@@ -490,7 +490,28 @@ async def run_resumable_sweep_async(
     )
     rcfg_manifest = resumable.to_manifest()
     chunks_meta: list[dict[str, Any]] = []
+    # Re-attach (advance): the seeded chunk is already submitted — record it so
+    # the manifest never persists an empty `chunks` list (a crash between the
+    # post-evaluate persist and the next submit would otherwise strand the
+    # chain: the next advance would see "no chunks recorded").
+    if initial_job_ids:
+        chunks_meta.append(
+            {
+                "index": state.chunk_index,
+                "job_ids": list(initial_job_ids),
+                "terminal_states": [],
+            }
+        )
     prev_job_ids: list[str] = []
+    # The no-progress baseline. On a fresh foreground run it accumulates across
+    # chunks, so the consecutive-failure cap fires promptly. On a detached
+    # `advance` re-attach it resets here (the prior chunk's done-count/mtime
+    # aren't carried in the manifest), so the FIRST chunk after re-attach is
+    # biased toward "progressed". `state.consecutive_no_progress` is still
+    # restored, and `max_chunks` is the hard bound regardless — so a
+    # cron-driven chain is always bounded, just slower to flag a deterministic
+    # crash than the live launcher. (Carrying these in the manifest is a clean
+    # follow-up.)
     prev_done = 0
     prev_mtime: float | None = None
     current: list[str] | None = initial_job_ids

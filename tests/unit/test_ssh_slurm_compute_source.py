@@ -1400,6 +1400,15 @@ class TestChunkProgress:
         assert prog.checkpoint_mtime is None
 
     @pytest.mark.asyncio
+    async def test_prefix_with_task_dir_not_mis_parsed(self, tmp_path):
+        # A workdir prefix containing a `/task_3/` component must NOT shadow the
+        # real (trailing) task index — anchor on the sentinel's parent.
+        out = "/scratch/task_3/runs/sw/tasks/task_9/.hsm_done\nHSM_SEP\n"
+        src = await self._src(tmp_path, out)
+        prog = await src.chunk_progress(9, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.done_indices == frozenset({9})
+
+    @pytest.mark.asyncio
     async def test_empty_output(self, tmp_path):
         src = await self._src(tmp_path, "HSM_SEP\n")
         prog = await src.chunk_progress(2, done_sentinel=".hsm_done", checkpoint_subdir="resume")
