@@ -332,8 +332,11 @@ class DistributedComputeSource(ComputeSource):
             return False
         return await source.cancel_job(job_id)
 
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
         # The manager collects + normalizes results during submit_distributed_sweep.
+        # (defer_cleanup is a resumable-chain no-op — distributed isn't a chain backend.)
         return True
 
     async def health_check(self) -> Dict[str, Any]:

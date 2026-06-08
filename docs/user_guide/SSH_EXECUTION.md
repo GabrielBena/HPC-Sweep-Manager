@@ -374,6 +374,17 @@ Every task dir also carries a `params.yaml` with that task's exact overrides,
 so a synced checkpoint is self-describing (pair it with the project code to
 rebuild the model) even from a partial pull.
 
+### Finishing a >walltime job on a capped pool — `--resumable`
+
+If your config needs more than the pool's QOS walltime cap (e.g. S3IT's V100
+`lowprio` 24 h cap), `--resumable` runs it as a chain of `≤chunk_walltime`
+checkpoint-chained chunks over this same `backend: slurm` path. Your training
+script implements a small resume contract; HSM submits chunk *k+1* depending on
+chunk *k*, threads the resume pointer, and stops on a `.hsm_done` sentinel. A
+detached chain resumes with `hsm sweep advance <id>`. Full reference (contract,
+config, example):
+[HPC_EXECUTION.md → Resumable chained runs](HPC_EXECUTION.md#resumable-chained-runs--finish-a-walltime-job-on-a-capped-pool).
+
 ## Housekeeping
 
 The rolling code cache at `~/.hsm/runs/<project>/code/` is reused across

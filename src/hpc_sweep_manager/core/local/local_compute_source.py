@@ -432,8 +432,11 @@ class LocalComputeSource(ComputeSource):
                 on_progress(len(self.completed_jobs), max(total, 1))
         return {jid: info.status for jid, info in self.completed_jobs.items()}
 
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
         # Local jobs write outputs into self.sweep_dir/tasks/* directly.
+        # (defer_cleanup is a resumable-chain no-op here — nothing to tear down.)
         return True
 
     async def health_check(self) -> Dict[str, Any]:

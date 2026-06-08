@@ -237,6 +237,102 @@ live, sub-array 2's sbatch rejected), the manifest is still written so
 `hsm sweep collect <id>` can re-attach — the error names the live job
 ids and the `scancel` command to abort them instead.
 
+## Resumable chained runs — finish a >walltime job on a capped pool
+
+Some GPU pools are fast and abundant but **walltime-capped** (e.g. UZH S3IT's
+V100 `lowprio`: ~48 idle cards, 24 h cap) or preemptible, while the uncapped
+alternative is heavily contended. `--resumable` lets you launch an arbitrary
+config that needs 48 h+ and have HSM finish it transparently as a **chain of
+≤`chunk_walltime` checkpoint-chained chunks** — each chunk resumes the previous
+one from a checkpoint, and (if your script reuses its tracker run id) the W&B
+run is continuous across the seams.
+
+```bash
+hsm sweep run --resumable --chunk-walltime 23:00:00 --remote uzh --mode array -c sweep.yaml
+```
+
+This is the complement to heterogeneous GPU scheduling above: #7 spreads a
+sweep *across* GPU types; `--resumable` lets a *single* long task survive a
+*capped* pool. They compose — a resumable multi-`gpu_type` sweep places tasks
+by cost, then caps **every** chunk at `chunk_walltime` (chunking caps, it does
+not scale).
+
+### How it works (option B — HSM-driven)
+
+A "chunk" is one Slurm array submission of the **whole** param set. After a
+chunk reaches a terminal state, HSM checks each task's `.hsm_done` sentinel and
+the checkpoint mtime, then either submits the next chunk (`--dependency=afterany`
+the previous, so the seam is serialized) or stops:
+
+- **done** — every task wrote `.hsm_done`.
+- **failed** — `max_chunks` reached without finishing, OR
+  `max_consecutive_failures` chunks made no progress (a deterministic crash).
+
+Done-detection is the **sentinel, never the exit code**: a timed-out chunk
+exits non-zero yet is the *normal* mid-budget outcome. The launcher drives the
+chain while alive — run it under `tmux`/`nohup` (an always-on workstation is
+ideal). If it dies, resume with `hsm sweep advance <sweep_id>` (re-attaches via
+the manifest; submits the next chunk if the current one is terminal). A cron
+running `hsm sweep advance <id>` drives a fully detached chain.
+
+### The contract your training script implements (~10 lines)
+
+HSM stays a general orchestrator — it knows only **paths**, never your
+checkpoint format or tracker. Your script must:
+
+1. **Consume the resume pointer.** HSM exports `HSM_RESUME_FROM` (empty on
+   chunk 1, the persistent checkpoint dir on chunk ≥2) and, if `resume_arg` is
+   set, also appends `<resume_arg>=<path>` to the command. Resume iff it's
+   set/non-empty, else start fresh.
+2. **Save on the pre-walltime signal.** HSM sets `--signal=B:TERM@<grace>`; on
+   SIGTERM, save a resume-complete checkpoint to `HSM_RESUME_TO` (under the
+   persistent per-task workdir) and exit. Checkpoint periodically too, so a
+   hard crash still resumes from the last periodic save.
+3. **Signal done.** Write `$HSM_DONE_SENTINEL` (`$HSM_WORKDIR/.hsm_done`) when
+   the *whole budget* is complete. HSM never inspects epochs.
+4. **Faithful budget.** HSM passes the **same** overrides every chunk (only the
+   resume pointer varies), so an LR schedule etc. spans the whole run — your
+   script must read the total budget from its (unchanged) config, not infer it
+   from the chunk.
+
+Minimal reference: [`examples/resumable_probe.py`](../../examples/resumable_probe.py)
+(a non-GPU sleep+checkpoint script that implements the full contract).
+
+### Config
+
+CLI `--resumable`/`--chunk-walltime` override the typed `resumable:` block in
+your **sweep YAML** (the workload knows it's long); a per-remote `resumable:`
+block may set only the cluster-bound knobs (`chunk_walltime`, `signal_grace`,
+`checkpoint_subdir`).
+
+```yaml
+# sweeps/sweep.yaml
+resumable:
+  enabled: true
+  chunk_walltime: "23:00:00"     # < the pool's QOS cap (HH:MM:SS — NOT MM:SS)
+  signal_grace: 120              # seconds before walltime -> --signal=B:TERM@120
+  resume_arg: "training.resume_from"   # hydra key set on chunks >=2 (null = env-only)
+  done_sentinel: ".hsm_done"     # script writes this under $HSM_WORKDIR when complete
+  checkpoint_subdir: "resume"    # per-task persistent ckpt dir; HSM passes HSM_RESUME_{FROM,TO}
+  max_chunks: 10                 # runaway guard (chain length cap)
+  max_consecutive_failures: 2    # no-progress strikes -> mark the chain FAILED
+```
+
+`hsm queue mine` annotates the chain's array row `(chunk k/max)`. `--dry-run`
+prints the chain plan with the per-chunk walltime cap. `signal_grace` must
+exceed your script's worst-case checkpoint-save time and be < `chunk_walltime`
+(both validated). The checkpoint dir lives on the remote under `workdir` and is
+**not** pulled to the workstation by default (it rides the cheap server-side
+archive) — set a per-remote `rsync_excludes` if you keep large nested junk
+elsewhere.
+
+Caveats (v1): Slurm backends only (`--mode array` native, or a `backend: slurm`
+remote — local/ssh-bash are rejected). `hsm sweep collect` refuses a chain (it
+could delete the remote checkpoints between chunks) and points at `advance`.
+Don't run `hsm sweep advance` while a live launcher is still driving the same
+chain (both could submit the next chunk). A custom `done_sentinel` isn't
+reflected in `hsm sweep status` (the analyzer hardcodes `.hsm_done`).
+
 ## The typed `local:` block — defaults for `--mode local`
 
 Mirror of the `slurm:` block above, but for `--mode local`. Restricted

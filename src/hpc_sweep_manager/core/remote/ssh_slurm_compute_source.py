@@ -44,9 +44,11 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import re
 import shlex
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..common.chain import ChainState
 from ..common.compute_source import (
     TERMINAL_STATES,
     ComputeSource,
@@ -55,6 +57,7 @@ from ..common.compute_source import (
     SubmissionMode,
 )
 from ..common.resource_spec import ResourceSpec
+from ..common.resumable import ChunkProgress, ResumableConfig, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..hpc.scheduler_queue import parse_reservations_output
 from ..hpc.gpu_planner import (
@@ -62,9 +65,11 @@ from ..hpc.gpu_planner import (
     build_array_submissions,
     jobs_manifest_entries,
     normalize_speed_factors,
+    replace_sub_walltime,
 )
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
+    format_signal,
     parse_sacct_state,
     parse_sbatch_job_id,
     render_sbatch_directives,
@@ -171,6 +176,13 @@ class SSHSlurmComputeSource(ComputeSource):
         self.sweep_dir: Optional[Path] = None
         self.sweep_id: Optional[str] = None
         self._run_prefix: str = "python"
+        # Resumable chains (issue #12): the driver sets _pull_excludes so the
+        # incremental + final tasks/ pulls skip the heavy checkpoint subdir
+        # (it rides the cheap server-side archive instead of the WAN). The
+        # config/state are restored by from_manifest for `hsm sweep advance`.
+        self._pull_excludes: tuple[str, ...] = ()
+        self._resumable_config: Optional[ResumableConfig] = None
+        self._chain_state: Optional[ChainState] = None
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
@@ -445,11 +457,26 @@ class SSHSlurmComputeSource(ComputeSource):
         wandb_group: Optional[str] = None,
         job_name_prefix: Optional[str] = None,
         costs: Optional[Sequence[float]] = None,
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> List[str]:
+        if resumable is not None and mode != "array":
+            raise ValueError(
+                "resumable chains use array mode (one chunk = one Slurm array); "
+                f"got mode={mode!r}"
+            )
         if mode == "array":
             try:
                 job_ids = await self._submit_array(
-                    params_list, sweep_id, spec, wandb_group, job_name_prefix, costs
+                    params_list,
+                    sweep_id,
+                    spec,
+                    wandb_group,
+                    job_name_prefix,
+                    costs,
+                    dependency=dependency,
+                    resumable=resumable,
                 )
             except Exception:
                 # Multi-type submission is a LOOP of sbatch calls — a
@@ -480,12 +507,35 @@ class SSHSlurmComputeSource(ComputeSource):
                 params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
             )
         # Drop a re-attach manifest (local + remote) so `hsm sweep collect <id>`
-        # can pull/archive after the launching process dies (T0).
-        await self._write_manifest(job_ids, mode, len(params_list))
+        # can pull/archive after the launching process dies (T0). In resumable
+        # mode the chain DRIVER owns the manifest (it carries the chain state +
+        # per-chunk job ids via persist_chain_manifest), so don't double-write.
+        if resumable is None:
+            await self._write_manifest(job_ids, mode, len(params_list))
         return job_ids
 
+    async def persist_chain_manifest(
+        self,
+        *,
+        resumable: Dict[str, Any],
+        chain: Dict[str, Any],
+        job_ids: List[str],
+        num_tasks: int,
+    ) -> None:
+        """Re-write the manifest with the resumable config + chain state so a
+        detached ``hsm sweep advance`` can reconstruct and keep driving."""
+        await self._write_manifest(
+            job_ids, "array", num_tasks, resumable_manifest=resumable, chain=chain
+        )
+
     async def _write_manifest(
-        self, job_ids: List[str], submission_mode: str, num_tasks: int
+        self,
+        job_ids: List[str],
+        submission_mode: str,
+        num_tasks: int,
+        *,
+        resumable_manifest: Optional[Dict[str, Any]] = None,
+        chain: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist everything a fresh client needs to re-attach this sweep.
 
@@ -493,6 +543,9 @@ class SSHSlurmComputeSource(ComputeSource):
         source-reconstruction fields + resolved remote paths + job ids, so
         ``hsm sweep collect <id>`` works with no dependence on the original
         process's in-memory state (or even the current ``.hsm/config.yaml``).
+        ``resumable_manifest``/``chain`` are the resumable-chain additions
+        (issue #12) — omitted for ordinary sweeps so their manifest stays
+        byte-identical.
         """
         manifest = {
             "sweep_id": self.sweep_id,
@@ -527,6 +580,18 @@ class SSHSlurmComputeSource(ComputeSource):
             ),
             "submitted_at": datetime.now().isoformat(),
         }
+        if resumable_manifest is not None:
+            manifest["resumable"] = resumable_manifest
+            # Store everything `hsm sweep advance` needs to re-submit the next
+            # chunk without re-reading a possibly-changed .hsm/config.yaml: the
+            # effective spec (the per-chunk walltime cap is reapplied at submit,
+            # so the FULL walltime here is correct), the train script, and the
+            # remote code dir (the rsynced mirror persists between chunks).
+            manifest["spec"] = self.default_spec.to_dict()
+            manifest["script_path"] = self.script_path
+            manifest["remote_code_dir"] = self._remote_code_dir
+        if chain is not None:
+            manifest["chain"] = chain
         content = json.dumps(manifest, indent=2, default=str)
         if self.sweep_dir is not None:
             try:
@@ -573,7 +638,12 @@ class SSHSlurmComputeSource(ComputeSource):
         captured everything at submit time. ``script_path`` is irrelevant for
         collection (we never re-submit), so it's left empty.
         """
-        return cls(
+        # For a resumable chain, `advance` re-submits — so restore the script
+        # path + effective spec (ordinary collect never re-submits, leaves them
+        # empty/default).
+        is_chain = bool(manifest.get("resumable"))
+        spec_block = manifest.get("spec")
+        inst = cls(
             name=manifest.get("name") or manifest.get("host") or "remote",
             host=manifest.get("host"),
             ssh_key=manifest.get("ssh_key"),
@@ -581,13 +651,23 @@ class SSHSlurmComputeSource(ComputeSource):
             conda_env=manifest.get("conda_env"),
             python_path=manifest.get("python_path"),
             project_dir=manifest.get("project_dir", "."),
-            script_path="",
+            script_path=manifest.get("script_path", "") if is_chain else "",
             remote_root=manifest.get("remote_root", "~/.hsm/runs"),
             workdir=manifest.get("workdir"),
             archive_dir=manifest.get("archive_dir"),
             archive_on=manifest.get("archive_on", "completed"),
             keep_remote_on_success=manifest.get("keep_remote_on_success", False),
+            default_spec=ResourceSpec.from_dict(spec_block) if spec_block else None,
         )
+        # Resumable chains (issue #12): restore the config + last chain state so
+        # `hsm sweep advance` can keep driving a detached chain.
+        rblock = manifest.get("resumable")
+        if rblock:
+            inst._resumable_config = ResumableConfig.from_manifest(rblock)
+            inst._chain_state = ChainState.from_dict(
+                (manifest.get("chain") or {}).get("state")
+            )
+        return inst
 
     async def _submit_array(
         self,
@@ -597,6 +677,9 @@ class SSHSlurmComputeSource(ComputeSource):
         wandb_group: Optional[str],
         job_name_prefix: Optional[str],
         costs: Optional[Sequence[float]] = None,
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> List[str]:
         """Submit the sweep as 1..K Slurm arrays.
 
@@ -605,6 +688,13 @@ class SSHSlurmComputeSource(ComputeSource):
         sub-array per GPU type via :func:`gpu_planner.build_array_submissions`
         — LPT task assignment by relative ``costs``, per-type walltimes from
         ``speed_factors``.
+
+        In a resumable chunk (issue #12) every sub-array's walltime is CAPPED at
+        ``chunk_walltime`` (chunking caps, it doesn't scale): #7's cost-based
+        placement still runs, but the cost-scaled per-type walltime is flattened
+        to the cap. The same ``dependency`` token (``afterany:<prev parents>``)
+        is set on every sub-array so chunk k+1 starts only after the whole
+        previous chunk cleared.
         """
         if not params_list:
             raise ValueError("Cannot submit an empty array")
@@ -620,8 +710,13 @@ class SSHSlurmComputeSource(ComputeSource):
             speed_factors=self.speed_factors,
             costs=costs,
         )
+        if resumable is not None:
+            cap = resumable.config.chunk_walltime
+            submissions = [replace_sub_walltime(sub, cap) for sub in submissions]
         return [
-            await self._submit_one_array(sub, sweep_id, wandb_group)
+            await self._submit_one_array(
+                sub, sweep_id, wandb_group, dependency=dependency, resumable=resumable
+            )
             for sub in submissions
         ]
 
@@ -630,8 +725,14 @@ class SSHSlurmComputeSource(ComputeSource):
         sub: SubArraySubmission,
         sweep_id: str,
         wandb_group: Optional[str],
+        *,
+        dependency: Optional[str] = None,
+        resumable: Optional[ResumableContext] = None,
     ) -> str:
-        directives = render_sbatch_directives(sub.spec)
+        signal = format_signal(resumable.config.signal_grace) if resumable else None
+        directives = render_sbatch_directives(
+            sub.spec, dependency=dependency, signal=signal
+        )
 
         # Per-(sub-)array params file — written to the remote sweep dir so
         # the array template's $SLURM_ARRAY_TASK_ID python helper can find
@@ -643,6 +744,7 @@ class SSHSlurmComputeSource(ComputeSource):
             remote_params_file, json.dumps(list(sub.entries), indent=2)
         )
 
+        rcfg = resumable.config if resumable else None
         script_content = render_template(
             "slurm_array.sh.j2",
             job_name=sub.job_name,
@@ -660,6 +762,11 @@ class SSHSlurmComputeSource(ComputeSource):
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
             gpu_type=sub.gpu_type,
+            resumable=resumable is not None,
+            resume_from_present=(resumable.resume_from_present if resumable else False),
+            resume_arg=(rcfg.resume_arg if rcfg else None),
+            done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
+            checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
         )
         remote_script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)
@@ -800,9 +907,54 @@ class SSHSlurmComputeSource(ComputeSource):
         """
         remote_tasks = f"{self._remote_sweep_dir}/tasks"
         local_tasks = str(self.sweep_dir / "tasks")
-        pull_cmd = build_rsync_pull_cmd(self.host, remote_tasks, local_tasks)
+        # _pull_excludes is set by the resumable driver to skip the heavy
+        # checkpoint subdir (issue #12); empty for ordinary sweeps.
+        pull_cmd = build_rsync_pull_cmd(
+            self.host, remote_tasks, local_tasks, excludes=self._pull_excludes
+        )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
         return await self._run_rsync(pull_cmd)
+
+    async def chunk_progress(
+        self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
+    ) -> ChunkProgress:
+        """Probe done-sentinels + newest checkpoint mtime in ONE ssh round-trip.
+
+        HSM stats only paths it itself provided — it never reads checkpoint
+        CONTENTS (the generality guardrail). The remote ``find`` emits the
+        sentinel paths (one per done task) and the single max checkpoint mtime;
+        the driver diffs successive observations into the ``progressed`` bool.
+        """
+        if self._conn is None or self._remote_tasks_dir is None:
+            return ChunkProgress(done_indices=frozenset(), checkpoint_mtime=None)
+        tasks = shlex.quote(self._remote_tasks_dir)
+        sent = shlex.quote(done_sentinel)
+        ckpt_glob = shlex.quote(f"*/{checkpoint_subdir}/*")
+        # Two finds joined by a sentinel line: the first lists done-sentinel
+        # paths (bounded by -maxdepth 2 = tasks/task_N/.hsm_done); the second
+        # reduces every checkpoint file's mtime to a single max so the output
+        # stays tiny no matter how many checkpoint files exist.
+        cmd = (
+            f"find {tasks} -maxdepth 2 -name {sent} -type f 2>/dev/null; "
+            f"echo HSM_SEP; "
+            f"find {tasks} -path {ckpt_glob} -type f -printf '%T@\\n' 2>/dev/null "
+            f"| sort -n | tail -1"
+        )
+        result = await self._ssh_run(cmd, check=False)
+        before, _, after = (result.stdout or "").partition("HSM_SEP")
+        done: set[int] = set()
+        for line in before.splitlines():
+            m = re.search(r"/task_(\d+)/", line.strip())
+            if m:
+                done.add(int(m.group(1)))
+        mtime: Optional[float] = None
+        tail = after.strip().splitlines()
+        if tail:
+            try:
+                mtime = float(tail[-1].strip())
+            except ValueError:
+                mtime = None
+        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime)
 
     async def wait_for_all(
         self,
@@ -850,12 +1002,21 @@ class SSHSlurmComputeSource(ComputeSource):
                 await asyncio.sleep(poll_interval)
         return final_statuses
 
-    async def collect_results(self, job_ids: Optional[List[str]] = None) -> bool:
+    async def collect_results(
+        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+    ) -> bool:
         if self._remote_sweep_dir is None or self.sweep_dir is None:
             logger.warning(
                 f"collect_results called before setup on {self.name}"
             )
             return False
+
+        # Resumable chains (issue #12): between chunks pull partial progress but
+        # do NOT archive or rm -rf — the next chunk's checkpoints live in the
+        # remote sweep dir. Only the terminal DONE/FAILED call cleans up.
+        if defer_cleanup:
+            rc = await self._pull_tasks()
+            return rc == 0
 
         any_failed = any(
             j.status == "FAILED" for j in self.completed_jobs.values()

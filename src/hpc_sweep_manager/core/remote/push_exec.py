@@ -136,11 +136,22 @@ def build_rsync_push_cmd(
     return cmd
 
 
-def build_rsync_pull_cmd(host: str, remote_dir: str, local_dir: str) -> List[str]:
-    """rsync a remote results dir back down (no ``--delete`` — purely additive)."""
-    return [
-        "rsync",
-        "-az",
-        f"{host}:{remote_dir.rstrip('/')}/",
-        f"{local_dir.rstrip('/')}/",
-    ]
+def build_rsync_pull_cmd(
+    host: str,
+    remote_dir: str,
+    local_dir: str,
+    excludes: Sequence[str] = (),
+) -> List[str]:
+    """rsync a remote results dir back down (no ``--delete`` — purely additive).
+
+    ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task
+    ``resume/`` checkpoint dir on intermediate pulls so a multi-GB checkpoint
+    isn't dragged over the WAN at every chunk seam — it rides the cheap
+    cluster-internal archive instead.
+    """
+    cmd = ["rsync", "-az"]
+    for pattern in excludes:
+        cmd.append(f"--exclude={pattern}")
+    cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
+    cmd.append(f"{local_dir.rstrip('/')}/")
+    return cmd

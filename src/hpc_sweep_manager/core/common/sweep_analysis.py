@@ -122,6 +122,18 @@ class SweepCompletionAnalyzer:
             task_statuses[task_id]["main_results_present"] = main_results_file.exists()
             task_statuses[task_id]["baseline_results_present"] = baseline_results_file.exists()
 
+            # Resumable chains (issue #12): the `.hsm_done` sentinel is the
+            # AUTHORITATIVE done-signal — a timed-out chunk exits non-zero and
+            # leaves `Status: CHUNK_INCOMPLETE`/`FAILED` in task_info.txt even
+            # though the task simply needs another chunk. Honor the sentinel
+            # first so `hsm sweep status`/`report` reflect chain reality. (v1
+            # hardcodes the default name; a custom done_sentinel isn't reflected
+            # here — documented limitation.)
+            if (task_dir / ".hsm_done").exists():
+                completed_tasks.append(task_id)
+                task_statuses[task_id]["status"] = "COMPLETED"
+                continue
+
             if not task_info_file.exists():
                 # Task directory exists but no info file - treat as running/incomplete
                 running_tasks.append(task_id)
@@ -511,6 +523,12 @@ class SweepCompletionAnalyzer:
             task_dir = tasks_dir / task_id
             if not task_dir.exists():
                 return None
+
+            # Resumable chains (issue #12): the `.hsm_done` sentinel overrides a
+            # stale `Status: CHUNK_INCOMPLETE`/`FAILED` that a timed-out chunk
+            # leaves behind. Honor it first.
+            if (task_dir / ".hsm_done").exists():
+                return "COMPLETED"
 
             # Check for completion indicators in task_info.txt
             task_info_file = task_dir / "task_info.txt"

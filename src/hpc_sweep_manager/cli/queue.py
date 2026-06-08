@@ -100,8 +100,30 @@ def _manifest_meta(sweep_dir: Path) -> List[tuple]:
     return [(str(j), per_job) for j in job_ids]
 
 
+def _manifest_chain_meta(sweep_dir: Path) -> Optional[str]:
+    """``"chunk k/max"`` when the sweep's manifest is a resumable chain (#12).
+
+    Under option B only the latest chunk is ever in the queue, so a chain shows
+    as ~one array row already — this just labels which chunk it is.
+    """
+    manifest = sweep_dir / ".hsm_manifest.json"
+    if not manifest.exists():
+        return None
+    try:
+        data = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        return None
+    rblock = data.get("resumable") if isinstance(data, dict) else None
+    if not (isinstance(rblock, dict) and rblock.get("enabled")):
+        return None
+    state = (data.get("chain") or {}).get("state") or {}
+    cur = int(state.get("chunk_index", 0)) + 1
+    cap = rblock.get("max_chunks")
+    return f"chunk {cur}/{cap}" if cap else f"chunk {cur}"
+
+
 def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
-    """Walk local sweep dirs → ``{base_job_id: (sweep_id, array_total|None)}``.
+    """Walk local sweep dirs → ``{base_job_id: (sweep_id, array_total|None, chain_label|None)}``.
 
     Job IDs and totals come from ``submission_summary.txt`` (local/array
     submissions, via :func:`cli.sweep._load_sweep_meta` so we don't drift
@@ -126,8 +148,13 @@ def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
             pairs = [(j, per_job_total) for j in job_ids]
         else:
             pairs = _manifest_meta(sweep_dir)
+        chain_label = _manifest_chain_meta(sweep_dir)
         for job_id, per_job_total in pairs:
-            index[strip_array_suffix(job_id)] = (meta["sweep_id"], per_job_total)
+            index[strip_array_suffix(job_id)] = (
+                meta["sweep_id"],
+                per_job_total,
+                chain_label,
+            )
     return index
 
 
@@ -375,7 +402,7 @@ def _render_mine(console: Console, user: str, jobs: List[QueueJob]) -> None:
         total_tasks += j.task_count
         gpu_cell = f"{j.gpu_count}×{j.gpu_type}" if j.gpu_type else str(j.gpu_count or "")
         tasks_cell = f"×{j.task_count}" if j.task_count > 1 else ""
-        sweep = meta_index.get(strip_array_suffix(j.job_id), ("", None))[0]
+        sweep = meta_index.get(strip_array_suffix(j.job_id), ("", None, None))[0]
         table.add_row(
             j.job_id,
             f"[{_state_color(j.state)}]{j.state}[/{_state_color(j.state)}]",
@@ -421,7 +448,7 @@ def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) ->
     tot_running = tot_pending = tot_other = tot_finished = tot_failed = 0
     accounting_seen = False
     for g in groups:
-        sweep_id, meta_total = meta_index.get(g.base_id, ("", None))
+        sweep_id, meta_total, chain_label = meta_index.get(g.base_id, ("", None, None))
         n_arrays += 1 if g.is_array else 0
         n_singles += 0 if g.is_array else 1
         tot_running += g.running
@@ -465,8 +492,10 @@ def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) ->
             where = g.nodes[0] if len(g.nodes) == 1 else f"{len(g.nodes)} nodes"
         else:
             where = g.reason
+        # Resumable chains (#12): label which chunk this is.
+        sweep_cell = sweep_id + (f" [dim]({chain_label})[/dim]" if chain_label else "")
         table.add_row(
-            g.base_id, g.name, tasks_cell, progress_cell, gpu_cell, where, sweep_id
+            g.base_id, g.name, tasks_cell, progress_cell, gpu_cell, where, sweep_cell
         )
 
     console.print(table)

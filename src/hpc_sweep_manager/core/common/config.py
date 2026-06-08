@@ -116,6 +116,12 @@ class SweepConfig:
     # Consumed by core/hpc/gpu_planner.task_costs; never enters hydra args.
     cost_param: str = None
     cost_map: Dict[Any, Any] = field(default_factory=dict)
+    # Resumable chained runs (issue #12): the typed knob block (enabled,
+    # chunk_walltime, signal_grace, resume_arg, done_sentinel, checkpoint_subdir,
+    # max_chunks, max_consecutive_failures). Parsed by
+    # core/common/resumable.ResumableConfig; the CLI layers --resumable /
+    # --chunk-walltime + the per-remote block on top.
+    resumable: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_yaml(cls, config_path: Union[str, Path]) -> "SweepConfig":
@@ -144,6 +150,10 @@ class SweepConfig:
             complete=config_dict.get("complete"),  # Extract completion sweep ID from top level
             cost_param=sweep_config.get("cost_param"),
             cost_map=sweep_config.get("cost_map") or {},
+            # Accept `resumable:` at the top level OR under `sweep:`.
+            resumable=config_dict.get("resumable")
+            or sweep_config.get("resumable")
+            or {},
         )
 
     @classmethod
@@ -218,6 +228,14 @@ class SweepConfig:
                     f"(not in grid or paired groups) — every task would get "
                     f"the same default cost"
                 )
+
+        # Resumable chains (issue #12): pre-flight the typed block when enabled
+        # (catches "enabled but no chunk_walltime", a two-part MM:SS cap, a
+        # grace >= the cap, ...) the same way cost_param is checked above.
+        if self.resumable and self.resumable.get("enabled"):
+            from .resumable import ResumableConfig
+
+            errors.extend(ResumableConfig.from_dict(self.resumable).validate())
 
         return errors
 

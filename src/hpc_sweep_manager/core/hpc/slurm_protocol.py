@@ -9,9 +9,12 @@ between them.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 from ..common.resource_spec import ResourceSpec
+
+logger = logging.getLogger(__name__)
 
 
 # Map raw Slurm states (from ``squeue -h -o %T``) to the canonical states
@@ -35,7 +38,23 @@ SLURM_STATE_MAP: Dict[str, str] = {
 }
 
 
-def render_sbatch_directives(spec: ResourceSpec) -> str:
+def format_signal(grace: int) -> str:
+    """The ``--signal`` token HSM uses for the pre-walltime save (issue #12).
+
+    ``B:TERM@<grace>`` signals the *batch shell* ``<grace>`` seconds before the
+    walltime. The ``B:`` prefix is REQUIRED: with no ``srun`` step, a bare
+    ``TERM@N`` targets job steps (there are none), so the batch script never
+    sees it. The rendered template forwards this SIGTERM to the python child.
+    """
+    return f"B:TERM@{grace}"
+
+
+def render_sbatch_directives(
+    spec: ResourceSpec,
+    *,
+    dependency: str | None = None,
+    signal: str | None = None,
+) -> str:
     """Render a ``ResourceSpec`` into the ``#SBATCH ...`` directive block.
 
     Returned as a newline-joined string ready to drop into the wrapper
@@ -43,6 +62,12 @@ def render_sbatch_directives(spec: ResourceSpec) -> str:
     caller decides where the ``--job-name`` / ``--output`` / ``--error``
     / ``--array=`` directives live — those are template-level, not
     spec-level.
+
+    ``dependency`` (e.g. ``"afterany:12345"``) and ``signal`` (e.g.
+    ``"B:TERM@120"``, from :func:`format_signal`) are the resumable-chain
+    additions (issue #12) — both default ``None`` so every existing call site
+    renders byte-identically. They append AFTER ``extra_directives`` so a
+    chain directive wins a duplicate (Slurm takes the last ``--signal``).
     """
     lines: List[str] = []
     if spec.walltime:
@@ -78,6 +103,24 @@ def render_sbatch_directives(spec: ResourceSpec) -> str:
             lines.append(f"#SBATCH {key}={value}")
         else:
             lines.append(f"#SBATCH {key}")
+    # Resumable-chain directives (issue #12) — appended last so they win a
+    # duplicate against anything a user stuck in extra_directives.
+    if dependency:
+        if any(k == "--dependency" for k, _ in spec.extra_directives):
+            logger.warning(
+                "render_sbatch_directives: --dependency set both via the chain "
+                "and extra_directives; the chain dependency (%s) wins.",
+                dependency,
+            )
+        lines.append(f"#SBATCH --dependency={dependency}")
+    if signal:
+        if any(k == "--signal" for k, _ in spec.extra_directives):
+            logger.warning(
+                "render_sbatch_directives: --signal set both via the chain and "
+                "extra_directives; the chain signal (%s) wins.",
+                signal,
+            )
+        lines.append(f"#SBATCH --signal={signal}")
     return "\n".join(lines)
 
 

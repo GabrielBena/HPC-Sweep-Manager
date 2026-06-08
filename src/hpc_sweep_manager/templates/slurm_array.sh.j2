@@ -123,7 +123,29 @@ echo "Parameters: $PARAMS_JSON"
 echo "Global task index: $GLOBAL_INDEX"
 
 TASK_OUTPUT_DIR="{{ tasks_dir }}/task_${GLOBAL_INDEX}"
+{% if resumable %}
+# Resumable chain (issue #12): the persistent per-task workdir survives between
+# chunks (it lives under the remote workdir and is NOT deleted until the chain
+# completes), so the resume checkpoint persists across chunk seams. HSM owns
+# these PATHS; the script owns what it reads/writes inside them.
+HSM_WORKDIR="$TASK_OUTPUT_DIR"
+HSM_RESUME_TO="$HSM_WORKDIR/{{ checkpoint_subdir }}"
+HSM_DONE_SENTINEL="$HSM_WORKDIR/{{ done_sentinel }}"
+export HSM_WORKDIR HSM_RESUME_TO HSM_DONE_SENTINEL
+{% if resume_from_present %}
+export HSM_RESUME_FROM="$HSM_RESUME_TO"
+{% else %}
+export HSM_RESUME_FROM=""
+{% endif %}
 
+# Done-detection is the EXPLICIT sentinel, never the exit code: a timed-out
+# chunk exits non-zero yet is the normal mid-budget outcome. If this task has
+# already signalled completion, no-op so its array slot returns immediately.
+if [[ -f "$HSM_DONE_SENTINEL" ]]; then
+    echo "Task $GLOBAL_INDEX already signalled done (.hsm_done present). Skipping."
+    exit 0
+fi
+{% else %}
 if [[ -f "$TASK_OUTPUT_DIR/task_info.txt" ]]; then
     if grep -q "Status: SUCCESS" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null \
         || grep -q "Status: COMPLETED" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null; then
@@ -131,8 +153,12 @@ if [[ -f "$TASK_OUTPUT_DIR/task_info.txt" ]]; then
         exit 0
     fi
 fi
+{% endif %}
 
 mkdir -p "$TASK_OUTPUT_DIR"
+{% if resumable %}
+mkdir -p "$HSM_RESUME_TO"
+{% endif %}
 
 echo "Slurm Array Index: $SLURM_ARRAY_TASK_ID" > "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Global Task Index: $GLOBAL_INDEX" >> "$TASK_OUTPUT_DIR/task_info.txt"
@@ -151,10 +177,54 @@ WANDB_GROUP="{{ wandb_group }}"
 WANDB_GROUP="{{ sweep_id }}"
 {% endif %}
 
+{% if resumable and resume_from_present and resume_arg %}
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR {{ resume_arg }}=$HSM_RESUME_FROM"
+{% else %}
 COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR"
+{% endif %}
 echo "Executing: $COMMAND"
 echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
 
+{% if resumable %}
+# Run python in the BACKGROUND so the batch shell stays free to receive
+# --signal=B:TERM@<grace> and FORWARD it (the python child is what must save).
+# `set +e` is mandatory: under the script-wide `set -e`, the non-zero `wait`
+# a SIGTERM/timeout produces would kill the script BEFORE the sentinel check
+# below. We exit 0 on an incomplete chunk because a non-zero mid-budget exit is
+# EXPECTED — the chain driver decides done/advance/fail from the sentinel +
+# checkpoint progress, never from this chunk's exit code; a COMPLETED Slurm
+# state also keeps `hsm queue` readable.
+_hsm_term() {
+    echo "Caught SIGTERM (pre-walltime). Forwarding to python (pid $PY_PID) to checkpoint..."
+    kill -TERM "$PY_PID" 2>/dev/null || true
+}
+trap _hsm_term TERM
+set +e
+eval "$COMMAND" &
+PY_PID=$!
+wait "$PY_PID"
+exit_code=$?
+if [[ $exit_code -gt 128 ]]; then
+    # First wait was interrupted by the forwarded signal; python is still
+    # flushing its checkpoint — wait again for its real exit in the grace window.
+    wait "$PY_PID"
+    exit_code=$?
+fi
+trap - TERM
+set -e
+
+if [[ -f "$HSM_DONE_SENTINEL" ]]; then
+    echo "Completed (done sentinel present): $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    exit 0
+fi
+# No sentinel: this chunk ran its slice (or timed out mid-budget). Record it but
+# do NOT mark Status: FAILED — the chain driver, not this exit code, judges the
+# task. The next chunk resumes from $HSM_RESUME_TO.
+echo "Chunk ended without done sentinel (exit=$exit_code): $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+echo "Status: CHUNK_INCOMPLETE" >> "$TASK_OUTPUT_DIR/task_info.txt"
+exit 0
+{% else %}
 if eval "$COMMAND"; then
     echo "Completed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
     echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
@@ -165,3 +235,4 @@ else
     echo "Exit Code: $exit_code" >> "$TASK_OUTPUT_DIR/task_info.txt"
     exit $exit_code
 fi
+{% endif %}
