@@ -108,6 +108,12 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
   `SweepCompletionAnalyzer`, `find_incomplete_sweeps`, `get_sweep_completion_summary`.
   Read-only on-disk analysis; used by `hsm sweep status` and `hsm sweep report`.
+- [`core/common/chain.py`](src/hpc_sweep_manager/core/common/chain.py) +
+  [`core/common/resumable.py`](src/hpc_sweep_manager/core/common/resumable.py) —
+  pure resumable-chain (issue #12): `decide_next` state machine (DONE/ADVANCE/
+  FAILED) + `ResumableConfig`/`ResumableContext`/`ChunkProgress` + resolver. No
+  I/O; the driver is `sweep_orchestrator.run_resumable_sweep_async`. See the
+  "Recently landed (2026-06-08)" section for the contract.
 - [`core/hpc/gpu_planner.py`](src/hpc_sweep_manager/core/hpc/gpu_planner.py) —
   pure heterogeneous-GPU planning (issue #7): `task_costs` (sweep YAML
   `cost_param`/`cost_map`), `plan_gpu_split` (greedy LPT; walltime =
@@ -576,6 +582,41 @@ Live-validated: dry-run plan hand-checked on the real 22-task shape
 (8/11 long arms → H200, makespan 96 vs 330 cost-units pinned); smoke
 sweep on uzh split 2×L4 + 2×A100 with scaled walltimes and per-array
 progress rows in grouped `mine`.
+
+## Recently landed (2026-06-08) — resumable chained runs (issue #12, MERGED)
+
+Finish a job that exceeds a pool's walltime cap (the driver: UZH S3IT V100
+`lowprio` — abundant but 24h-capped) as a chain of ≤`chunk_walltime`
+checkpoint-chained Slurm chunks. **Not a 7th mode** — it's a flag on the
+existing array/SSH-Slurm path: `hsm sweep run --resumable --chunk-walltime
+23:00:00 --remote <a> --mode array` (or native `--mode array`). Option B
+(HSM-driven, advance-on-poll): chunk *k+1* re-submits the **whole** array
+`--dependency=afterany:k`; done tasks no-op via a `.hsm_done` sentinel; the
+chain stops on the sentinel (NEVER exit code/epoch), bounded by `max_chunks`
++ `max_consecutive_failures`. Composes with #7 (each typed sub-array capped at
+`chunk_walltime`). Live-validated: 2-chunk V100-`lowprio` resume on uzh.
+
+| What | Where |
+|---|---|
+| Pure state machine (`decide_next`: DONE/ADVANCE/FAILED) + typed config (`ResumableConfig`/`ResumableContext`/`ChunkProgress` + resolver) | **new** `core/common/chain.py`, `core/common/resumable.py` |
+| Driver loop (submit chunk → wait → checkpoint-excluded pull → `chunk_progress` probe → decide); backend gate (Slurm-only) | `sweep_orchestrator.run_resumable_sweep_async`, `build_compute_source` |
+| `render_sbatch_directives(dependency=, signal=)` + `format_signal`; `{% if resumable %}` template block (resume env, sentinel skip-check, resume-arg, SIGTERM-forwarding run-block) | `slurm_protocol.py`, `templates/slurm_array.sh.j2` |
+| `submit_batch(dependency=, resumable=)`, `chunk_progress`, deferred cleanup, checkpoint-excluded pulls, manifest chain state + `from_manifest` restore (SSH-Slurm + native parity) | both Slurm sources |
+| CLI `--resumable`/`--chunk-walltime` + dry-run plan; **`hsm sweep advance <id>`** (re-drive a detached chain; `collect` refuses a chain); `queue mine` `(chunk k/max)`; analyzer treats `.hsm_done` as authoritative | `cli/sweep.py`, `cli/queue.py`, `sweep_analysis.py` |
+| Deferred (candidates for new issues): eager pre-queue + scancel; `.hsm_chain.lock` vs live-launcher-vs-cron double-submit + the submit→persist crash-window orphan; `hsm sweep cancel` | — |
+
+**The contract HSM imposes on a consumer training script (the ONLY specificity
+that leaves HSM — it knows only PATHS):** consume `HSM_RESUME_FROM` (env; resume
+iff set/non-empty), save to `HSM_RESUME_TO` on SIGTERM + periodically, write
+`$HSM_DONE_SENTINEL` when the WHOLE budget is done, read the total budget from
+the (unchanged-every-chunk) config. `resume_arg` defaults to **None (env-only)** —
+HSM injects no project-specific hydra key unless a project opts in
+(`resume_arg: training.resume_from`). Runnable reference:
+[`examples/resumable_probe.py`](examples/resumable_probe.py); docs:
+[HPC_EXECUTION.md → Resumable chained runs](docs/user_guide/HPC_EXECUTION.md).
+A consumer repo that doesn't yet write `.hsm_done` / read `HSM_RESUME_TO` will
+chunk but never finish (hits `max_chunks` → FAILED) — wire the ~10-line contract
+first.
 
 ## Cross-references
 
