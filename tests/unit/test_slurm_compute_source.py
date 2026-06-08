@@ -791,3 +791,49 @@ class TestNativeResumable:
                 params_list=[{"seed": 0}], sweep_id="sw", mode="individual",
                 resumable=self._ctx(0),
             )
+
+
+class TestNativeMultiTypeResumable:
+    """Native-Slurm parity for resumable MULTI-gpu_type chunks (issue #12):
+    every sub-array capped at chunk_walltime + signal + dependency."""
+
+    @pytest.mark.asyncio
+    async def test_both_subarrays_capped_signal_dependency(self, tmp_path, monkeypatch):
+        from hpc_sweep_manager.core.common.resumable import (
+            ResumableConfig,
+            ResumableContext,
+        )
+        from hpc_sweep_manager.core.hpc import slurm_compute_source as mod
+
+        ids = iter(["700", "701"])
+
+        def fake_run(cmd, capture_output=True, text=True):
+            class R:
+                returncode = 0
+                stdout = f"Submitted batch job {next(ids)}\n"
+                stderr = ""
+            return R()
+
+        monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        src = SlurmComputeSource(
+            project_dir=str(tmp_path), script_path="train.py",
+            default_spec=ResourceSpec(walltime="48:00:00", gpus=1, gpu_type=("A100", "H200")),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+        )
+        src.sweep_dir = tmp_path
+        src.sweep_id = "sw"
+        ctx = ResumableContext(
+            chunk_index=1,
+            config=ResumableConfig(enabled=True, chunk_walltime="23:00:00", signal_grace=90),
+        )
+        await src.submit_batch(
+            params_list=[{"seed": i} for i in range(4)], sweep_id="sw", mode="array",
+            job_name_prefix="sw", dependency="afterany:600:601", resumable=ctx,
+        )
+        rendered = "\n".join(p.read_text() for p in (tmp_path / "scripts").glob("*.slurm"))
+        # Both sub-arrays capped at the chunk walltime (NOT cost-scaled 23/11.5h).
+        assert rendered.count("#SBATCH --time=23:00:00") == 2
+        assert "11:30:00" not in rendered
+        assert rendered.count("#SBATCH --signal=B:TERM@90") == 2
+        assert rendered.count("#SBATCH --dependency=afterany:600:601") == 2
+        assert "--gres=gpu:A100:1" in rendered and "--gres=gpu:H200:1" in rendered

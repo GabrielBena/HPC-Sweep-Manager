@@ -146,6 +146,7 @@ if [[ -f "$HSM_DONE_SENTINEL" ]]; then
     exit 0
 fi
 {% else %}
+
 if [[ -f "$TASK_OUTPUT_DIR/task_info.txt" ]]; then
     if grep -q "Status: SUCCESS" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null \
         || grep -q "Status: COMPLETED" "$TASK_OUTPUT_DIR/task_info.txt" 2>/dev/null; then
@@ -194,9 +195,12 @@ echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
 # EXPECTED — the chain driver decides done/advance/fail from the sentinel +
 # checkpoint progress, never from this chunk's exit code; a COMPLETED Slurm
 # state also keeps `hsm queue` readable.
+PY_PID=""
 _hsm_term() {
-    echo "Caught SIGTERM (pre-walltime). Forwarding to python (pid $PY_PID) to checkpoint..."
-    kill -TERM "$PY_PID" 2>/dev/null || true
+    # Guard $PY_PID: a SIGTERM in the microsecond window before it's set would
+    # otherwise `kill -TERM ''`. (Slurm fires the signal near walltime, not at
+    # launch, so this is belt-and-suspenders.)
+    [[ -n "$PY_PID" ]] && { echo "Caught SIGTERM (pre-walltime). Forwarding to python (pid $PY_PID) to checkpoint..."; kill -TERM "$PY_PID" 2>/dev/null || true; }
 }
 trap _hsm_term TERM
 set +e
@@ -204,9 +208,11 @@ eval "$COMMAND" &
 PY_PID=$!
 wait "$PY_PID"
 exit_code=$?
-if [[ $exit_code -gt 128 ]]; then
-    # First wait was interrupted by the forwarded signal; python is still
-    # flushing its checkpoint — wait again for its real exit in the grace window.
+if [[ $exit_code -gt 128 ]] && kill -0 "$PY_PID" 2>/dev/null; then
+    # First wait was interrupted by the forwarded signal AND python is still
+    # alive (flushing its checkpoint) — wait again for its real exit in the
+    # grace window. The `kill -0` guard avoids a spurious re-wait (returning
+    # 127) when python exited >128 on its own.
     wait "$PY_PID"
     exit_code=$?
 fi

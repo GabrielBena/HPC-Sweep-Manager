@@ -43,6 +43,9 @@ TOTAL_STEPS="${TOTAL_STEPS:-120}"
 STEP_SECONDS="${STEP_SECONDS:-2}"
 QOS="${QOS:-}"
 ACCOUNT="${ACCOUNT:-}"
+PARTITION="${PARTITION:-}"
+GPU_TYPE="${GPU_TYPE:-}"          # e.g. V100 (lowprio pool on S3IT) — empty = CPU-only
+GPUS="${GPUS:-0}"                 # per-task GPU count (the probe ignores it; for pool routing)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${TMPDIR:-/tmp}/hsm-resumable-smoke"
 
@@ -65,18 +68,23 @@ resumable:
   enabled: true
   chunk_walltime: "$CHUNK_WALLTIME"
   signal_grace: $SIGNAL_GRACE
-  resume_arg: "training.resume_from"
   max_chunks: 5
 defaults:
   total_steps: $TOTAL_STEPS
   step_seconds: $STEP_SECONDS
 EOF
+# Note: no resume_arg → the probe resumes via the HSM_RESUME_FROM env var (the
+# general, framework-agnostic default). Set resume_arg in the YAML to also pass
+# a hydra CLI override.
 
 # Per-remote backend:slurm + the typed spec. The walltime here is irrelevant in
 # resumable mode (every chunk is capped at chunk_walltime).
 SPEC="    spec:\n      walltime: \"01:00:00\"\n      cpus_per_task: 1\n      mem: 1G"
+[[ -n "$PARTITION" ]] && SPEC="$SPEC\n      partition: $PARTITION"
 [[ -n "$QOS" ]] && SPEC="$SPEC\n      qos: $QOS"
 [[ -n "$ACCOUNT" ]] && SPEC="$SPEC\n      account: $ACCOUNT"
+[[ "$GPUS" != "0" ]] && SPEC="$SPEC\n      gpus: $GPUS"
+[[ -n "$GPU_TYPE" ]] && SPEC="$SPEC\n      gpu_type: $GPU_TYPE"
 {
   echo "distributed:"
   echo "  remotes:"

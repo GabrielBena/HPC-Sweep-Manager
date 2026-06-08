@@ -1202,13 +1202,14 @@ class TestResumableSubmit:
             ResumableContext,
         )
 
-        cfg = ResumableConfig(
+        opts = dict(
             enabled=True,
             chunk_walltime="23:00:00",
             signal_grace=120,
-            **over,
+            resume_arg="training.resume_from",  # opt into the hydra CLI override
         )
-        return ResumableContext(chunk_index=chunk_index, config=cfg)
+        opts.update(over)
+        return ResumableContext(chunk_index=chunk_index, config=ResumableConfig(**opts))
 
     async def _make_src(self, tmp_path, conn, **spec_over):
         src = _StubSrc(
@@ -1414,3 +1415,46 @@ class TestChunkProgress:
         prog = await src.chunk_progress(2, done_sentinel=".hsm_done", checkpoint_subdir="resume")
         assert prog.done_indices == frozenset()
         assert prog.checkpoint_mtime is None
+
+
+class TestChainManifestRoundTrip:
+    """The re-submit-critical fields (spec/script_path/remote_code_dir/chain
+    state) must survive persist -> from_manifest, or `advance` would re-submit
+    chunks with empty #SBATCH directives (issue #12)."""
+
+    @pytest.mark.asyncio
+    async def test_spec_and_chain_survive(self, tmp_path):
+        from hpc_sweep_manager.core.common.resumable import ResumableConfig
+        from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
+            SSHSlurmComputeSource,
+        )
+
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="train.py",
+            default_spec=ResourceSpec(
+                walltime="48:00:00", gpus=1, gpu_type="V100",
+                qos="normal", partition="lowprio",
+            ),
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweeps" / "outputs" / "sw", "sw")
+        await src.persist_chain_manifest(
+            resumable=ResumableConfig(enabled=True, chunk_walltime="23:00:00").to_manifest(),
+            chain={"state": {"chunk_index": 1}, "chunks": [{"index": 0, "job_ids": ["100"]}],
+                   "num_tasks": 2, "last_done_count": 1, "last_checkpoint_mtime": 9.0,
+                   "wandb_group": "grp"},
+            job_ids=["100"], num_tasks=2,
+        )
+        manifest = json.loads((src.sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["spec"]["gpu_type"] == "V100"
+        assert manifest["script_path"] == "train.py"
+        assert manifest["remote_code_dir"]
+
+        restored = SSHSlurmComputeSource.from_manifest(manifest)
+        assert restored.default_spec.gpu_type == "V100"
+        assert restored.default_spec.partition == "lowprio"
+        assert restored.default_spec.walltime == "48:00:00"
+        assert restored.script_path == "train.py"
+        assert restored._chain_state.chunk_index == 1
+        assert restored._resumable_config.chunk_walltime == "23:00:00"

@@ -17,6 +17,7 @@ retry tasks.
 
 import asyncio
 from datetime import datetime
+import json
 import logging
 from pathlib import Path
 import re
@@ -37,6 +38,10 @@ class SweepCompletionAnalyzer:
         self.sweep_dir = Path(sweep_dir)
         self.sweep_config_path = self.sweep_dir / "sweep_config.yaml"
         self.source_mapping_path = self.sweep_dir / "source_mapping.yaml"
+        # Resumable chains (issue #12): the done-sentinel name comes from the
+        # manifest's resumable block (a chain may use a custom one); falls back
+        # to the default for ordinary sweeps / older manifests.
+        self._done_sentinel = self._read_done_sentinel()
 
         # Load data
         self.sweep_config = None
@@ -46,6 +51,19 @@ class SweepCompletionAnalyzer:
         self.failed_combinations = []
         self.cancelled_combinations = []
         self.missing_combinations = []
+
+    def _read_done_sentinel(self) -> str:
+        """The resumable done-sentinel filename from the manifest (default .hsm_done)."""
+        manifest = self.sweep_dir / ".hsm_manifest.json"
+        if manifest.exists():
+            try:
+                data = json.loads(manifest.read_text())
+                name = (data.get("resumable") or {}).get("done_sentinel")
+                if isinstance(name, str) and name:
+                    return name
+            except (OSError, ValueError):
+                pass
+        return ".hsm_done"
 
     def load_sweep_data(self) -> bool:
         """Load sweep configuration and execution data."""
@@ -129,7 +147,7 @@ class SweepCompletionAnalyzer:
             # first so `hsm sweep status`/`report` reflect chain reality. (v1
             # hardcodes the default name; a custom done_sentinel isn't reflected
             # here — documented limitation.)
-            if (task_dir / ".hsm_done").exists():
+            if (task_dir / self._done_sentinel).exists():
                 completed_tasks.append(task_id)
                 task_statuses[task_id]["status"] = "COMPLETED"
                 continue
@@ -524,10 +542,10 @@ class SweepCompletionAnalyzer:
             if not task_dir.exists():
                 return None
 
-            # Resumable chains (issue #12): the `.hsm_done` sentinel overrides a
-            # stale `Status: CHUNK_INCOMPLETE`/`FAILED` that a timed-out chunk
-            # leaves behind. Honor it first.
-            if (task_dir / ".hsm_done").exists():
+            # Resumable chains (issue #12): the done-sentinel overrides a stale
+            # `Status: CHUNK_INCOMPLETE`/`FAILED` that a timed-out chunk leaves
+            # behind. Honor it first (name from the manifest; default .hsm_done).
+            if (task_dir / self._done_sentinel).exists():
                 return "COMPLETED"
 
             # Check for completion indicators in task_info.txt

@@ -883,6 +883,21 @@ def run_sweep(
             )
             return
 
+        # Resumable chains re-derive the FULL param set every chunk (and on a
+        # detached `advance`); `--max-runs` would truncate the launcher's set but
+        # not advance's, drifting task_N→params. Reject the combination upfront.
+        resumable_on = bool(
+            resumable_flag or chunk_walltime or (config.resumable or {}).get("enabled")
+        )
+        if resumable_on and max_runs is not None:
+            console.print(
+                "[red]--max-runs cannot be combined with --resumable: a chain "
+                "re-submits the full param set each chunk (truncation would drift "
+                "across chunks / on `hsm sweep advance`). Filter the sweep grid "
+                "instead.[/red]"
+            )
+            return
+
         combinations = _generate_parameter_combinations(config, max_runs, count_only, console)
         if combinations is None:
             return
@@ -1301,10 +1316,16 @@ async def _advance_via_manifest(
             params_list=combinations,
             spec=None,  # use the restored default_spec (effective spec from submit)
             resumable=rconf,
+            # Restore the same W&B group + no-progress baseline the launcher used,
+            # so the chain stays one group and the failure cap accounts faithfully
+            # across re-attach (not reset each advance).
+            wandb_group=chain.get("wandb_group"),
             job_name_prefix=sweep_id,
             chain_state=state,
             do_setup=False,
             initial_job_ids=last_job_ids,
+            initial_prev_done=int(chain.get("last_done_count") or 0),
+            initial_prev_mtime=chain.get("last_checkpoint_mtime"),
             block=block,
         )
         decision = (result.chain_decision or "").upper()

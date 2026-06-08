@@ -321,17 +321,24 @@ resumable:
 `hsm queue mine` annotates the chain's array row `(chunk k/max)`. `--dry-run`
 prints the chain plan with the per-chunk walltime cap. `signal_grace` must
 exceed your script's worst-case checkpoint-save time and be < `chunk_walltime`
-(both validated). The checkpoint dir lives on the remote under `workdir` and is
-**not** pulled to the workstation by default (it rides the cheap server-side
-archive) — set a per-remote `rsync_excludes` if you keep large nested junk
-elsewhere.
+(both validated). The heavy checkpoint dir is **excluded from the per-chunk
+pulls** (it'd cross the WAN every seam); on completion it's captured by the
+server-side archive if `archive_dir` is set, and otherwise pulled once with the
+final results so the trained model is never lost. `resume_arg` defaults to
+**env-only** (`HSM_RESUME_FROM`, always exported) — set it to a hydra key
+(`training.resume_from`) only if your script consumes the pointer as a CLI
+override.
 
 Caveats (v1): Slurm backends only (`--mode array` native, or a `backend: slurm`
-remote — local/ssh-bash are rejected). `hsm sweep collect` refuses a chain (it
-could delete the remote checkpoints between chunks) and points at `advance`.
-Don't run `hsm sweep advance` while a live launcher is still driving the same
-chain (both could submit the next chunk). A custom `done_sentinel` isn't
-reflected in `hsm sweep status` (the analyzer hardcodes `.hsm_done`).
+remote — local/ssh-bash are rejected); `--max-runs` is rejected with
+`--resumable` (a chain re-submits the full set each chunk). `hsm sweep collect`
+refuses a chain (it could delete the remote checkpoints between chunks) and
+points at `advance`. **`hsm sweep advance` is for a DETACHED chain only** — do
+NOT run it (or a cron of it) while a live `hsm sweep run --resumable` launcher
+is still driving the same chain: both could submit the next chunk (a `.hsm_chain.lock`
+is a planned follow-up; for now, pick one driver). A narrow launcher-crash
+window between submit and manifest-persist can likewise orphan a chunk — also a
+hardening follow-up.
 
 ## The typed `local:` block — defaults for `--mode local`
 

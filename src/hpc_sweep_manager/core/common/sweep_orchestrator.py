@@ -448,6 +448,8 @@ async def run_resumable_sweep_async(
     chain_state: ChainState | None = None,
     do_setup: bool = True,
     initial_job_ids: list[str] | None = None,
+    initial_prev_done: int = 0,
+    initial_prev_mtime: float | None = None,
     block: bool = True,
 ) -> SweepResult:
     """Drive a checkpoint-chained run (issue #12, option B = advance-on-poll).
@@ -470,6 +472,13 @@ async def run_resumable_sweep_async(
         raise ValueError("resumable chains require submission_mode='array'")
 
     num_tasks = len(params_list)
+    if num_tasks == 0:
+        # A zero-task chain would otherwise report a vacuous DONE (done_count >=
+        # 0) and archive+clean an empty remote — surface the misconfig instead.
+        raise ValueError(
+            "resumable chain has 0 tasks — nothing to run (check the sweep grid "
+            "/ --max-runs)"
+        )
     ckpt_subdir = resumable.checkpoint_subdir
     # Make every tasks/ pull (the incremental ones in wait_for_all AND the final
     # collect) skip the heavy checkpoint dir — it rides the cheap server-side
@@ -504,16 +513,14 @@ async def run_resumable_sweep_async(
         )
     prev_job_ids: list[str] = []
     # The no-progress baseline. On a fresh foreground run it accumulates across
-    # chunks, so the consecutive-failure cap fires promptly. On a detached
-    # `advance` re-attach it resets here (the prior chunk's done-count/mtime
-    # aren't carried in the manifest), so the FIRST chunk after re-attach is
-    # biased toward "progressed". `state.consecutive_no_progress` is still
-    # restored, and `max_chunks` is the hard bound regardless — so a
-    # cron-driven chain is always bounded, just slower to flag a deterministic
-    # crash than the live launcher. (Carrying these in the manifest is a clean
-    # follow-up.)
-    prev_done = 0
-    prev_mtime: float | None = None
+    # chunks; on a detached `advance` re-attach it's RESTORED from the manifest
+    # (initial_prev_*) so the consecutive-failure cap fires just as promptly for
+    # a cron-driven chain as for the live launcher. `obs_*` track the latest
+    # observation so `_persist` can write the baseline for the next re-attach.
+    prev_done = initial_prev_done
+    prev_mtime: float | None = initial_prev_mtime
+    obs_done = initial_prev_done
+    obs_mtime: float | None = initial_prev_mtime
     current: list[str] | None = initial_job_ids
     decision: ChainDecision | None = None
     submitted_this_call = 0
@@ -527,6 +534,12 @@ async def run_resumable_sweep_async(
                     "state": state.to_dict(),
                     "chunks": chunks_meta,
                     "num_tasks": num_tasks,
+                    # Carry the no-progress baseline + the W&B group so a detached
+                    # `advance` resumes with the same failure-cap accounting and
+                    # the same group string (run-id continuity is the script's job).
+                    "last_done_count": obs_done,
+                    "last_checkpoint_mtime": obs_mtime,
+                    "wandb_group": wandb_group,
                 },
                 job_ids=last_job_ids,
                 num_tasks=num_tasks,
@@ -589,6 +602,15 @@ async def run_resumable_sweep_async(
             progress.checkpoint_mtime is not None
             and (prev_mtime is None or progress.checkpoint_mtime > prev_mtime)
         )
+        # Record the latest observation so _persist writes a faithful baseline
+        # for the next re-attach (max mtime so it never goes backwards).
+        obs_done = done_count
+        if progress.checkpoint_mtime is not None:
+            obs_mtime = (
+                progress.checkpoint_mtime
+                if obs_mtime is None
+                else max(obs_mtime, progress.checkpoint_mtime)
+            )
         outcome = ChunkOutcome(
             chunk_index=state.chunk_index,
             done_count=done_count,
@@ -610,6 +632,24 @@ async def run_resumable_sweep_async(
             prev_mtime = progress.checkpoint_mtime
 
         if decision is ChainDecision.DONE:
+            # DATA-LOSS GUARD: the intermediate pulls exclude the heavy
+            # checkpoint dir on the assumption it rides the server-side archive.
+            # If NO archive will actually run (no archive_dir, or archive_on:
+            # never), that dir holds the only copy of the trained result — so
+            # include it in the FINAL pull before collect_results rm -rf's the
+            # remote. (Native/shared-FS sources have no _should_archive and keep
+            # the checkpoint in place, so this is a no-op there.)
+            should_archive = getattr(source, "_should_archive", None)
+            if (
+                callable(should_archive)
+                and not should_archive(False)
+                and hasattr(source, "_pull_excludes")
+            ):
+                logger.info(
+                    f"chain {sweep_id}: no server-side archive configured — "
+                    f"pulling the final checkpoint dir so it isn't lost."
+                )
+                source._pull_excludes = ()
             await _safe_collect(source, defer_cleanup=False)
             break
         if decision is ChainDecision.FAILED:

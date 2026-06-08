@@ -59,7 +59,12 @@ class ResumableConfig:
     enabled: bool = False
     chunk_walltime: Optional[str] = None  # HH:MM:SS — the pool's QOS cap
     signal_grace: int = 120  # seconds before walltime -> --signal=B:TERM@<grace>
-    resume_arg: Optional[str] = "training.resume_from"  # hydra key; None = env-only
+    # Optional CLI override appended on chunks >=2 (e.g. "training.resume_from").
+    # Defaults to None (env-only via HSM_RESUME_FROM, which is ALWAYS exported):
+    # a non-None default would inject a project-specific hydra key into every
+    # consumer's command and break general projects that lack that config key —
+    # exactly the framework-coupling the guardrail forbids. Hydra projects opt in.
+    resume_arg: Optional[str] = None
     done_sentinel: str = ".hsm_done"  # script writes this under HSM_WORKDIR when complete
     checkpoint_subdir: str = "resume"  # per-task persistent ckpt dir under the workdir
     max_chunks: int = 10  # runaway guard: chain length cap

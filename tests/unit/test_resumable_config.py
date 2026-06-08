@@ -16,7 +16,7 @@ class TestFromDict:
         assert c.enabled is False
         assert c.chunk_walltime is None
         assert c.signal_grace == 120
-        assert c.resume_arg == "training.resume_from"
+        assert c.resume_arg is None  # env-only default (generality guardrail)
         assert c.done_sentinel == ".hsm_done"
         assert c.checkpoint_subdir == "resume"
         assert c.max_chunks == 10
@@ -32,11 +32,15 @@ class TestFromDict:
         assert c.signal_grace == 90
         assert c.max_chunks == 4
 
-    def test_resume_arg_none_is_env_only(self):
-        c = ResumableConfig.from_dict({"resume_arg": None})
-        # None is skipped -> falls back to the default; explicit env-only is the
-        # absence of a hydra key, which a user expresses by setting it to "".
-        assert c.resume_arg == "training.resume_from"
+    def test_resume_arg_defaults_to_env_only(self):
+        # The default is env-only (None): HSM_RESUME_FROM is always exported, so
+        # no project-specific hydra key leaks into a general project's command.
+        assert ResumableConfig.from_dict({}).resume_arg is None
+        # A hydra project opts in explicitly.
+        assert (
+            ResumableConfig.from_dict({"resume_arg": "training.resume_from"}).resume_arg
+            == "training.resume_from"
+        )
 
 
 class TestValidate:

@@ -22,7 +22,7 @@ class FakeSource:
     name = "fake"
     source_type = "fake_slurm"
 
-    def __init__(self, progress_script: List[ChunkProgress]):
+    def __init__(self, progress_script: List[ChunkProgress], *, archives: bool | None = None):
         self._script = list(progress_script)
         self.active_jobs: Dict[str, Any] = {}
         self.completed_jobs: Dict[str, Any] = {}
@@ -32,6 +32,11 @@ class FakeSource:
         self.collect_calls: List[bool] = []
         self.persist_calls: List[Dict[str, Any]] = []
         self.cleaned = False
+        # archives None → no _should_archive method (like the native source);
+        # True/False → emulate an SSH-Slurm source whose archive will/won't run.
+        if archives is not None:
+            self._archives = archives
+            self._should_archive = lambda any_failed: self._archives
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         return True
@@ -63,7 +68,7 @@ class FakeSource:
         return True
 
     async def persist_chain_manifest(self, *, resumable, chain, job_ids, num_tasks):
-        self.persist_calls.append({"state": dict(chain["state"]), "job_ids": list(job_ids)})
+        self.persist_calls.append({"chain": dict(chain), "job_ids": list(job_ids)})
 
     async def cleanup(self) -> None:
         self.cleaned = True
@@ -166,3 +171,80 @@ class TestDrive:
         assert res.chain_decision == "done"
         assert src.collect_calls == [False]  # exactly one, terminal
         assert res.chunks_run == 3
+
+
+class TestReviewFixes:
+    """Cold-review hardenings: advance re-attach, baseline restore/persist,
+    data-loss guard, zero-task guard (issue #12)."""
+
+    @pytest.mark.asyncio
+    async def test_advance_reattach_submits_next_with_dependency(self):
+        from hpc_sweep_manager.core.common.chain import ChainState
+
+        # Seeded terminal chunk j0 that progressed but isn't done -> ADVANCE ->
+        # submit the next chunk depending on j0, then return (block=False).
+        src = FakeSource([ChunkProgress(frozenset(), 100.0)])
+        res = await run_resumable_sweep_async(
+            source=src, sweep_dir=Path("/tmp/sw"), sweep_id="sw",
+            params_list=[{"seed": 0}, {"seed": 1}], spec=None, resumable=_cfg(),
+            chain_state=ChainState(chunk_index=0), do_setup=False,
+            initial_job_ids=["j0"], block=False,
+        )
+        assert res.chain_decision == "advance"
+        assert res.chunks_run == 1
+        assert len(src.submit_calls) == 1
+        assert src.submit_calls[0]["dependency"] == "afterany:j0"
+        assert src.submit_calls[0]["chunk_index"] == 1
+        assert src.collect_calls == []  # left running, no terminal collect
+
+    @pytest.mark.asyncio
+    async def test_restored_baseline_lets_no_progress_strike_count(self):
+        from hpc_sweep_manager.core.common.chain import ChainState
+
+        # Re-attach with baseline done=2/mtime=100 already seen, AND a prior
+        # no-progress strike. A chunk that shows the SAME done/mtime made no new
+        # progress -> with cap=2 the chain FAILS (instead of resetting).
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)])
+        res = await run_resumable_sweep_async(
+            source=src, sweep_dir=Path("/tmp/sw"), sweep_id="sw",
+            params_list=[{"seed": i} for i in range(3)], spec=None,
+            resumable=_cfg(max_consecutive_failures=2),
+            chain_state=ChainState(chunk_index=1, consecutive_no_progress=1),
+            do_setup=False, initial_job_ids=["j1"],
+            initial_prev_done=2, initial_prev_mtime=100.0, block=True,
+        )
+        assert res.chain_decision == "failed"
+
+    @pytest.mark.asyncio
+    async def test_baseline_and_group_persisted_in_chain(self):
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 250.0)])
+        await run_resumable_sweep_async(
+            source=src, sweep_dir=Path("/tmp/sw"), sweep_id="sw",
+            params_list=[{"seed": 0}, {"seed": 1}], spec=None, resumable=_cfg(),
+            wandb_group="grp",
+        )
+        last = src.persist_calls[-1]["chain"]
+        assert last["wandb_group"] == "grp"
+        assert last["last_done_count"] == 2
+        assert last["last_checkpoint_mtime"] == 250.0
+
+    @pytest.mark.asyncio
+    async def test_done_without_archive_pulls_checkpoint(self):
+        # No server-side archive -> the final pull must include the checkpoint
+        # (clear _pull_excludes) so the trained model isn't rm -rf'd.
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)], archives=False)
+        await _run(src, _cfg(), params=2)
+        assert src._pull_excludes == ()  # cleared for the final pull
+
+    @pytest.mark.asyncio
+    async def test_done_with_archive_keeps_excludes(self):
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)], archives=True)
+        await _run(src, _cfg(), params=2)
+        # Archive captures the checkpoint server-side; the WAN pull stays light.
+        assert src._pull_excludes == ("*/resume/",)
+
+    @pytest.mark.asyncio
+    async def test_zero_task_chain_rejected(self):
+        src = FakeSource([])
+        with pytest.raises(ValueError, match="0 tasks"):
+            await _run(src, _cfg(), params=0)
