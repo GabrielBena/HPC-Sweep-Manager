@@ -87,7 +87,7 @@ sweep.
 ```
 ┌─────────────────────── setup(sweep_dir, sweep_id) ────────────────────┐
 │ open asyncssh conn  ──►  echo $HOME (resolve ~)  ──►  mkdir layout    │
-│ rsync push local project → {remote_root}/{project}/code/              │
+│ rsync push local project → {remote_root}/{project}/snapshots/{id}/   │
 │ nvidia-smi probe → list[gpu_indices]                                  │
 │ normalize_gpu_allowlist + partition_gpu_slots → asyncio.Queue         │
 │ resolve_run_prefix(conda_env, python_path) → "conda run -n env python"│
@@ -119,10 +119,11 @@ sweep.
 
 Key properties:
 
-- **Rolling code mirror.** rsync push uses `--delete`; the code cache at
-  `{remote_root}/{project}/code/` is reused across sweeps (only diffs go
-  over the wire). Per-sweep work lives at
-  `{remote_root}/{project}/sweeps/{sweep_id}/`.
+- **Per-sweep code snapshots.** Each sweep pushes to
+  `{remote_root}/{project}/snapshots/{sweep_id}/` with `--link-dest` against the
+  previous snapshot (unchanged files are hard links), and its tasks run there, so
+  a later push can't change queued tasks' code. `code` is a symlink to the newest
+  snapshot. Per-sweep work lives at `{remote_root}/{project}/sweeps/{sweep_id}/`.
 
 - **Slot-based back-pressure.** `setup()` builds a fixed-size
   `asyncio.Queue` of slots (GPU index lists for GPU mode, `None` for CPU

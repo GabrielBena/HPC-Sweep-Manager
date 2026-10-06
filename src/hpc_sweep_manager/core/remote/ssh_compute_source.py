@@ -42,6 +42,9 @@ from .push_exec import (
     normalize_gpu_allowlist,
     partition_gpu_slots,
     resolve_run_prefix,
+    snapshot_prepare_cmd,
+    snapshot_publish_cmd,
+    warn_shared_code_refs,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,31 +189,30 @@ class SSHComputeSource(ComputeSource):
         # quoted COMMAND strings do NOT — nor does the locally-run rsync. One
         # remote-shell echo at setup gives a single absolute path used everywhere.
         resolved_root = await self._resolve_remote_path(self.remote_root)
-        self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
+        project_root = f"{resolved_root}/{self._project_name}"
+        self._remote_code_dir = f"{project_root}/snapshots/{sweep_id}"
+        self._remote_sweep_dir = f"{project_root}/sweeps/{sweep_id}"
 
-        # Build the remote layout up front so rsync push + per-task writes
-        # don't have to worry about missing directories.
-        await self._conn.run(
-            f"mkdir -p {self._remote_code_dir} "
-            f"{self._remote_sweep_dir}/tasks "
-            f"{self._remote_sweep_dir}/logs "
-            f"{self._remote_sweep_dir}/scripts",
-            check=False,
+        # This sweep's code snapshot and dirs, hard-linked against the newest snapshot (S4).
+        sweep_dirs = [f"{self._remote_sweep_dir}/{d}" for d in ("tasks", "logs", "scripts")]
+        prep = await self._conn.run(
+            snapshot_prepare_cmd(project_root, sweep_id, sweep_dirs), check=False
         )
-
         push_cmd = build_rsync_push_cmd(
             local_dir=self.project_dir,
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
             agentless=agent_stalled(self.host),
+            link_dest=(prep.stdout or "").strip().rstrip("/") or None,
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
         if rc != 0:
             self.stats.health_status = "unhealthy"
             return False
+        await self._conn.run(snapshot_publish_cmd(project_root, sweep_id), check=False)
+        warn_shared_code_refs(self.default_spec.pre_script, self._project_name)
 
         # GPU probe — best effort. A box with no nvidia-smi just gives []
         # which falls back to CPU slots downstream.

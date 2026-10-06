@@ -77,6 +77,9 @@ from .push_exec import (
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
     resolve_run_prefix,
+    snapshot_prepare_cmd,
+    snapshot_publish_cmd,
+    warn_shared_code_refs,
 )
 
 logger = logging.getLogger(__name__)
@@ -314,31 +317,31 @@ class SSHSlurmComputeSource(SlurmBase):
         self._resolved_archive_dir = (
             await self._resolve_remote_path(self.archive_dir) if self.archive_dir else None
         )
-        self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
+        project_root = f"{resolved_root}/{self._project_name}"
+        self._remote_code_dir = f"{project_root}/snapshots/{sweep_id}"
+        self._remote_sweep_dir = f"{project_root}/sweeps/{sweep_id}"
         self._remote_tasks_dir = f"{self._remote_sweep_dir}/tasks"
         self._remote_logs_dir = f"{self._remote_sweep_dir}/logs"
         self._remote_scripts_dir = f"{self._remote_sweep_dir}/scripts"
 
-        await self._ssh_run(
-            f"mkdir -p {self._remote_code_dir} "
-            f"{self._remote_tasks_dir} {self._remote_logs_dir} "
-            f"{self._remote_scripts_dir}",
-            check=False,
-        )
-
+        # This sweep's code snapshot and dirs, hard-linked against the newest snapshot (S4).
+        sweep_dirs = [self._remote_tasks_dir, self._remote_logs_dir, self._remote_scripts_dir]
+        prep = await self._ssh_run(snapshot_prepare_cmd(project_root, sweep_id, sweep_dirs))
         push_cmd = build_rsync_push_cmd(
             local_dir=self.project_dir,
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
             agentless=agent_stalled(self.host),
+            link_dest=(prep.stdout or "").strip().rstrip("/") or None,
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
         if rc != 0:
             self.stats.health_status = "unhealthy"
             return False
+        await self._ssh_run(snapshot_publish_cmd(project_root, sweep_id))
+        warn_shared_code_refs(self.default_spec.pre_script, self._project_name)
 
         self._run_prefix = resolve_run_prefix(self.conda_env, self.python_path)
         self.stats.health_status = "healthy"
@@ -555,6 +558,7 @@ class SSHSlurmComputeSource(SlurmBase):
             "keep_remote_on_success": self.keep_remote_on_success,
             "remote_sweep_dir": self._remote_sweep_dir,
             "remote_tasks_dir": self._remote_tasks_dir,
+            "remote_code_dir": self._remote_code_dir,  # this sweep's snapshot (advance re-uses it)
             "submission_mode": submission_mode,
             "job_ids": list(job_ids),
             "num_tasks": num_tasks,
@@ -576,7 +580,6 @@ class SSHSlurmComputeSource(SlurmBase):
             # remote code dir (the rsynced mirror persists between chunks).
             manifest["spec"] = self.default_spec.to_dict()
             manifest["script_path"] = self.script_path
-            manifest["remote_code_dir"] = self._remote_code_dir
         if chain is not None:
             manifest["chain"] = chain
         content = json.dumps(manifest, indent=2, default=str)

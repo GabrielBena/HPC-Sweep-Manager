@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import time
+
 import pytest
 
 from hpc_sweep_manager.core.remote.push_exec import (
@@ -12,6 +16,8 @@ from hpc_sweep_manager.core.remote.push_exec import (
     normalize_gpu_allowlist,
     partition_gpu_slots,
     resolve_run_prefix,
+    snapshot_publish_cmd,
+    warn_shared_code_refs,
 )
 
 
@@ -197,3 +203,45 @@ class TestExcludeRsyncSemantics:
         # globs still strip the heavy files). Add an unanchored per-remote
         # exclude if a project needs the old behavior.
         assert (pushed / "sub/wandb/nested.txt").is_file()
+
+
+class TestCodeSnapshots:
+    """Per-sweep code snapshots (tracker S4): queued tasks never run a later push's code."""
+
+    def test_the_push_hard_links_against_the_previous_snapshot(self):
+        cmd = build_rsync_push_cmd("/p", "h", "/r/p/snapshots/s2", [], link_dest="/r/p/snapshots/s")
+
+        assert "--link-dest=/r/p/snapshots/s" in cmd
+        assert cmd[-1] == "h:/r/p/snapshots/s2/"
+
+    @staticmethod
+    def _publish(root, sweep_id):
+        subprocess.run(["bash", "-c", snapshot_publish_cmd(str(root), sweep_id)], check=True)
+
+    def test_publish_points_code_at_the_snapshot_and_keeps_the_legacy_dir(self, tmp_path):
+        root = tmp_path / "proj"
+        (root / "code").mkdir(parents=True)
+        (root / "code" / "legacy.py").write_text("x")  # a queued pre-snapshot task's code
+        (root / "snapshots" / "s1").mkdir(parents=True)
+        self._publish(root, "s1")
+        assert os.readlink(root / "code") == "snapshots/s1"
+        assert (root / "code.pre-snapshots" / "legacy.py").exists()  # renamed, never deleted
+        (root / "snapshots" / "s2").mkdir()
+        self._publish(root, "s2")
+        assert os.readlink(root / "code") == "snapshots/s2"
+
+    def test_publish_drops_only_old_snapshots_whose_sweep_is_gone(self, tmp_path):
+        root, month_ago = tmp_path / "proj", time.time() - 30 * 86400
+        for sid in ("live", "orphan", "young_orphan", "new"):
+            (root / "snapshots" / sid).mkdir(parents=True)
+        (root / "sweeps" / "live").mkdir(parents=True)
+        for sid in ("live", "orphan"):
+            os.utime(root / "snapshots" / sid, (month_ago, month_ago))
+        self._publish(root, "new")
+        kept = sorted(p.name for p in (root / "snapshots").iterdir())
+        # A task that entered through the `code` symlink may still run in a young orphan.
+        assert kept == ["live", "new", "young_orphan"]
+
+    def test_a_pre_script_naming_the_shared_dir_is_flagged(self, caplog):
+        warn_shared_code_refs(["export PYTHONPATH=/scratch/runs/proj/code:$PYTHONPATH"], "proj")
+        assert "$HSM_CODE_DIR" in caplog.text

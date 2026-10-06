@@ -69,6 +69,16 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+- **Each sweep runs its own code (S4).** Every launch re-synced one shared remote
+  `code/` dir with `--delete`, so tasks of an earlier sweep still queued on a
+  cluster ran the newest code, and files tasks wrote in their working dir were
+  deleted by the next push. Each sweep now pushes to `snapshots/<sweep_id>/`
+  (hard-linked against the previous one, so it is cheap) and its tasks run there;
+  `$HSM_CODE_DIR` names it in every wrapper (use it for `PYTHONPATH` in
+  `pre_script`). `code` stays a symlink to the newest snapshot, so paths hard-coded
+  to it behave as before; an existing `code/` dir is renamed to `code.pre-snapshots`,
+  never deleted. Snapshots older than 7 days whose sweep dir is gone are removed at
+  the next launch.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

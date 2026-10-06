@@ -9,7 +9,11 @@ without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
 
 from __future__ import annotations
 
+import logging
+import shlex
 from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 # Files never worth shipping to a compute node — keeps the rsync payload to
 # source only (no history, caches, prior outputs, data, checkpoints).
@@ -122,18 +126,26 @@ def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
 
 
 def build_rsync_push_cmd(
-    local_dir: str, host: str, remote_dir: str, excludes: Sequence[str], agentless: bool = False
+    local_dir: str,
+    host: str,
+    remote_dir: str,
+    excludes: Sequence[str],
+    agentless: bool = False,
+    link_dest: str | None = None,
 ) -> list[str]:
-    """rsync the local project tree up to the rolling remote code dir.
+    """rsync the local project tree up to a remote code dir.
 
     ``--delete`` keeps the remote copy an exact mirror (files removed locally
     vanish remotely); trailing slashes put *contents* of ``local_dir`` into
-    ``remote_dir``. Relies on the system ssh transport, which reads
-    ``~/.ssh/config`` natively, so ``host`` may be an alias. ``agentless`` skips
-    the SSH agent, for a host whose agent stalled (``discovery.agent_stalled``).
+    ``remote_dir``. ``link_dest`` (the previous snapshot) hard-links unchanged
+    files instead of copying them. Relies on the system ssh transport, which
+    reads ``~/.ssh/config`` natively, so ``host`` may be an alias. ``agentless``
+    skips the SSH agent, for a host whose agent stalled (``discovery.agent_stalled``).
     """
     ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
     cmd = ["rsync", "-az", "--delete", "-e", ssh]
+    if link_dest:
+        cmd.append(f"--link-dest={link_dest}")
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{local_dir.rstrip('/')}/")
@@ -162,3 +174,45 @@ def build_rsync_pull_cmd(
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
     cmd.append(f"{local_dir.rstrip('/')}/")
     return cmd
+
+
+# Per-sweep code snapshots (tracker S4). Each sweep pushes its code to
+# ``<project_root>/snapshots/<sweep_id>/`` and its tasks run from there, so a later push can never
+# change the code of tasks still queued. ``code`` stays a symlink to the newest snapshot, so a path
+# hard-coded to the old shared dir (a ``pre_script`` PYTHONPATH, a queued pre-snapshot task) keeps
+# working as it did; ``$HSM_CODE_DIR`` (exported by every wrapper) names the task's own snapshot.
+
+
+def snapshot_prepare_cmd(project_root: str, sweep_id: str, sweep_dirs: Sequence[str]) -> str:
+    """Remote shell: print the newest existing snapshot (the ``--link-dest`` base, if any), then
+    create this sweep's snapshot dir and ``sweep_dirs``."""
+    snaps = f"{project_root}/snapshots"
+    return f"ls -1d {snaps}/*/ 2>/dev/null | tail -1; mkdir -p {snaps}/{sweep_id} " + " ".join(
+        sweep_dirs
+    )
+
+
+def snapshot_publish_cmd(project_root: str, sweep_id: str, keep_days: int = 7) -> str:
+    """Remote shell, after the push: point ``code`` at this snapshot, then drop snapshots older
+    than ``keep_days`` whose sweep dir is gone.
+
+    A legacy real ``code/`` dir is renamed to ``code.pre-snapshots`` once, never deleted (queued
+    pre-snapshot tasks may still ``cd`` there). The age guard covers tasks that entered through the
+    ``code`` symlink: no snapshot younger than the longest walltime is removed under them.
+    """
+    root = shlex.quote(project_root)
+    return (
+        f"cd {root} && {{ [ -L code ] || [ ! -e code ] || mv code code.pre-snapshots; }} && "
+        f"ln -sfn snapshots/{sweep_id} code && "
+        f"find snapshots -mindepth 1 -maxdepth 1 -type d -mtime +{keep_days} | "
+        'while read -r d; do [ -d "sweeps/${d#snapshots/}" ] || rm -rf "$d"; done'
+    )
+
+
+def warn_shared_code_refs(pre_script: Sequence[str], project: str) -> None:
+    """Warn when ``pre_script`` names the old shared code dir instead of ``$HSM_CODE_DIR``."""
+    if any(f"/{project}/code" in line for line in pre_script):
+        logger.warning(
+            f"pre_script mentions .../{project}/code, which now points at the newest sweep's code "
+            "snapshot; use $HSM_CODE_DIR for the code of the task's own sweep."
+        )

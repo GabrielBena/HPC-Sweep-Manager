@@ -428,6 +428,15 @@ it's trying to reintroduce them, push back.
       `QueueCommandError` on failure instead of returning `[]` — over SSH
       an empty table must mean "no jobs", never "squeue quietly broke".
 
+14. **Each sweep runs from its own code snapshot (tracker S4).** Both SSH
+   sources push to `<root>/<project>/snapshots/<sweep_id>/` (`--link-dest` the
+   previous one) and `cd` there; every wrapper exports `HSM_CODE_DIR`. `code` is
+   a symlink to the newest snapshot so hard-coded paths keep their old meaning.
+   Never delete or replace a real legacy `code/` dir (queued pre-snapshot tasks
+   `cd` into it): it is renamed to `code.pre-snapshots` once. Snapshot GC keeps
+   anything younger than 7 days (a task that entered through the symlink may
+   still run there) or whose sweep dir exists. The helpers are in `push_exec.py`.
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1
