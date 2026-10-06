@@ -492,6 +492,36 @@ class TestSubmit:
 # --------------------------------------------------------------------- status
 
 
+class TestArrayThrottle:
+    """Tracker S5: a slurm remote's max_parallel_jobs was a client-side count Slurm never saw."""
+
+    def test_max_parallel_jobs_becomes_the_array_throttle(self, tmp_path):
+        src = build_ssh_slurm_source(
+            name="uzh",
+            remote_cfg={"max_parallel_jobs": 350},
+            project_dir=str(tmp_path),
+            script_path="t.py",
+        )
+        assert src.default_spec.array_throttle == 350
+
+    @pytest.mark.parametrize("value", ["350", True, 0.5])
+    def test_a_bad_max_parallel_jobs_is_named(self, tmp_path, value):
+        with pytest.raises(ValueError, match="max_parallel_jobs must be an integer"):
+            build_ssh_slurm_source(
+                name="uzh",
+                remote_cfg={"max_parallel_jobs": value},
+                project_dir=str(tmp_path),
+                script_path="t.py",
+            )
+
+    def test_an_explicit_throttle_wins(self, tmp_path):
+        cfg = {"max_parallel_jobs": 350, "spec": {"array_throttle": 50}}
+        src = build_ssh_slurm_source(
+            name="uzh", remote_cfg=cfg, project_dir=str(tmp_path), script_path="t.py"
+        )
+        assert src.default_spec.array_throttle == 50
+
+
 class TestStatus:
     """The SSH seam of SlurmBase's refresh (the semantics: test_slurm_base.py)."""
 

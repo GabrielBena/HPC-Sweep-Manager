@@ -352,12 +352,14 @@ def build_array_submissions(
             f"— their params files/job names would overwrite each other. "
             f"Use distinct type names."
         )
+    throttles = split_throttle(effective_spec.array_throttle, [len(p.indices) for p in plans])
     submissions: list[SubArraySubmission] = []
-    for plan, token in zip(plans, tokens, strict=True):
+    for plan, token, throttle in zip(plans, tokens, throttles, strict=True):
         sub_spec = replace(
             effective_spec,
             gpu_type=plan.gpu_type,
             walltime=plan.walltime or effective_spec.walltime,
+            array_throttle=throttle,
         )
         entries = tuple(
             {"index": j + 1, "global_index": i + 1, "params": params_list[i]}
@@ -374,6 +376,18 @@ def build_array_submissions(
             )
         )
     return submissions
+
+
+def split_throttle(throttle: int | None, sizes: Sequence[int]) -> list[int | None]:
+    """Share one sweep-wide ``array_throttle`` across its sub-arrays, in proportion to their
+    sizes (each at least 1): a throttle caps the sweep, not each GPU type's array."""
+    if not throttle or len(sizes) < 2:
+        return [throttle] * len(sizes)
+    total = sum(sizes)
+    shares = [max(1, throttle * n // total) for n in sizes]
+    while sum(shares) > max(throttle, len(sizes)):  # rounding up to 1 can overshoot
+        shares[shares.index(max(shares))] -= 1
+    return shares
 
 
 def jobs_manifest_entries(

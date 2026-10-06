@@ -49,6 +49,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from .fair_share import Share, probe_share
 from .slurm_protocol import SLURM_STATE_MAP
 
 logger = logging.getLogger(__name__)
@@ -855,6 +856,10 @@ class SSHSlurmQueue:
                 + (f": {stderr}" if stderr else " (is Slurm on the remote's PATH?)")
             )
         return result.stdout or ""
+
+    async def share(self, account: str, partition: str = "") -> Share:
+        """The account's fair-share load (:mod:`fair_share`), in one round trip."""
+        return await probe_share(account, partition, conn=self._conn)
 
     async def whoami(self) -> str:
         """The remote-side username (≠ local ``$USER`` in general)."""

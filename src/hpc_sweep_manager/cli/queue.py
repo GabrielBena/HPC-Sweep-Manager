@@ -43,6 +43,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ..core.common.config import HSMConfig
+from ..core.hpc.fair_share import Share, probe_share
 from ..core.hpc.scheduler_queue import (
     KNOWN_GPU_VRAM_GB,
     JobGroup,
@@ -214,6 +215,9 @@ class _LocalQueueAsync:
 
     async def reservations(self) -> list[Reservation]:
         return self._q.reservations()
+
+    async def share(self, account: str, partition: str = "") -> Share:
+        return await probe_share(account, partition)
 
 
 def _slurm_backend_remotes(hsm_config: HSMConfig | None) -> dict[str, dict]:
@@ -902,6 +906,54 @@ def queue_reservations(ctx, remote_alias: str, verbose: bool, quiet: bool):
         return await q.reservations()
 
     _run_queue_command(console, target, gather, lambda data: _render_reservations(console, data))
+
+
+def _spec_field(remote_alias: str | None, key: str) -> str | None:
+    """``key`` from the remote's ``spec:`` (or the ``slurm:`` block without a remote)."""
+    cfg = HSMConfig.load()
+    if cfg is None:
+        return None
+    if remote_alias:
+        remotes = (cfg.config_data.get("distributed") or {}).get("remotes") or {}
+        return ((remotes.get(remote_alias) or {}).get("spec") or {}).get(key)
+    return (cfg.config_data.get("slurm") or {}).get(key)
+
+
+@queue.command("share")
+@_remote_option
+@click.option("--account", help="Slurm account (default: the remote's spec.account).")
+@common_options
+@click.pass_context
+def queue_share(ctx, remote_alias: str, account: str | None, verbose: bool, quiet: bool):
+    """How loaded the shared account is, and how much of it is you (exit 3 when hot)."""
+    console = ctx.obj["console"]
+    target = _resolve_queue_target(remote_alias, console)  # may pick the sole slurm remote
+    alias = target["alias"] if target else None
+    account = account or _spec_field(alias, "account")
+    if not account:
+        raise click.UsageError("no Slurm account: pass --account or set spec.account")
+    partition = _spec_field(alias, "partition") or ""
+    seen: list[Share] = []
+
+    async def gather(q):
+        return await q.share(account, partition)
+
+    def render(share: Share) -> None:
+        seen.append(share)
+        console.print(share.summary())
+        running = "; ".join(f"{u} {j} jobs / {c} cpus" for u, (j, c) in share.running.items())
+        console.print(f"  running: {running or 'none'}")
+        if share.hot:
+            console.print(
+                "[yellow]  The account is hot: throttle arrays (spec.array_throttle), keep CPU "
+                "jobs off GPU nodes, and say so in the launch message.[/yellow]"
+            )
+
+    _run_queue_command(console, target, gather, render)
+    if seen and not seen[-1].known:
+        raise click.ClickException(f"could not read account {account!r}'s fair share (sshare)")
+    if seen and seen[-1].hot:
+        ctx.exit(3)
 
 
 __all__ = ["queue"]
