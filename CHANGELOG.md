@@ -70,6 +70,19 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
 
+### Removed (2026-10 maintenance pass)
+
+- **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,
+  `hydra-core` or `omegaconf`; none is imported by HSM (an install drops from about
+  215 MB to 56 MB). Training environments that relied on HSM to pull them in must
+  list them themselves. `requirements.txt` (a stale copy of `pyproject.toml`) and the
+  empty `docs` extra are gone.
+- **Dead code (no caller anywhere):** ten helpers in `cli/common.py`,
+  `HydraConfigParser` and `SweepConfig.from_hydra_config`, six `utils` helpers
+  (`ProgressTracker`, `format_duration`, …), `PathDetector.suggest_setup`, two
+  `ParameterGenerator` helpers, `get_sweep_completion_summary`, and the unused
+  `templates/sweep.yaml.j2`.
+
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
 and the first blind agent-driven consumer run from Comp-PVR
