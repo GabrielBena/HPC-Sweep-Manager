@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fake scancel: marks the targeted jobs as CANCELLED in jobs.jsonl.
 
-Each call's arguments are appended to ``scancel.log`` (one line per call). Exits 1 when a
-target is unknown.
+Each call's arguments are appended to ``scancel.log`` (one line per call). Like real Slurm with
+the default signal, an unknown or ended job id is no error; ``HSM_FAKE_SCANCEL_RC`` forces a
+failure.
 """
 
 from __future__ import annotations
@@ -47,9 +48,10 @@ def main() -> int:
         for j in jobs:
             f.write(json.dumps(j) + "\n")
 
-    for job in sorted(targets - found):
-        print(f"scancel: error: Kill job error on job id {job}: Invalid job id", file=sys.stderr)
-    return 0 if found == targets else 1
+    rc = int(os.environ.get("HSM_FAKE_SCANCEL_RC", "0"))
+    if rc:
+        print("scancel: error: Unable to contact slurm controller", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":

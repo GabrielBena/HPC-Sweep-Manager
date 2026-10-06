@@ -80,7 +80,8 @@ class TestSSHSlurm:
     def test_one_scancel_names_every_job(self, tmp_path, monkeypatch, conn):
         res = _cancel(tmp_path, monkeypatch, _ssh_manifest(), "--yes")
         assert res.exit_code == 0, res.output
-        assert _scancels(conn) == ["scancel 101 102"]
+        assert conn.run_calls[1:] == ["scancel 101 102"]  # after `echo $USER`: no rsync, no rm
+        assert len(conn.run_calls) == 2 and conn.run_calls[0].startswith("echo ")
         assert "Cancelled job(s) 101 102 on uzh" in res.output
 
     @pytest.mark.parametrize("rc", [1, None])
@@ -125,11 +126,17 @@ class TestNativeSlurm:
         assert states == {"1001": "CANCELLED", "1002": "CANCELLED", "1003": "RUNNING"}
         assert "on this machine" in res.output
 
+    def test_a_job_already_ended_is_no_error(self, tmp_path, monkeypatch, fake_slurm):
+        self._queue(fake_slurm, "1001")  # 1002 ended: real scancel exits 0 for it
+        res = _cancel(tmp_path, monkeypatch, self._manifest(), "--yes")
+        assert res.exit_code == 0, res.output
+
     def test_a_failed_scancel_exits_non_zero(self, tmp_path, monkeypatch, fake_slurm):
-        self._queue(fake_slurm, "1001")  # 1002 unknown: the stub exits 1
+        self._queue(fake_slurm, "1001", "1002")
+        monkeypatch.setenv("HSM_FAKE_SCANCEL_RC", "1")
         res = _cancel(tmp_path, monkeypatch, self._manifest(), "--yes")
         assert res.exit_code == 1
-        assert "Invalid job id" in res.output
+        assert "Unable to contact" in res.output
 
 
 def test_advance_refuses_a_native_chain(tmp_path, monkeypatch):

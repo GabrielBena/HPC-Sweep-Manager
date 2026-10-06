@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import json
 import pytest
 
 from hpc_sweep_manager.core.common.resumable import ChunkProgress, ResumableConfig
@@ -149,6 +150,17 @@ class TestDrive:
         src = FakeSource([None, ChunkProgress(frozenset(), 100.0)])
         res = await _run(src, _cfg(), params=2, do_setup=False, initial_job_ids=["j0"], block=False)
         assert res.chain_decision == "" and src.submit_calls == [] and len(src._script) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_chain_marked_cancelled_submits_no_more(self, tmp_path):
+        # `hsm sweep cancel` marks the manifest; the live driver must not write over it and go on.
+        src = FakeSource([ChunkProgress(frozenset(), 100.0)] * 2)
+        src.sweep_dir = tmp_path
+        mark = {"chain": {"state": {"failed": True}}}
+        (tmp_path / ".hsm_manifest.json").write_text(json.dumps(mark))
+        with pytest.raises(RuntimeError, match="stopped by `hsm sweep cancel`"):
+            await _run(src, _cfg(), params=3)
+        assert len(src.submit_calls) == 1 and len(src.persist_calls) == 1  # none after the wait
 
     @pytest.mark.asyncio
     async def test_done_in_one_chunk(self):

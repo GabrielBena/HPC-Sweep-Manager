@@ -929,7 +929,9 @@ class SSHSlurmComputeSource(SlurmBase):
             rc = await self._pull_tasks()
             return rc == 0
 
-        any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
+        # Anything short of COMPLETED (FAILED, CANCELLED) keeps the remote dir and isn't archived
+        # as a success.
+        any_failed = any(j.status != "COMPLETED" for j in self.completed_jobs.values())
 
         # Archive FIRST (server-side rsync /scratch → /shares — the durable
         # safety net) then pull tasks/ back to anahita. The archive uses
@@ -953,7 +955,7 @@ class SSHSlurmComputeSource(SlurmBase):
         elif any_failed:
             logger.info(
                 f"Keeping {self._remote_sweep_dir} on {self.host} for "
-                f"inspection (at least one FAILED job)"
+                f"inspection (a job not COMPLETED)"
             )
         return True
 

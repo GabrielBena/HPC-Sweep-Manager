@@ -1,7 +1,9 @@
 """Sweep execution CLI commands."""
 
+import json
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1160,6 +1162,8 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
     source = SSHSlurmComputeSource.from_manifest(manifest)
+    if ((manifest.get("chain") or {}).get("state") or {}).get("failed"):
+        source.keep_remote_on_success = True  # a stopped chain's checkpoints stay on the remote
     sweep_id = manifest["sweep_id"]
     if not await source.reattach(sweep_dir, sweep_id, manifest):
         console.print(f"[red]Could not connect to {source.host} to collect.[/red]")
@@ -1200,11 +1204,12 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             )
         else:
             ok = await source.collect_results()
-            failed = sum(1 for s in terminal.values() if s == "FAILED")
-            colour = "red" if failed else "green"
+            counts = Counter(terminal.values())
+            colour = "green" if set(counts) == {"COMPLETED"} else "red"
             console.print(
                 f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal: "
-                f"{len(terminal) - failed} COMPLETED, {failed} FAILED.[/{colour}]"
+                + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+                + f".[/{colour}]"
             )
             archived = " + archived" if source.archive_dir else ""
             console.print(
@@ -1308,12 +1313,15 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
-    done = ((manifest.get("chain") or {}).get("state") or {}).get("done")
-    if (manifest.get("resumable") or {}).get("enabled") and not done:
+    state = (manifest.get("chain") or {}).get("state") or {}
+    if (manifest.get("resumable") or {}).get("enabled") and not (
+        state.get("done") or state.get("failed")
+    ):
         # collect would archive + rm -rf the remote dir on "all terminal" — but a
         # chain's chunk is terminal between chunks, and deleting it loses the
         # resume checkpoints. Refuse; point at advance (which is chain-aware). A
-        # done chain is collected (e.g. after its final archive was cut short).
+        # done chain is collected (e.g. after its final archive was cut short), and
+        # a failed one (cancelled) too, keeping its remote dir.
         console.print(
             f"[red]{sweep_id} is a resumable chain not done — `hsm sweep collect` could "
             f"delete the remote checkpoints between chunks.[/red]"
@@ -1323,7 +1331,10 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"it pulls/archives automatically when the chain completes.[/yellow]"
         )
         return
-    missing = [k for k in ("remote_sweep_dir", "host", "job_ids") if not manifest.get(k)]
+    if not manifest.get("host"):  # native Slurm wrote its results here already
+        console.print(f"{sweep_id} ran on this machine's Slurm: nothing to collect.")
+        return
+    missing = [k for k in ("remote_sweep_dir", "job_ids") if not manifest.get(k)]
     if missing:
         console.print(
             f"[red]Manifest {manifest_path} is missing required field(s): "
@@ -2193,8 +2204,9 @@ def cancel_cmd(ctx, sweep_id, yes):
             console.print(f"[red]✗ scancel failed (rc={rc}): {err.strip()}[/red]")
             raise SystemExit(1)
         console.print(f"[green]✓ Cancelled job(s) {' '.join(job_ids)} on {where}.[/green]")
-        if chain:
-            chain.setdefault("state", {})["failed"] = True
+        if chain:  # re-read: a driver may have recorded a chunk meanwhile
+            manifest = json.loads(manifest_path.read_text())
+            manifest["chain"].setdefault("state", {})["failed"] = True
             manifest_path.write_text(json.dumps(manifest, indent=2))
             console.print(
                 "[yellow]The chain is marked stopped: `hsm sweep advance` won't resubmit it. "

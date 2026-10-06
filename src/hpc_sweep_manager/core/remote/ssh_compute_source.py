@@ -612,7 +612,9 @@ class SSHComputeSource(ComputeSource):
         if rc != 0:
             return False
 
-        any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
+        # Anything short of COMPLETED (FAILED, CANCELLED) keeps the remote dir and isn't archived
+        # as a success.
+        any_failed = any(j.status != "COMPLETED" for j in self.completed_jobs.values())
         if not any_failed and not self.keep_remote_on_success and not self.active_jobs:
             try:
                 dirs = [self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id)]
@@ -625,7 +627,7 @@ class SSHComputeSource(ComputeSource):
         elif any_failed:
             logger.info(
                 f"Keeping {self._remote_sweep_dir} on {self.host} for inspection "
-                f"(at least one FAILED job)"
+                f"(a job not COMPLETED)"
             )
         return True
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import json
 import logging
 import shutil
 from collections.abc import Callable, Sequence
@@ -431,6 +432,15 @@ async def run_sweep_async(
     )
 
 
+def _cancelled(source: ComputeSource) -> bool:
+    """Whether ``hsm sweep cancel`` marked this chain stopped in its manifest on disk."""
+    try:
+        manifest = json.loads((source.sweep_dir / ".hsm_manifest.json").read_text())
+    except (AttributeError, TypeError, OSError, ValueError):
+        return False
+    return bool(((manifest.get("chain") or {}).get("state") or {}).get("failed"))
+
+
 async def run_resumable_sweep_async(
     *,
     source: ComputeSource,
@@ -584,6 +594,8 @@ async def run_resumable_sweep_async(
         # re-attached terminal chunk the caller seeded completed_jobs, so this
         # returns at once.
         last_statuses = await source.wait_for_all(poll_interval=poll_interval)
+        if _cancelled(source):  # before _persist, which would write over the mark
+            raise RuntimeError(f"chain {sweep_id} was stopped by `hsm sweep cancel`")
         if chunks_meta:
             chunks_meta[-1]["terminal_states"] = list(last_statuses.values())
 
