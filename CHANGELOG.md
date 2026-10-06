@@ -85,8 +85,9 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `walltime: 12:00:00` as the int 43200, which rendered `--time=43200`
   (30 days); an unquoted `chunk_walltime` crashed the resumable check. Sweep
   files and `.hsm/config.yaml` now load with YAML 1.2 numbers (decimal ints,
-  `1e-1` floats; `yes`/`no` unchanged), and a `walltime` or `chunk_walltime`
-  that isn't a `[D-]HH:MM:SS` / `MM:SS` string is an error asking you to
+  `1e-1` floats; `yes`/`no` unchanged). A `walltime` that isn't a Slurm time
+  string (`M`, `M:S`, `H:M:S`, `D-H`, `D-H:M`, `D-H:M:S`), or a
+  `chunk_walltime` that isn't an `HH:MM:SS` string, is an error asking you to
   quote it.
 
 ### Removed (2026-10 maintenance pass)

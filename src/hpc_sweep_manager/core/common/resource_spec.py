@@ -21,9 +21,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Slurm/PBS walltime as a STRING: [D-]HH:MM:SS or MM:SS. An unquoted YAML 1.1
+# A Slurm time STRING: M, M:S, H:M:S, D-H, D-H:M or D-H:M:S. An unquoted YAML 1.1
 # 12:00:00 was the int 43200, which renders as --time=43200 (30 days).
-_WALLTIME = re.compile(r"(\d+-)?\d+:\d{2}:\d{2}|\d+:\d{2}")
+_WALLTIME = re.compile(r"(\d+-)?\d+(:\d+){0,2}")
 
 
 @dataclass(frozen=True)
@@ -51,8 +51,8 @@ class ResourceSpec:
             isinstance(self.walltime, str) and _WALLTIME.fullmatch(self.walltime)
         ):
             raise ValueError(
-                f"ResourceSpec: walltime must be a '[D-]HH:MM:SS' or 'MM:SS' string, got "
-                f'{self.walltime!r}; quote it in YAML (walltime: "12:00:00")'
+                f"ResourceSpec: walltime must be a Slurm time string ('[D-]H:M:S', 'M', "
+                f"'D-H', ...), got {self.walltime!r}; quote it in YAML (walltime: \"12:00:00\")"
             )
         if self.mem is not None and self.mem_per_cpu is not None:
             raise ValueError("ResourceSpec: cannot set both 'mem' and 'mem_per_cpu'")
