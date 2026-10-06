@@ -24,7 +24,10 @@ YAML12Loader.yaml_implicit_resolvers = {
     first: [(tag, rx) for tag, rx in resolvers if tag not in (_INT, _FLOAT)]
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
-YAML12Loader.add_implicit_resolver(_INT, re.compile(r"^[-+]?[0-9]+$"), list("-+0123456789"))
+# Underscores as YAML 1.1 and Python allow them (1_000), so such an int keeps its type.
+YAML12Loader.add_implicit_resolver(
+    _INT, re.compile(r"^[-+]?[0-9]+(?:_[0-9]+)*$"), list("-+0123456789")
+)
 YAML12Loader.add_implicit_resolver(
     _FLOAT,
     re.compile(

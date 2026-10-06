@@ -23,6 +23,8 @@ from hpc_sweep_manager.core.common.yaml_loader import dump_yaml, load_yaml
         ("010", 10),  # YAML 1.1: octal 8
         ("007", 7),
         ("-3", -3),
+        ("1_000", 1000),  # as YAML 1.1 and Python read it
+        ("1__0", "1__0"),
         ("12:00:00", "12:00:00"),  # YAML 1.1: base-60 int 43200
         ("0x1F", "0x1F"),  # YAML 1.1: hex 31
         ("0b101", "0b101"),

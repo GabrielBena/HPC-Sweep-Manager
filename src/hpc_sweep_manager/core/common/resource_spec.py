@@ -21,8 +21,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# A Slurm time STRING: M, M:S, H:M:S, D-H, D-H:M or D-H:M:S. An unquoted YAML 1.1
-# 12:00:00 was the int 43200, which renders as --time=43200 (30 days).
+# A Slurm time: M, M:S, H:M:S, D-H, D-H:M or D-H:M:S. HSM reads YAML 1.2, so an unquoted
+# 12:00:00 stays a string; a bare int is minutes, as Slurm reads it.
 _WALLTIME = re.compile(r"(\d+-)?\d+(:\d+){0,2}")
 
 
@@ -50,6 +50,8 @@ class ResourceSpec:
     array_throttle: int | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.walltime, int) and not isinstance(self.walltime, bool):
+            object.__setattr__(self, "walltime", str(self.walltime))
         if self.walltime is not None and not (
             isinstance(self.walltime, str) and _WALLTIME.fullmatch(self.walltime)
         ):
