@@ -30,9 +30,7 @@ def _make_project(tmp_path, *, backend="slurm", spec=None):
     (tmp_path / "train.py").write_text("print('hi')\n")
     sweeps = tmp_path / "sweeps"
     sweeps.mkdir()
-    (sweeps / "sweep.yaml").write_text(
-        yaml.safe_dump({"sweep": {"grid": {"lr": [0.1, 0.2, 0.3]}}})
-    )
+    (sweeps / "sweep.yaml").write_text(yaml.safe_dump({"sweep": {"grid": {"lr": [0.1, 0.2, 0.3]}}}))
     remote = {"host": "uzh", "backend": backend}
     if spec is not None:
         remote["spec"] = spec

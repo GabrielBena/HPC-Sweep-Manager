@@ -1,7 +1,7 @@
 """Unit tests for the distributed job manager."""
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -83,7 +83,7 @@ class MockComputeSource(ComputeSource):
         self.cleanup_called = True
         return True
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Mock health check."""
         return {"status": "healthy", "timestamp": "2023-01-01T00:00:00", "connection": "ok"}
 

@@ -1,12 +1,12 @@
 """Pytest configuration and fixtures for HSM testing."""
 
-from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -331,9 +331,7 @@ def fake_slurm(tmp_path, monkeypatch) -> FakeSlurm:
 # Fake nvidia-smi fixture (for LocalComputeSource GPU detection tests)
 # -----------------------------------------------------------------------------
 
-_FAKE_NVIDIA_SMI_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "fake_nvidia_smi" / "nvidia-smi"
-)
+_FAKE_NVIDIA_SMI_FIXTURE = Path(__file__).parent / "fixtures" / "fake_nvidia_smi" / "nvidia-smi"
 
 
 @dataclass

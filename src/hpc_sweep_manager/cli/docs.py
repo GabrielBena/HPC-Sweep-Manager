@@ -10,7 +10,6 @@ humans and agents that can only see the consumer project.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
@@ -26,7 +25,7 @@ _PAGES = [
 ]
 
 
-def _local_docs_dir() -> Optional[Path]:
+def _local_docs_dir() -> Path | None:
     """Return the on-disk docs/user_guide dir for source/editable installs, else None."""
     import hpc_sweep_manager
 
@@ -67,6 +66,5 @@ def docs(ctx: click.Context) -> None:
         "repo.[/dim]"
     )
     console.print(
-        "[dim]Canonical branch: main — ignore origin/v2 (an abandoned "
-        "2025 experiment).[/dim]"
+        "[dim]Canonical branch: main — ignore origin/v2 (an abandoned 2025 experiment).[/dim]"
     )

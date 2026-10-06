@@ -1,7 +1,7 @@
 """Parameter combination generation for sweeps."""
 
 import itertools
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class ParameterGenerator:
@@ -11,7 +11,7 @@ class ParameterGenerator:
         """Initialize with a SweepConfig object."""
         self.config = config
 
-    def generate_combinations(self, max_runs: Optional[int] = None) -> List[Dict[str, Any]]:
+    def generate_combinations(self, max_runs: int | None = None) -> list[dict[str, Any]]:
         """Generate all parameter combinations."""
         grid_combinations = self._generate_grid_combinations()
         paired_combinations = self._generate_paired_combinations()
@@ -43,7 +43,7 @@ class ParameterGenerator:
         else:
             return grid_count * paired_count
 
-    def _generate_grid_combinations(self) -> List[Dict[str, Any]]:
+    def _generate_grid_combinations(self) -> list[dict[str, Any]]:
         """Generate grid parameter combinations."""
         if not self.config.grid:
             return [{}]
@@ -58,7 +58,7 @@ class ParameterGenerator:
 
         return combinations
 
-    def _generate_paired_combinations(self) -> List[Dict[str, Any]]:
+    def _generate_paired_combinations(self) -> list[dict[str, Any]]:
         """Generate paired parameter combinations."""
         if not self.config.paired:
             return [{}]
@@ -138,8 +138,8 @@ class ParameterGenerator:
         return total_count
 
     def _flatten_dict(
-        self, d: Dict[str, Any], parent_key: str = "", sep: str = "."
-    ) -> Dict[str, Any]:
+        self, d: dict[str, Any], parent_key: str = "", sep: str = "."
+    ) -> dict[str, Any]:
         """Flatten nested dictionary with dot notation."""
         items = []
         for k, v in d.items():
@@ -153,7 +153,7 @@ class ParameterGenerator:
                 items.append((new_key, v))
         return dict(items)
 
-    def get_parameter_info(self) -> Dict[str, Any]:
+    def get_parameter_info(self) -> dict[str, Any]:
         """Get detailed information about parameters and combinations."""
         grid_info = {}
         paired_info = {}
@@ -191,12 +191,12 @@ class ParameterGenerator:
             "paired_combinations": self._count_paired_combinations(),
         }
 
-    def preview_combinations(self, max_preview: int = 5) -> List[Dict[str, Any]]:
+    def preview_combinations(self, max_preview: int = 5) -> list[dict[str, Any]]:
         """Generate a preview of parameter combinations."""
         all_combinations = self.generate_combinations()
         return all_combinations[:max_preview]
 
-    def create_command_line_args(self, params: Dict[str, Any]) -> List[str]:
+    def create_command_line_args(self, params: dict[str, Any]) -> list[str]:
         """Convert parameter dictionary to command line arguments for Hydra."""
         args = []
         for key, value in params.items():

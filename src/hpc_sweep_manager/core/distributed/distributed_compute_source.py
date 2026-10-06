@@ -18,12 +18,13 @@ but that requires decomposing the manager's blocking ``_wait_for_completion``.
 
 from __future__ import annotations
 
-from datetime import datetime
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any
 
-from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode, TERMINAL_STATES
+from ..common.compute_source import ComputeSource, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from .distributed_manager import (
     DistributedJobManager,
@@ -52,7 +53,7 @@ def _config_from_hsm(distributed_cfg: dict) -> DistributedSweepConfig:
     )
 
 
-def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSource]:
+def _build_local_child(hsm_config, distributed_cfg: dict) -> ComputeSource | None:
     """Construct the local child source from config, or None on failure."""
     from ..common.path_detector import PathDetector
     from ..local.local_compute_source import LocalComputeSource
@@ -78,7 +79,7 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> Optional[ComputeSou
         return None
 
 
-async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
+async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
     """Construct push-model SSH/SSH-Slurm child sources from local hsm_config.
 
     Dispatches per-remote on the optional ``backend:`` field
@@ -104,7 +105,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
     if project_conda_env and "conda_env" not in distributed_cfg:
         distributed_cfg["conda_env"] = project_conda_env
 
-    sources: List[ComputeSource] = []
+    sources: list[ComputeSource] = []
     for remote_name, remote_config in remotes.items():
         backend = (remote_config.get("backend") or "ssh").lower()
         try:
@@ -116,9 +117,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
                     project_dir=project_dir,
                     script_path=script_path,
                 )
-                logger.info(
-                    f"Remote source ready: {remote_name} (backend=slurm)"
-                )
+                logger.info(f"Remote source ready: {remote_name} (backend=slurm)")
             elif backend == "ssh":
                 source = build_ssh_source(
                     name=remote_name,
@@ -127,9 +126,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
                     project_dir=project_dir,
                     script_path=script_path,
                 )
-                logger.info(
-                    f"Remote source ready: {remote_name} (backend=ssh)"
-                )
+                logger.info(f"Remote source ready: {remote_name} (backend=ssh)")
             else:
                 logger.warning(
                     f"Unknown backend {backend!r} for remote {remote_name!r}; "
@@ -138,9 +135,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> List[ComputeSource]:
                 continue
             sources.append(source)
         except Exception as e:  # noqa: BLE001 - a bad remote shouldn't kill the run
-            logger.warning(
-                f"Failed to add {backend} source {remote_name!r}: {e}"
-            )
+            logger.warning(f"Failed to add {backend} source {remote_name!r}: {e}")
     return sources
 
 
@@ -157,12 +152,12 @@ class DistributedComputeSource(ComputeSource):
     def __init__(
         self,
         name: str = "distributed",
-        child_sources: Optional[List[ComputeSource]] = None,
-        config: Optional[DistributedSweepConfig] = None,
+        child_sources: list[ComputeSource] | None = None,
+        config: DistributedSweepConfig | None = None,
         show_progress: bool = False,
         hsm_config: Any = None,
     ):
-        self._child_sources: List[ComputeSource] = list(child_sources or [])
+        self._child_sources: list[ComputeSource] = list(child_sources or [])
         # Aggregate capacity across children; 0 children -> 1 placeholder slot.
         total_slots = sum(s.max_parallel_jobs for s in self._child_sources) or 1
         super().__init__(name, "distributed", total_slots)
@@ -171,9 +166,9 @@ class DistributedComputeSource(ComputeSource):
         # When no explicit children are given, they're discovered from this
         # hsm_config in setup() (production path). Tests pass child_sources directly.
         self._hsm_config = hsm_config
-        self._manager: Optional[DistributedJobManager] = None
-        self.sweep_dir: Optional[Path] = None
-        self.sweep_id: Optional[str] = None
+        self._manager: DistributedJobManager | None = None
+        self.sweep_dir: Path | None = None
+        self.sweep_id: str | None = None
 
     def add_source(self, source: ComputeSource) -> None:
         """Register a child compute source (before :meth:`setup`)."""
@@ -197,13 +192,9 @@ class DistributedComputeSource(ComputeSource):
             if cfg.get("enabled", True)
         }
         if remotes:
-            self._child_sources.extend(
-                await _build_ssh_children(self._hsm_config, remotes)
-            )
+            self._child_sources.extend(await _build_ssh_children(self._hsm_config, remotes))
 
-        self.max_parallel_jobs = (
-            sum(s.max_parallel_jobs for s in self._child_sources) or 1
-        )
+        self.max_parallel_jobs = sum(s.max_parallel_jobs for s in self._child_sources) or 1
 
     # ------------------------------------------------------------------ setup
 
@@ -242,14 +233,14 @@ class DistributedComputeSource(ComputeSource):
 
     async def submit_batch(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
         mode: SubmissionMode = "individual",
-        spec: Optional[ResourceSpec] = None,
-        wandb_group: Optional[str] = None,
-        job_name_prefix: Optional[str] = None,
-        costs: Optional[Sequence[float]] = None,
-    ) -> List[str]:
+        spec: ResourceSpec | None = None,
+        wandb_group: str | None = None,
+        job_name_prefix: str | None = None,
+        costs: Sequence[float] | None = None,
+    ) -> list[str]:
         """Run the whole sweep across children (blocks until all jobs finish).
 
         ``mode`` is ignored — distribution always fans individual jobs across
@@ -283,11 +274,11 @@ class DistributedComputeSource(ComputeSource):
 
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         """Submit a single job (degenerate batch of one)."""
         ids = await self.submit_batch(
@@ -299,7 +290,7 @@ class DistributedComputeSource(ComputeSource):
         self,
         poll_interval: float = 5.0,
         on_progress=None,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Return final statuses.
 
         Because :meth:`submit_batch` blocks until completion, the statuses are
@@ -333,14 +324,14 @@ class DistributedComputeSource(ComputeSource):
         return await source.cancel_job(job_id)
 
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         # The manager collects + normalizes results during submit_distributed_sweep.
         # (defer_cleanup is a resumable-chain no-op — distributed isn't a chain backend.)
         return True
 
-    async def health_check(self) -> Dict[str, Any]:
-        child_health: Dict[str, Any] = {}
+    async def health_check(self) -> dict[str, Any]:
+        child_health: dict[str, Any] = {}
         healthy = 0
         for source in self._child_sources:
             try:

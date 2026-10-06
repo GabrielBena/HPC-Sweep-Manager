@@ -8,15 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
-from pathlib import Path
 import sys
 
 import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
-
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 

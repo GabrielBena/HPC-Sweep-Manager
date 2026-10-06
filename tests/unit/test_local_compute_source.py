@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -190,11 +189,7 @@ class TestSubmitJobBackPressure:
     async def test_slot_count_caps_concurrent_submissions(self, tmp_path, no_gpus):
         # Use a sleeping trivial script so we can observe the slot back-pressure.
         train = tmp_path / "train.py"
-        train.write_text(
-            "#!/usr/bin/env python3\n"
-            "import sys, time\n"
-            "time.sleep(1.0)\n"
-        )
+        train.write_text("#!/usr/bin/env python3\nimport sys, time\ntime.sleep(1.0)\n")
         train.chmod(0o755)
 
         src = LocalComputeSource(

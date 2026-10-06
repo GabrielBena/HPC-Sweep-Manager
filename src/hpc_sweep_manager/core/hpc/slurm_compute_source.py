@@ -12,14 +12,15 @@ QOS whitelist (``qos_whitelist``) is opt-in. For S3IT, pass
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import json
 import logging
-from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
@@ -67,10 +68,10 @@ class SlurmComputeSource(ComputeSource):
         python_path: str = "python",
         script_path: str = "",
         project_dir: str = ".",
-        default_spec: Optional[ResourceSpec] = None,
-        qos_whitelist: Optional[frozenset[str]] = None,
-        conda_env: Optional[str] = None,
-        speed_factors: Optional[Dict[str, float]] = None,
+        default_spec: ResourceSpec | None = None,
+        qos_whitelist: frozenset[str] | None = None,
+        conda_env: str | None = None,
+        speed_factors: dict[str, float] | None = None,
     ):
         # 0 means "no client-side cap" — the cluster's own scheduler decides.
         super().__init__(name, "slurm", max_parallel_jobs or 10_000)
@@ -92,8 +93,8 @@ class SlurmComputeSource(ComputeSource):
         # GPU type → relative runtime multiplier; parameterizes the
         # multi-gpu_type planner (core/hpc/gpu_planner). None = all 1.0.
         self.speed_factors = dict(speed_factors) if speed_factors else None
-        self.sweep_dir: Optional[Path] = None
-        self.sweep_id: Optional[str] = None
+        self.sweep_dir: Path | None = None
+        self.sweep_id: str | None = None
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         for tool in ("sbatch", "squeue", "scancel"):
@@ -126,7 +127,7 @@ class SlurmComputeSource(ComputeSource):
         self.stats.last_health_check = datetime.now()
         return True
 
-    def _effective_spec(self, spec: Optional[ResourceSpec]) -> ResourceSpec:
+    def _effective_spec(self, spec: ResourceSpec | None) -> ResourceSpec:
         merged = self.default_spec.merge(spec)
         if (
             merged.qos is not None
@@ -140,9 +141,7 @@ class SlurmComputeSource(ComputeSource):
 
     def _ensure_dirs(self) -> tuple[Path, Path, Path]:
         if self.sweep_dir is None:
-            raise RuntimeError(
-                f"SlurmComputeSource {self.name!r} not set up; call setup() first"
-            )
+            raise RuntimeError(f"SlurmComputeSource {self.name!r} not set up; call setup() first")
         scripts_dir = self.sweep_dir / "scripts"
         logs_dir = self.sweep_dir / "logs"
         tasks_dir = self.sweep_dir / "tasks"
@@ -152,11 +151,11 @@ class SlurmComputeSource(ComputeSource):
 
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         effective = self._effective_spec(spec)
         directives = render_sbatch_directives(effective)
@@ -211,21 +210,20 @@ class SlurmComputeSource(ComputeSource):
 
     async def submit_batch(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
         mode: SubmissionMode = "individual",
-        spec: Optional[ResourceSpec] = None,
-        wandb_group: Optional[str] = None,
-        job_name_prefix: Optional[str] = None,
-        costs: Optional[Sequence[float]] = None,
+        spec: ResourceSpec | None = None,
+        wandb_group: str | None = None,
+        job_name_prefix: str | None = None,
+        costs: Sequence[float] | None = None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
-    ) -> List[str]:
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
+    ) -> list[str]:
         if resumable is not None and mode != "array":
             raise ValueError(
-                "resumable chains use array mode (one chunk = one Slurm array); "
-                f"got mode={mode!r}"
+                f"resumable chains use array mode (one chunk = one Slurm array); got mode={mode!r}"
             )
         if mode == "array":
             return await self._submit_array(
@@ -250,16 +248,16 @@ class SlurmComputeSource(ComputeSource):
 
     async def _submit_array(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
-        spec: Optional[ResourceSpec],
-        wandb_group: Optional[str],
-        job_name_prefix: Optional[str],
-        costs: Optional[Sequence[float]] = None,
+        spec: ResourceSpec | None,
+        wandb_group: str | None,
+        job_name_prefix: str | None,
+        costs: Sequence[float] | None = None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
-    ) -> List[str]:
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
+    ) -> list[str]:
         """Submit the sweep as 1..K Slurm arrays (K > 1 for multi-type specs).
 
         Mirrors ``SSHSlurmComputeSource._submit_array`` — both build their
@@ -281,7 +279,7 @@ class SlurmComputeSource(ComputeSource):
         if resumable is not None:
             cap = resumable.config.chunk_walltime
             submissions = [replace_sub_walltime(sub, cap) for sub in submissions]
-        job_ids: List[str] = []
+        job_ids: list[str] = []
         try:
             for sub in submissions:
                 job_ids.append(
@@ -309,15 +307,13 @@ class SlurmComputeSource(ComputeSource):
         self,
         sub: SubArraySubmission,
         sweep_id: str,
-        wandb_group: Optional[str],
+        wandb_group: str | None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
     ) -> str:
         signal = format_signal(resumable.config.signal_grace) if resumable else None
-        directives = render_sbatch_directives(
-            sub.spec, dependency=dependency, signal=signal
-        )
+        directives = render_sbatch_directives(sub.spec, dependency=dependency, signal=signal)
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
 
         # "index" is array-local (matched against $SLURM_ARRAY_TASK_ID);
@@ -360,12 +356,10 @@ class SlurmComputeSource(ComputeSource):
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"sbatch (array) failed: {result.stderr.strip() or 'no stderr'}"
-            )
+            raise RuntimeError(f"sbatch (array) failed: {result.stderr.strip() or 'no stderr'}")
         job_id = parse_sbatch_job_id(result.stdout)
 
-        params: Dict[str, Any] = {"_array_size": len(sub.entries)}
+        params: dict[str, Any] = {"_array_size": len(sub.entries)}
         if sub.gpu_type:
             params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
@@ -449,7 +443,7 @@ class SlurmComputeSource(ComputeSource):
         return success
 
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         # Slurm outputs land directly in the shared filesystem under tasks_dir.
         # (defer_cleanup is a resumable-chain no-op: nothing to pull or tear down
@@ -464,7 +458,7 @@ class SlurmComputeSource(ComputeSource):
         files are already on the filesystem the driver runs on."""
         _, _, tasks_dir = self._ensure_dirs()
         done: set[int] = set()
-        newest: Optional[float] = None
+        newest: float | None = None
         for task_dir in Path(tasks_dir).glob("task_*"):
             if not task_dir.is_dir():
                 continue
@@ -480,7 +474,7 @@ class SlurmComputeSource(ComputeSource):
                             newest = mt
         return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=newest)
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         try:
             result = await asyncio.to_thread(
                 subprocess.run,

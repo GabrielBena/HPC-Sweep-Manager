@@ -1,22 +1,22 @@
 """Interactive configuration CLI commands."""
 
-from datetime import datetime
 import logging
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
+import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
-import yaml
 
 from ..core.common.path_detector import PathDetector
 
 
 def configure_sweep(
-    config_file: Optional[Path],
-    output_file: Optional[Path],
+    config_file: Path | None,
+    output_file: Path | None,
     console: Console,
     logger: logging.Logger,
 ):
@@ -75,7 +75,7 @@ def configure_sweep(
     _show_configuration_summary(sweep_config, output_file, console)
 
 
-def _scan_config_directory(config_dir: Path, console: Console) -> Dict[str, Any]:
+def _scan_config_directory(config_dir: Path, console: Console) -> dict[str, Any]:
     """Scan Hydra config directory for parameters."""
     parameters = {}
 
@@ -100,7 +100,7 @@ def _scan_config_directory(config_dir: Path, console: Console) -> Dict[str, Any]
     return parameters
 
 
-def _extract_parameters_from_file(config_file: Path, console: Console) -> Dict[str, Any]:
+def _extract_parameters_from_file(config_file: Path, console: Console) -> dict[str, Any]:
     """Extract parameters from a specific config file."""
     try:
         with open(config_file) as f:
@@ -117,8 +117,8 @@ def _extract_parameters_from_file(config_file: Path, console: Console) -> Dict[s
 
 
 def _extract_parameters_from_config(
-    config: Dict[str, Any], source: str, prefix: str = ""
-) -> Dict[str, Any]:
+    config: dict[str, Any], source: str, prefix: str = ""
+) -> dict[str, Any]:
     """Extract parameters from a config dictionary."""
     parameters = {}
 
@@ -144,7 +144,7 @@ def _extract_parameters_from_config(
     return parameters
 
 
-def _suggest_parameter_values(param_name: str, default_value: Any) -> List[Any]:
+def _suggest_parameter_values(param_name: str, default_value: Any) -> list[Any]:
     """Suggest parameter values based on name and default."""
     suggestions = [default_value]
 
@@ -174,8 +174,8 @@ def _suggest_parameter_values(param_name: str, default_value: Any) -> List[Any]:
 
 
 def _interactive_parameter_selection(
-    parameters: Dict[str, Any], console: Console
-) -> Dict[str, Any]:
+    parameters: dict[str, Any], console: Console
+) -> dict[str, Any]:
     """Interactive parameter selection and sweep configuration."""
 
     if not parameters:
@@ -246,8 +246,8 @@ def _interactive_parameter_selection(
 
 
 def _select_grid_parameter(
-    parameters: Dict[str, Any], current_grid: Dict[str, Any], console: Console
-) -> Optional[Dict[str, Any]]:
+    parameters: dict[str, Any], current_grid: dict[str, Any], console: Console
+) -> dict[str, Any] | None:
     """Select a parameter for grid search."""
     # Show available parameters
     available = {k: v for k, v in parameters.items() if k not in current_grid}
@@ -322,8 +322,8 @@ def _select_grid_parameter(
 
 
 def _select_paired_parameters(
-    parameters: Dict[str, Any], console: Console
-) -> Optional[Dict[str, Any]]:
+    parameters: dict[str, Any], console: Console
+) -> dict[str, Any] | None:
     """Select parameters that should vary together."""
     console.print("\n[yellow]Paired parameters vary together (same length required)[/yellow]")
 
@@ -377,7 +377,7 @@ def _select_paired_parameters(
     return {group_name: paired_params}
 
 
-def _manual_parameter_entry(console: Console) -> Dict[str, Any]:
+def _manual_parameter_entry(console: Console) -> dict[str, Any]:
     """Manual parameter entry when no configs are found."""
     console.print("\n[yellow]Manual parameter entry:[/yellow]")
 
@@ -419,7 +419,7 @@ def _manual_parameter_entry(console: Console) -> Dict[str, Any]:
 
 
 def _review_selection(
-    grid_params: Dict[str, Any], paired_groups: List[Dict[str, Any]], console: Console
+    grid_params: dict[str, Any], paired_groups: list[dict[str, Any]], console: Console
 ):
     """Review current parameter selection."""
     console.print("\n[bold]Current Selection:[/bold]")
@@ -438,7 +438,7 @@ def _review_selection(
                     console.print(f"    {param}: {values}")
 
 
-def _configure_metadata(console: Console) -> Dict[str, Any]:
+def _configure_metadata(console: Console) -> dict[str, Any]:
     """Configure sweep metadata."""
     console.print("\n[bold]Sweep Metadata:[/bold]")
 
@@ -458,7 +458,7 @@ def _configure_metadata(console: Console) -> Dict[str, Any]:
 
 
 def _save_sweep_config(
-    sweep_config: Dict[str, Any],
+    sweep_config: dict[str, Any],
     output_file: Path,
     console: Console,
     logger: logging.Logger,
@@ -478,7 +478,7 @@ def _save_sweep_config(
         logger.error(f"Failed to save sweep configuration: {e}")
 
 
-def _show_configuration_summary(sweep_config: Dict[str, Any], output_file: Path, console: Console):
+def _show_configuration_summary(sweep_config: dict[str, Any], output_file: Path, console: Console):
     """Show configuration summary and next steps."""
 
     # Count total combinations

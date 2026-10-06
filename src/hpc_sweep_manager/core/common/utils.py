@@ -1,13 +1,12 @@
 """Utility functions for HPC Sweep Manager."""
 
-from datetime import datetime
 import logging
-from pathlib import Path
 import sys
-from typing import Optional
+from datetime import datetime
+from pathlib import Path
 
 
-def setup_logging(level: str = "INFO", log_file: Optional[Path] = None) -> logging.Logger:
+def setup_logging(level: str = "INFO", log_file: Path | None = None) -> logging.Logger:
     """Set up logging configuration."""
 
     # Convert string level to logging constant

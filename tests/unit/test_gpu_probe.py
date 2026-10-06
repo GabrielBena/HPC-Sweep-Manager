@@ -7,11 +7,7 @@ import pytest
 from hpc_sweep_manager.core.remote import gpu_probe
 from hpc_sweep_manager.core.remote.gpu_probe import GpuInfo, parse_nvidia_smi_csv
 
-
-SAMPLE = (
-    "0, NVIDIA A100-SXM4-40GB, 38200, 40960, 97\n"
-    "1, NVIDIA A100-SXM4-40GB, 12, 40960, 0\n"
-)
+SAMPLE = "0, NVIDIA A100-SXM4-40GB, 38200, 40960, 97\n1, NVIDIA A100-SXM4-40GB, 12, 40960, 0\n"
 
 
 class TestParse:

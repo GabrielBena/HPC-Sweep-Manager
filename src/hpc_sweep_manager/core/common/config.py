@@ -1,10 +1,10 @@
 """HSM configuration loading utilities."""
 
-from dataclasses import dataclass, field
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional
 
 import yaml
 
@@ -37,7 +37,7 @@ concerns).
 _MACHINE_CONFIG_ALLOWED_TOP_LEVEL = {"local"}
 
 
-def _load_yaml_dict(path: Path) -> Optional[Dict[str, Any]]:
+def _load_yaml_dict(path: Path) -> dict[str, Any] | None:
     """Read a YAML file as a dict, returning ``None`` on any failure.
 
     Empty / comment-only files load as ``None`` from yaml; we coerce to
@@ -59,7 +59,7 @@ def _load_yaml_dict(path: Path) -> Optional[Dict[str, Any]]:
     return data
 
 
-def _scope_machine_config(data: Dict[str, Any], path: Path) -> Dict[str, Any]:
+def _scope_machine_config(data: dict[str, Any], path: Path) -> dict[str, Any]:
     """Drop non-``local:`` top-level keys from the machine config with a warning."""
     rejected = set(data) - _MACHINE_CONFIG_ALLOWED_TOP_LEVEL
     if rejected:
@@ -71,9 +71,7 @@ def _scope_machine_config(data: Dict[str, Any], path: Path) -> Dict[str, Any]:
     return {k: v for k, v in data.items() if k in _MACHINE_CONFIG_ALLOWED_TOP_LEVEL}
 
 
-def _merge_machine_and_project(
-    machine: Dict[str, Any], project: Dict[str, Any]
-) -> Dict[str, Any]:
+def _merge_machine_and_project(machine: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
     """Merge machine (base) + project (overrides) by per-block rule.
 
     - ``local:`` — deep-merged field-by-field; project fields win on collisions
@@ -84,14 +82,10 @@ def _merge_machine_and_project(
       but the rule is here in case someone widens
       ``_MACHINE_CONFIG_ALLOWED_TOP_LEVEL`` later.
     """
-    result: Dict[str, Any] = dict(machine)
+    result: dict[str, Any] = dict(machine)
     for key, project_val in project.items():
         machine_val = result.get(key)
-        if (
-            key == "local"
-            and isinstance(machine_val, dict)
-            and isinstance(project_val, dict)
-        ):
+        if key == "local" and isinstance(machine_val, dict) and isinstance(project_val, dict):
             merged_local = dict(machine_val)
             merged_local.update(project_val)
             result[key] = merged_local
@@ -104,10 +98,10 @@ def _merge_machine_and_project(
 class SweepConfig:
     """Configuration for parameter sweeps."""
 
-    grid: Dict[str, List[Any]] = field(default_factory=dict)
-    paired: List[Dict[str, Dict[str, List[Any]]]] = field(default_factory=list)
-    defaults: Dict[str, Any] = field(default_factory=dict)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    grid: dict[str, list[Any]] = field(default_factory=dict)
+    paired: list[dict[str, dict[str, list[Any]]]] = field(default_factory=list)
+    defaults: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     script: str = None  # Training script path (optional)
     complete: str = None  # Completion sweep ID (optional)
     # Heterogeneous GPU scheduling (issue #7): name of a swept param whose
@@ -115,16 +109,16 @@ class SweepConfig:
     # translation (e.g. {5: 7.0, 16: 23.0} — measured hours, ratios matter).
     # Consumed by core/hpc/gpu_planner.task_costs; never enters hydra args.
     cost_param: str = None
-    cost_map: Dict[Any, Any] = field(default_factory=dict)
+    cost_map: dict[Any, Any] = field(default_factory=dict)
     # Resumable chained runs (issue #12): the typed knob block (enabled,
     # chunk_walltime, signal_grace, resume_arg, done_sentinel, checkpoint_subdir,
     # max_chunks, max_consecutive_failures). Parsed by
     # core/common/resumable.ResumableConfig; the CLI layers --resumable /
     # --chunk-walltime + the per-remote block on top.
-    resumable: Dict[str, Any] = field(default_factory=dict)
+    resumable: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_yaml(cls, config_path: Union[str, Path]) -> "SweepConfig":
+    def from_yaml(cls, config_path: str | Path) -> "SweepConfig":
         """Load sweep config from YAML file."""
         config_path = Path(config_path)
         if not config_path.exists():
@@ -136,7 +130,7 @@ class SweepConfig:
         return cls.from_dict(raw_config)
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> "SweepConfig":
+    def from_dict(cls, config_dict: dict[str, Any]) -> "SweepConfig":
         """Create sweep config from dictionary."""
         # Extract sweep section if it exists, otherwise treat entire dict as sweep config
         sweep_config = config_dict.get("sweep", config_dict)
@@ -151,16 +145,14 @@ class SweepConfig:
             cost_param=sweep_config.get("cost_param"),
             cost_map=sweep_config.get("cost_map") or {},
             # Accept `resumable:` at the top level OR under `sweep:`.
-            resumable=config_dict.get("resumable")
-            or sweep_config.get("resumable")
-            or {},
+            resumable=config_dict.get("resumable") or sweep_config.get("resumable") or {},
         )
 
     @classmethod
     def from_hydra_config(
         cls,
-        hydra_config: Union[DictConfig, Dict[str, Any]],
-        selected_params: Dict[str, List[Any]],
+        hydra_config: DictConfig | dict[str, Any],
+        selected_params: dict[str, list[Any]],
     ) -> "SweepConfig":
         """Create sweep config from Hydra config with selected parameters."""
         if not OMEGACONF_AVAILABLE:
@@ -179,7 +171,7 @@ class SweepConfig:
             },
         )
 
-    def validate(self) -> List[str]:
+    def validate(self) -> list[str]:
         """Validate the sweep configuration and return any errors."""
         errors = []
 
@@ -246,7 +238,7 @@ class SweepConfig:
         generator = ParameterGenerator(self)
         return generator.count_combinations()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary representation."""
         result = {
             "sweep": {"grid": self.grid, "paired": self.paired},
@@ -257,7 +249,7 @@ class SweepConfig:
             result["script"] = self.script
         return result
 
-    def save(self, output_path: Union[str, Path]) -> None:
+    def save(self, output_path: str | Path) -> None:
         """Save sweep config to YAML file."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -269,15 +261,15 @@ class SweepConfig:
 class HSMConfig:
     """HSM configuration loader and manager."""
 
-    def __init__(self, config_data: Dict[str, Any]):
+    def __init__(self, config_data: dict[str, Any]):
         """Initialize with configuration data."""
         self.config_data = config_data
 
     @classmethod
     def load(
         cls,
-        config_path: Optional[Path] = None,
-        machine_config_path: Optional[Path] = None,
+        config_path: Path | None = None,
+        machine_config_path: Path | None = None,
     ) -> Optional["HSMConfig"]:
         """Load HSM configuration, merging the machine-wide base with the project file.
 
@@ -317,7 +309,7 @@ class HSMConfig:
                     logger.debug(f"Found HSM project config at: {path}")
                     break
 
-        project_data: Optional[Dict[str, Any]] = None
+        project_data: dict[str, Any] | None = None
         if config_path is not None and config_path.exists():
             project_data = _load_yaml_dict(config_path)
             if project_data is not None:
@@ -325,7 +317,7 @@ class HSMConfig:
 
         # Machine-wide base config.
         machine_path = machine_config_path or MACHINE_CONFIG_PATH
-        machine_data: Optional[Dict[str, Any]] = None
+        machine_data: dict[str, Any] | None = None
         if machine_path.exists():
             machine_data = _load_yaml_dict(machine_path)
             if machine_data is not None:
@@ -355,11 +347,11 @@ class HSMConfig:
                 )
         return cls(merged)
 
-    def get_default_python_path(self) -> Optional[str]:
+    def get_default_python_path(self) -> str | None:
         """Get default Python interpreter path from config."""
         return self.config_data.get("paths", {}).get("python_interpreter")
 
-    def get_conda_env(self) -> Optional[str]:
+    def get_conda_env(self) -> str | None:
         """Project-level conda/mamba env name. The single source of truth.
 
         Read from ``paths.conda_env``. When set, every backend that runs
@@ -386,19 +378,19 @@ class HSMConfig:
             return None
         return value.strip()
 
-    def get_default_script_path(self) -> Optional[str]:
+    def get_default_script_path(self) -> str | None:
         """Get default training script path from config."""
         return self.config_data.get("paths", {}).get("train_script")
 
-    def get_project_root(self) -> Optional[str]:
+    def get_project_root(self) -> str | None:
         """Get project root directory from config."""
         return self.config_data.get("project", {}).get("root")
 
-    def get_wandb_config(self) -> Dict[str, Any]:
+    def get_wandb_config(self) -> dict[str, Any]:
         """Get wandb configuration from config."""
         return self.config_data.get("wandb", {})
 
-    def get_max_array_size(self) -> Optional[int]:
+    def get_max_array_size(self) -> int | None:
         """Get the Slurm-array size cap from the ``slurm:`` block.
 
         Slurm's default ceiling is 10000; this lets users lower it for
@@ -528,7 +520,7 @@ class HSMConfig:
             return None
         return indices
 
-    def get_local_sweeps_root(self) -> Optional[str]:
+    def get_local_sweeps_root(self) -> str | None:
         """Read ``local.sweeps_root`` — a directory where sweep dirs live, or ``None``.
 
         When set, sweep dirs are created at ``<sweeps_root>/<sweep_id>/`` (with
@@ -558,7 +550,7 @@ class HSMConfig:
             return None
         return value
 
-    def get_slurm_qos_whitelist(self) -> Optional[frozenset]:
+    def get_slurm_qos_whitelist(self) -> frozenset | None:
         """Read ``slurm.qos_whitelist`` as a frozenset, or ``None`` if unset.
 
         Returned from the same ``slurm:`` block as :meth:`get_slurm_spec`,
@@ -578,7 +570,7 @@ class HSMConfig:
             return None
         return frozenset(str(q) for q in whitelist)
 
-    def get_slurm_speed_factors(self) -> Optional[Dict[str, float]]:
+    def get_slurm_speed_factors(self) -> dict[str, float] | None:
         """Read ``slurm.speed_factors`` — GPU type → relative runtime multiplier.
 
         Same ``slurm:`` block as :meth:`get_slurm_spec`, consumed separately
@@ -608,7 +600,7 @@ class HSMConfig:
 def resolve_sweep_dir(
     hsm_config: Optional["HSMConfig"],
     sweep_id: str,
-    project_dir: Optional[Path] = None,
+    project_dir: Path | None = None,
 ) -> Path:
     """Resolve and create the sweep dir for ``sweep_id``.
 
@@ -636,9 +628,7 @@ def resolve_sweep_dir(
     project_dir = project_dir or Path.cwd()
     default = project_dir / "sweeps" / "outputs" / sweep_id
 
-    sweeps_root = (
-        hsm_config.get_local_sweeps_root() if hsm_config is not None else None
-    )
+    sweeps_root = hsm_config.get_local_sweeps_root() if hsm_config is not None else None
     if not sweeps_root:
         default.mkdir(parents=True, exist_ok=True)
         return default
@@ -692,7 +682,7 @@ class HydraConfigParser:
     def __init__(self, config_dir: Path):
         self.config_dir = config_dir
 
-    def discover_configs(self) -> Dict[str, Path]:
+    def discover_configs(self) -> dict[str, Path]:
         """Discover all configuration files in the config directory."""
         configs = {}
 
@@ -707,12 +697,12 @@ class HydraConfigParser:
 
         return configs
 
-    def load_config(self, config_path: Path) -> Dict[str, Any]:
+    def load_config(self, config_path: Path) -> dict[str, Any]:
         """Load a configuration file."""
         with open(config_path) as f:
             return yaml.safe_load(f)
 
-    def extract_parameters(self, config: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+    def extract_parameters(self, config: dict[str, Any], prefix: str = "") -> dict[str, Any]:
         """Extract parameters from a nested configuration."""
         params = {}
 
@@ -726,7 +716,7 @@ class HydraConfigParser:
 
         return params
 
-    def suggest_sweep_ranges(self, parameters: Dict[str, Any]) -> Dict[str, List[Any]]:
+    def suggest_sweep_ranges(self, parameters: dict[str, Any]) -> dict[str, list[Any]]:
         """Suggest sweep ranges for parameters based on their types and values."""
         suggestions = {}
 

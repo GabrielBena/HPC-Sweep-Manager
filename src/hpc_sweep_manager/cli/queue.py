@@ -31,11 +31,12 @@ across refreshes.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import json
 import os
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any
 
 import click
 from rich.console import Console
@@ -60,7 +61,7 @@ from ..core.hpc.scheduler_queue import (
 from .common import common_options
 
 
-def _manifest_meta(sweep_dir: Path) -> List[tuple]:
+def _manifest_meta(sweep_dir: Path) -> list[tuple]:
     """``[(job_id, per_job_task_total|None), ...]`` from ``.hsm_manifest.json``.
 
     Remote-submitted sweeps record their Slurm job ids in the manifest, not
@@ -100,7 +101,7 @@ def _manifest_meta(sweep_dir: Path) -> List[tuple]:
     return [(str(j), per_job) for j in job_ids]
 
 
-def _manifest_chain_meta(sweep_dir: Path) -> Optional[str]:
+def _manifest_chain_meta(sweep_dir: Path) -> str | None:
     """``"chunk k/max"`` when the sweep's manifest is a resumable chain (#12).
 
     Under option B only the latest chunk is ever in the queue, so a chain shows
@@ -122,7 +123,7 @@ def _manifest_chain_meta(sweep_dir: Path) -> Optional[str]:
     return f"chunk {cur}/{cap}" if cap else f"chunk {cur}"
 
 
-def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
+def _build_sweep_meta_index(sweeps_root: Path) -> dict[str, tuple]:
     """Walk local sweep dirs → ``{base_job_id: (sweep_id, array_total|None, chain_label|None)}``.
 
     Job IDs and totals come from ``submission_summary.txt`` (local/array
@@ -134,7 +135,7 @@ def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
     """
     from .sweep import _load_sweep_meta
 
-    index: Dict[str, tuple] = {}
+    index: dict[str, tuple] = {}
     if not sweeps_root.exists():
         return index
     for sweep_dir in sorted(sweeps_root.iterdir()):
@@ -143,7 +144,7 @@ def _build_sweep_meta_index(sweeps_root: Path) -> Dict[str, tuple]:
         meta = _load_sweep_meta(sweep_dir)
         job_ids = [str(j) for j in (meta.get("job_ids") or [])]
         if job_ids:
-            total: Optional[int] = meta.get("total_combinations") or None
+            total: int | None = meta.get("total_combinations") or None
             per_job_total = total if len(job_ids) == 1 else None
             pairs = [(j, per_job_total) for j in job_ids]
         else:
@@ -190,52 +191,50 @@ class _LocalQueueAsync:
     async def whoami(self) -> str:
         return _resolve_user()
 
-    async def list_user_jobs(self, user: str) -> List[QueueJob]:
+    async def list_user_jobs(self, user: str) -> list[QueueJob]:
         return self._q.list_user_jobs(user)
 
-    async def pending_gpu_jobs_sorted(self) -> List[QueueJob]:
+    async def pending_gpu_jobs_sorted(self) -> list[QueueJob]:
         return self._q.pending_gpu_jobs_sorted()
 
-    async def gpu_summary(self) -> Dict[str, Dict[str, int]]:
+    async def gpu_summary(self) -> dict[str, dict[str, int]]:
         return self._q.gpu_summary()
 
-    async def position_in_gpu_queue(self, job_id: str) -> Optional[tuple[int, int]]:
+    async def position_in_gpu_queue(self, job_id: str) -> tuple[int, int] | None:
         # Surface parity with SSHSlurmQueue — no gather uses this today, but
         # a facade missing a twin's method is a local-mode-only AttributeError
         # waiting to happen.
         return self._q.position_in_gpu_queue(job_id)
 
-    async def sacct_job_states(self, base_ids) -> Optional[Dict[str, Dict[str, int]]]:
+    async def sacct_job_states(self, base_ids) -> dict[str, dict[str, int]] | None:
         return self._q.sacct_job_states(base_ids)
 
-    async def gpu_capacity(self) -> Optional[tuple]:
+    async def gpu_capacity(self) -> tuple | None:
         return self._q.gpu_capacity()
 
-    async def reservations(self) -> List[Reservation]:
+    async def reservations(self) -> list[Reservation]:
         return self._q.reservations()
 
 
-def _slurm_backend_remotes(hsm_config: Optional[HSMConfig]) -> Dict[str, dict]:
+def _slurm_backend_remotes(hsm_config: HSMConfig | None) -> dict[str, dict]:
     """Registered remotes with ``backend: slurm`` — the auto-fallback candidates."""
     if hsm_config is None:
         return {}
     distributed = hsm_config.config_data.get("distributed") or {}
     remotes = distributed.get("remotes") or {}
     return {
-        name: (cfg or {})
-        for name, cfg in remotes.items()
-        if (cfg or {}).get("backend") == "slurm"
+        name: (cfg or {}) for name, cfg in remotes.items() if (cfg or {}).get("backend") == "slurm"
     }
 
 
-def _remote_params(alias: str, hsm_config: Optional[HSMConfig]) -> Dict[str, Any]:
+def _remote_params(alias: str, hsm_config: HSMConfig | None) -> dict[str, Any]:
     """Resolve an alias to SSH connection params.
 
     Mirrors ``build_ssh_slurm_source``: per-remote ``host``/``ssh_key``/
     ``ssh_port`` from ``distributed.remotes.<alias>``; an unregistered alias
     is treated as a bare ``~/.ssh/config`` alias (host = alias).
     """
-    remotes: Dict[str, Any] = {}
+    remotes: dict[str, Any] = {}
     if hsm_config is not None:
         remotes = (hsm_config.config_data.get("distributed") or {}).get("remotes") or {}
     cfg = remotes.get(alias) or {}
@@ -247,9 +246,7 @@ def _remote_params(alias: str, hsm_config: Optional[HSMConfig]) -> Dict[str, Any
     }
 
 
-def _resolve_queue_target(
-    remote_alias: Optional[str], console: Console
-) -> Optional[Dict[str, Any]]:
+def _resolve_queue_target(remote_alias: str | None, console: Console) -> dict[str, Any] | None:
     """Pick the transport: ``None`` → local subprocess, dict → SSH params.
 
     Explicit ``--remote`` always wins. Otherwise local ``squeue`` if present.
@@ -266,8 +263,7 @@ def _resolve_queue_target(
     if len(candidates) == 1:
         alias = next(iter(candidates))
         console.print(
-            f"[dim]No local squeue — using remote {alias!r} "
-            f"(sole slurm-backend remote).[/dim]"
+            f"[dim]No local squeue — using remote {alias!r} (sole slurm-backend remote).[/dim]"
         )
         return _remote_params(alias, hsm_config)
     if candidates:
@@ -285,7 +281,7 @@ def _resolve_queue_target(
 
 def _run_queue_command(
     console: Console,
-    target: Optional[Dict[str, Any]],
+    target: dict[str, Any] | None,
     gather: Callable[[Any], Awaitable[Any]],
     render: Callable[[Any], None],
     *,
@@ -381,7 +377,7 @@ def _watch_options(func):
 # ------------------------------------------------------------------- renderers
 
 
-def _render_mine(console: Console, user: str, jobs: List[QueueJob]) -> None:
+def _render_mine(console: Console, user: str, jobs: list[QueueJob]) -> None:
     """Flat (per-task) view — the `--flat` escape hatch."""
     if not jobs:
         console.print(f"[dim]No jobs in queue for {user!r}.[/dim]")
@@ -421,7 +417,7 @@ def _bar(frac: float, width: int = 10) -> str:
     return "▰" * k + "▱" * (width - k)
 
 
-def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) -> None:
+def _render_mine_grouped(console: Console, user: str, groups: list[JobGroup]) -> None:
     """Default `mine` view: one row per array, with live progress.
 
     ▶/⏳ counts are squeue (live); ✓/✗ and the array total come from sacct
@@ -475,7 +471,7 @@ def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) ->
         # (finished = left-the-queue, ✓/✗ split unknown); else no bar.
         total = g.total or meta_total
         if g.completed is not None:
-            finished: Optional[int] = g.completed + (g.failed or 0)
+            finished: int | None = g.completed + (g.failed or 0)
         elif total:
             finished = max(total - g.in_queue, 0)
         else:
@@ -494,9 +490,7 @@ def _render_mine_grouped(console: Console, user: str, groups: List[JobGroup]) ->
             where = g.reason
         # Resumable chains (#12): label which chunk this is.
         sweep_cell = sweep_id + (f" [dim]({chain_label})[/dim]" if chain_label else "")
-        table.add_row(
-            g.base_id, g.name, tasks_cell, progress_cell, gpu_cell, where, sweep_cell
-        )
+        table.add_row(g.base_id, g.name, tasks_cell, progress_cell, gpu_cell, where, sweep_cell)
 
     console.print(table)
 
@@ -529,9 +523,7 @@ _REASON_LEGEND = (
 )
 
 
-def _render_position_single(
-    console: Console, job_id: str, pending: List[QueueJob]
-) -> None:
+def _render_position_single(console: Console, job_id: str, pending: list[QueueJob]) -> None:
     total = len(pending)
     exact = find_queue_position(pending, job_id)
     if exact is not None:
@@ -557,19 +549,14 @@ def _render_position_single(
 
 
 def _render_position_all(
-    console: Console, user: str, my_jobs: List[QueueJob], pending: List[QueueJob]
+    console: Console, user: str, my_jobs: list[QueueJob], pending: list[QueueJob]
 ) -> None:
     my_pending_gpu = [j for j in my_jobs if j.state == "PENDING" and j.gpu_count > 0]
-    cpu_only_tasks = sum(
-        j.task_count for j in my_jobs if j.state == "PENDING" and j.gpu_count == 0
-    )
+    cpu_only_tasks = sum(j.task_count for j in my_jobs if j.state == "PENDING" and j.gpu_count == 0)
     if not my_pending_gpu:
         msg = f"No pending GPU jobs for {user!r}"
         if cpu_only_tasks:
-            msg += (
-                f" — {cpu_only_tasks} pending task(s) are CPU-only "
-                f"(no GPU queue to position in)"
-            )
+            msg += f" — {cpu_only_tasks} pending task(s) are CPU-only (no GPU queue to position in)"
         else:
             msg += " (you have nothing in the GPU queue to position)"
         console.print(f"[dim]{msg}.[/dim]")
@@ -611,11 +598,11 @@ def _render_position_all(
 
 
 def _mine_gpu_contribution(
-    mine_jobs: Optional[List[QueueJob]],
-) -> tuple[Dict[str, int], Dict[str, int]]:
+    mine_jobs: list[QueueJob] | None,
+) -> tuple[dict[str, int], dict[str, int]]:
     """Per-type GPU counts of the user's running/pending jobs (task-weighted)."""
-    mine_running: Dict[str, int] = {}
-    mine_pending: Dict[str, int] = {}
+    mine_running: dict[str, int] = {}
+    mine_pending: dict[str, int] = {}
     for j in mine_jobs or []:
         if j.gpu_count == 0:
             continue
@@ -627,7 +614,7 @@ def _mine_gpu_contribution(
     return mine_running, mine_pending
 
 
-def _format_vram(type_key: str, cap_entry: Dict) -> tuple[str, bool]:
+def _format_vram(type_key: str, cap_entry: dict) -> tuple[str, bool]:
     """VRAM cell for a GPU type: ``(text, used_model_typical_fallback)``.
 
     Cluster-reported (``vram_gb`` from GPUMEM feature tags) wins — shown
@@ -646,9 +633,9 @@ def _format_vram(type_key: str, cap_entry: Dict) -> tuple[str, bool]:
 
 def _render_gpus(
     console: Console,
-    summary: Dict[str, Dict[str, int]],
-    mine_jobs: Optional[List[QueueJob]],
-    capacity: Optional[tuple] = None,
+    summary: dict[str, dict[str, int]],
+    mine_jobs: list[QueueJob] | None,
+    capacity: tuple | None = None,
 ) -> None:
     """GPU depth table — capacity-aware when sinfo data is available.
 
@@ -698,9 +685,7 @@ def _render_gpus(
                 # request bucket) — no physical inventory to show.
                 row = [type_key, "", "", "", "", str(pending) if pending else ""]
             if mine_jobs is not None:
-                row.append(
-                    f"{mine_running.get(type_key, 0)}/{mine_pending.get(type_key, 0)}"
-                )
+                row.append(f"{mine_running.get(type_key, 0)}/{mine_pending.get(type_key, 0)}")
             table.add_row(*row)
         console.print(table)
         line = f"[bold green]{free_total}[/bold green] GPU(s) free right now"
@@ -714,9 +699,7 @@ def _render_gpus(
                 "attributed to the physical type in the In-use column.[/dim]"
             )
         if any_model_typical:
-            console.print(
-                "[dim]~ = model-typical VRAM (this cluster doesn't report it).[/dim]"
-            )
+            console.print("[dim]~ = model-typical VRAM (this cluster doesn't report it).[/dim]")
         return
 
     # Legacy queue-only view (sinfo unavailable).
@@ -743,7 +726,7 @@ def _render_gpus(
     console.print("[dim]No sinfo capacity data — totals/free unavailable.[/dim]")
 
 
-def _render_reservations(console: Console, reservations: List[Reservation]) -> None:
+def _render_reservations(console: Console, reservations: list[Reservation]) -> None:
     if not reservations:
         console.print(
             "[dim]No upcoming reservations. Cluster is free of scheduled "
@@ -759,9 +742,7 @@ def _render_reservations(console: Console, reservations: List[Reservation]) -> N
     table.add_column("Nodes", justify="right")
     table.add_column("Node spec", style="dim")
     for r in reservations:
-        table.add_row(
-            r.name, r.start_time, r.end_time, r.duration, str(r.node_count), r.nodes
-        )
+        table.add_row(r.name, r.start_time, r.end_time, r.duration, str(r.node_count), r.nodes)
     console.print(table)
 
 
@@ -804,9 +785,7 @@ def queue_mine(
         if flat:
             return {"user": user, "jobs": jobs}
         groups = group_jobs_by_array(jobs)
-        states = (
-            await q.sacct_job_states([g.base_id for g in groups]) if groups else {}
-        )
+        states = await q.sacct_job_states([g.base_id for g in groups]) if groups else {}
         return {"user": user, "groups": enrich_groups_with_accounting(groups, states)}
 
     def render(data):
@@ -922,9 +901,7 @@ def queue_reservations(ctx, remote_alias: str, verbose: bool, quiet: bool):
     async def gather(q):
         return await q.reservations()
 
-    _run_queue_command(
-        console, target, gather, lambda data: _render_reservations(console, data)
-    )
+    _run_queue_command(console, target, gather, lambda data: _render_reservations(console, data))
 
 
 __all__ = ["queue"]

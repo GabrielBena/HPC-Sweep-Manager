@@ -40,13 +40,14 @@ S3IT-specific notes worth knowing (see also CLAUDE.md gotcha #6):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
 import logging
 import re
 import shlex
 import shutil
 import subprocess
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Any
 
 from .slurm_protocol import SLURM_STATE_MAP
 
@@ -80,7 +81,7 @@ class QueueJob:
     expected_start: str  # "N/A" or ISO timestamp
     priority: int
     gpu_count: int = 0
-    gpu_type: Optional[str] = None
+    gpu_type: str | None = None
     task_count: int = 1
 
 
@@ -111,22 +112,22 @@ class JobGroup:
     user: str
     partition: str
     gpu_count: int
-    gpu_type: Optional[str]
+    gpu_type: str | None
     is_array: bool
     running: int = 0
     pending: int = 0
     other: int = 0  # COMPLETING / CONFIGURING / ... — still occupying the queue
     nodes: tuple = ()  # distinct nodelists of RUNNING rows
     reason: str = ""  # first pending row's reason, e.g. "(Priority)"
-    completed: Optional[int] = None  # sacct: COMPLETED task count
-    failed: Optional[int] = None  # sacct: FAILED + CANCELLED (incl. TIMEOUT/OOM)
-    total: Optional[int] = None  # sacct: sum over every task the array ever had
+    completed: int | None = None  # sacct: COMPLETED task count
+    failed: int | None = None  # sacct: FAILED + CANCELLED (incl. TIMEOUT/OOM)
+    total: int | None = None  # sacct: sum over every task the array ever had
 
     @property
     def in_queue(self) -> int:
         return self.running + self.pending + self.other
 
-    def with_accounting(self, completed: int, failed: int, total: int) -> "JobGroup":
+    def with_accounting(self, completed: int, failed: int, total: int) -> JobGroup:
         return replace(self, completed=completed, failed=failed, total=total)
 
 
@@ -145,7 +146,7 @@ class JobGroup:
 _GPU_ENTRY_RE = re.compile(r"gres/gpu(?P<rest>[^,\s]*)", re.IGNORECASE)
 
 
-def _parse_one_gpu_entry(rest: str) -> tuple[int, Optional[str]]:
+def _parse_one_gpu_entry(rest: str) -> tuple[int, str | None]:
     """Parse the part after ``gres/gpu`` in a single GRES entry."""
     # Strip index decorations some clusters append, e.g. "(IDX:0-1)".
     rest = re.sub(r"\(.*\)$", "", rest)
@@ -176,7 +177,7 @@ def _parse_one_gpu_entry(rest: str) -> tuple[int, Optional[str]]:
     return 1, (first or None)
 
 
-def _parse_gpu_entry_any(entry: str) -> tuple[int, Optional[str]]:
+def _parse_gpu_entry_any(entry: str) -> tuple[int, str | None]:
     """Parse ONE gres entry (any source) into (gpu_count, gpu_type).
 
     Accepts both the squeue ``gres/gpu...`` and the sinfo ``gpu...`` prefix
@@ -189,16 +190,16 @@ def _parse_gpu_entry_any(entry: str) -> tuple[int, Optional[str]]:
     return _parse_one_gpu_entry(m.group("rest"))
 
 
-def _split_gres_entries(field: str) -> List[str]:
+def _split_gres_entries(field: str) -> list[str]:
     """Split a gres field on commas NOT inside parentheses.
 
     Load-bearing for sinfo's GresUsed: index decorations contain commas —
     ``gpu:A100:6(IDX:0-1,4-7)`` is ONE entry. A naive ``split(",")`` would
     truncate it to ``gpu:A100:6(IDX:0-1`` and mis-parse the count as 1.
     """
-    entries: List[str] = []
+    entries: list[str] = []
     depth = 0
-    current: List[str] = []
+    current: list[str] = []
     for ch in field:
         if ch == "(":
             depth += 1
@@ -215,7 +216,7 @@ def _split_gres_entries(field: str) -> List[str]:
     return entries
 
 
-def _parse_gpu_from_tres(tres: str) -> tuple[int, Optional[str]]:
+def _parse_gpu_from_tres(tres: str) -> tuple[int, str | None]:
     """Pull (count, type) for GPUs out of a tres-per-node string.
 
     Accepts BOTH GRES grammars (colon-count ``gres/gpu:A100:1`` as emitted
@@ -292,12 +293,12 @@ SQUEUE_FORMAT = "%i\t%j\t%u\t%T\t%R\t%P\t%b\t%S\t%Q"
 _SQUEUE_FIELD_COUNT = 9
 
 
-def squeue_args(extra_args: Sequence[str] = ()) -> List[str]:
+def squeue_args(extra_args: Sequence[str] = ()) -> list[str]:
     """Canonical squeue argument list (sans binary) shared by both transports."""
     return ["--noheader", f"--format={SQUEUE_FORMAT}", *extra_args]
 
 
-def sacct_args(base_ids: Sequence[str]) -> List[str]:
+def sacct_args(base_ids: Sequence[str]) -> list[str]:
     """Canonical sacct argument list (sans binary) shared by both transports.
 
     ``-X`` = one row per allocation (per array task), ``-P`` = pipe-delimited
@@ -306,7 +307,7 @@ def sacct_args(base_ids: Sequence[str]) -> List[str]:
     return ["-j", ",".join(base_ids), "-n", "-X", "-P", "-o", "JobID,State"]
 
 
-def sinfo_capacity_args() -> List[str]:
+def sinfo_capacity_args() -> list[str]:
     """Canonical sinfo argument list (sans binary) shared by both transports.
 
     ``-N`` = one row per node (per partition — duplicates deduped at parse
@@ -334,7 +335,7 @@ _GPUMEM_FEATURE_RE = re.compile(r"GPUMEM(\d+)\s*GB", re.IGNORECASE)
 # features — and only for models with a single common configuration. The
 # ambiguous ones are deliberately absent (A100 = 40/80, V100 = 16/32,
 # H100 = 80/94+: the live S3IT H100s report 96GB — a static entry would lie).
-KNOWN_GPU_VRAM_GB: Dict[str, int] = {
+KNOWN_GPU_VRAM_GB: dict[str, int] = {
     "L4": 24,
     "T4": 16,
     "A30": 24,
@@ -354,11 +355,19 @@ KNOWN_GPU_VRAM_GB: Dict[str, int] = {
 # "drng" (drainING — jobs still running) deliberately stays IN: its GPUs are
 # both present and in use; "drain" (drainED, empty) is out.
 _UNUSABLE_STATE_PREFIXES = (
-    "down", "drain", "fail", "maint", "boot", "unk", "inval", "err", "futr",
+    "down",
+    "drain",
+    "fail",
+    "maint",
+    "boot",
+    "unk",
+    "inval",
+    "err",
+    "futr",
 )
 
 
-def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], int]:
+def parse_sinfo_gpu_capacity(stdout: str) -> tuple[dict[str, dict[str, int]], int]:
     """Parse ``sinfo -h -N -O NodeHost,StateCompact,Gres,GresUsed`` output.
 
     Returns ``({gpu_type: {"total": N, "used": M}}, excluded_gpu_count)``.
@@ -379,8 +388,8 @@ def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], in
       ABSENT when the cluster doesn't report VRAM; callers must treat
       absent as unknown, not zero.
     """
-    capacity: Dict[str, Dict[str, int]] = {}
-    vram_seen: Dict[str, set] = {}
+    capacity: dict[str, dict[str, int]] = {}
+    vram_seen: dict[str, set] = {}
     excluded_gpus = 0
     seen: set = set()
     for line in (stdout or "").splitlines():
@@ -397,7 +406,7 @@ def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], in
         base_state = state.lower().rstrip("*~#%$@!+-")
         unusable = any(base_state.startswith(p) for p in _UNUSABLE_STATE_PREFIXES)
         vram_match = _GPUMEM_FEATURE_RE.search(line)
-        node_types: List[str] = []
+        node_types: list[str] = []
         for entry in _split_gres_entries(gres):
             count, gtype = _parse_gpu_entry_any(entry)
             if count <= 0:
@@ -425,14 +434,14 @@ def parse_sinfo_gpu_capacity(stdout: str) -> tuple[Dict[str, Dict[str, int]], in
     return capacity, excluded_gpus
 
 
-def parse_squeue_output(stdout: str) -> List[QueueJob]:
+def parse_squeue_output(stdout: str) -> list[QueueJob]:
     """Parse canonical-format squeue stdout into :class:`QueueJob` rows.
 
     Pure (no subprocess) so SSH-driven callers can reuse it over their own
     transport. Filters out rows whose field count doesn't match (defensive
     against future format changes); logs them.
     """
-    jobs: List[QueueJob] = []
+    jobs: list[QueueJob] = []
     for raw in (stdout or "").splitlines():
         if not raw.strip():
             continue
@@ -467,13 +476,13 @@ def parse_squeue_output(stdout: str) -> List[QueueJob]:
 # ------------------------------------------------------------ pure aggregators
 
 
-def filter_pending_gpu(jobs: Sequence[QueueJob]) -> List[QueueJob]:
+def filter_pending_gpu(jobs: Sequence[QueueJob]) -> list[QueueJob]:
     """Pending GPU jobs only. The state filter is re-applied locally so the
     contract doesn't depend on squeue honoring ``--state=PENDING`` (defensive)."""
     return [j for j in jobs if j.state == "PENDING" and j.gpu_count > 0]
 
 
-def summarize_gpu_jobs(jobs: Sequence[QueueJob]) -> Dict[str, Dict[str, int]]:
+def summarize_gpu_jobs(jobs: Sequence[QueueJob]) -> dict[str, dict[str, int]]:
     """Per-GPU-type queue depth: ``{type: {state: count}}``.
 
     Counts GPUs, weighted by ``task_count`` so a collapsed pending array row
@@ -481,7 +490,7 @@ def summarize_gpu_jobs(jobs: Sequence[QueueJob]) -> Dict[str, Dict[str, int]]:
     Type ``"<untyped>"`` collects jobs requesting GPUs without a specific
     type (e.g. ``--gpus=1`` without a ``--gres=gpu:TYPE``).
     """
-    summary: Dict[str, Dict[str, int]] = {}
+    summary: dict[str, dict[str, int]] = {}
     for j in jobs:
         if j.gpu_count == 0:
             continue
@@ -491,9 +500,7 @@ def summarize_gpu_jobs(jobs: Sequence[QueueJob]) -> Dict[str, Dict[str, int]]:
     return summary
 
 
-def find_queue_position(
-    pending: Sequence[QueueJob], job_id: str
-) -> Optional[tuple[int, int]]:
+def find_queue_position(pending: Sequence[QueueJob], job_id: str) -> tuple[int, int] | None:
     """Exact-id position of ``job_id`` in a priority-sorted pending list.
 
     Returns ``(position, total)`` (1-based) or ``None`` when absent.
@@ -505,19 +512,19 @@ def find_queue_position(
     return None
 
 
-def positions_by_base(pending: Sequence[QueueJob]) -> Dict[str, List[int]]:
+def positions_by_base(pending: Sequence[QueueJob]) -> dict[str, list[int]]:
     """Map base job id → sorted 1-based positions of its tasks in ``pending``.
 
     With ``-r``-expanded rows, an array's tasks land at several positions;
     callers typically report the first (best) one plus the task count.
     """
-    out: Dict[str, List[int]] = {}
+    out: dict[str, list[int]] = {}
     for idx, j in enumerate(pending, start=1):
         out.setdefault(strip_array_suffix(j.job_id), []).append(idx)
     return out
 
 
-def group_jobs_by_array(jobs: Sequence[QueueJob]) -> List[JobGroup]:
+def group_jobs_by_array(jobs: Sequence[QueueJob]) -> list[JobGroup]:
     """Collapse a (collapsed-display) squeue job list into one group per array.
 
     Input is ``list_user_jobs`` output: running array tasks as individual
@@ -526,8 +533,8 @@ def group_jobs_by_array(jobs: Sequence[QueueJob]) -> List[JobGroup]:
     and keeping the first pending reason. First-seen order is preserved.
     Single (non-array) jobs become one-group-of-one with ``is_array=False``.
     """
-    order: List[str] = []
-    agg: Dict[str, dict] = {}
+    order: list[str] = []
+    agg: dict[str, dict] = {}
     for j in jobs:
         base = strip_array_suffix(j.job_id)
         a = agg.get(base)
@@ -562,7 +569,7 @@ def group_jobs_by_array(jobs: Sequence[QueueJob]) -> List[JobGroup]:
                 a["reason"] = j.reason
         else:
             a["other"] += j.task_count
-    groups: List[JobGroup] = []
+    groups: list[JobGroup] = []
     for base in order:
         a = agg[base]
         nodes = tuple(a.pop("nodes"))
@@ -570,7 +577,7 @@ def group_jobs_by_array(jobs: Sequence[QueueJob]) -> List[JobGroup]:
     return groups
 
 
-def parse_sacct_job_states(stdout: str) -> Dict[str, Dict[str, int]]:
+def parse_sacct_job_states(stdout: str) -> dict[str, dict[str, int]]:
     """Parse ``sacct -n -X -P -o JobID,State`` into ``{base: {state: tasks}}``.
 
     Pure, shared by both transports. One row per array task that has
@@ -580,7 +587,7 @@ def parse_sacct_job_states(stdout: str) -> Dict[str, Dict[str, int]]:
     (``TIMEOUT``/``OOM`` → FAILED, ...) tolerating the ``CANCELLED by
     <uid>`` long form and trailing ``+`` markers.
     """
-    out: Dict[str, Dict[str, int]] = {}
+    out: dict[str, dict[str, int]] = {}
     for line in (stdout or "").splitlines():
         line = line.strip()
         if not line or "|" not in line:
@@ -598,8 +605,8 @@ def parse_sacct_job_states(stdout: str) -> Dict[str, Dict[str, int]]:
 
 
 def enrich_groups_with_accounting(
-    groups: Sequence[JobGroup], states: Optional[Dict[str, Dict[str, int]]]
-) -> List[JobGroup]:
+    groups: Sequence[JobGroup], states: dict[str, dict[str, int]] | None
+) -> list[JobGroup]:
     """Fold sacct per-state task counts into groups (no-op when ``states`` is None).
 
     ``completed`` = COMPLETED; ``failed`` = FAILED + CANCELLED (the state map
@@ -609,7 +616,7 @@ def enrich_groups_with_accounting(
     """
     if states is None:
         return list(groups)
-    enriched: List[JobGroup] = []
+    enriched: list[JobGroup] = []
     for g in groups:
         s = states.get(g.base_id)
         if not s:
@@ -676,26 +683,22 @@ class SlurmQueue:
 
     # -------------------------------------------------------------- raw queries
 
-    def _run_squeue(self, extra_args: List[str]) -> List[QueueJob]:
+    def _run_squeue(self, extra_args: list[str]) -> list[QueueJob]:
         """Run squeue with the canonical format string + caller's filters."""
         cmd = [self.squeue_bin, *squeue_args(extra_args)]
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout_s
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout_s)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
             logger.error(f"squeue invocation failed: {e}")
             return []
         if result.returncode != 0:
-            logger.warning(
-                f"squeue exited rc={result.returncode}: {result.stderr.strip()}"
-            )
+            logger.warning(f"squeue exited rc={result.returncode}: {result.stderr.strip()}")
             return []
         return parse_squeue_output(result.stdout)
 
     # ------------------------------------------------------------- user-facing
 
-    def list_user_jobs(self, user: str) -> List[QueueJob]:
+    def list_user_jobs(self, user: str) -> list[QueueJob]:
         """All jobs (any state) belonging to ``user``.
 
         Pending arrays stay *collapsed* (one row, ``task_count`` > 1) —
@@ -703,7 +706,7 @@ class SlurmQueue:
         """
         return self._run_squeue(["-u", user])
 
-    def pending_gpu_jobs_sorted(self) -> List[QueueJob]:
+    def pending_gpu_jobs_sorted(self) -> list[QueueJob]:
         """Cluster-wide pending GPU *tasks*, highest priority first.
 
         ``squeue -S '-Q'`` sorts by priority descending — same order Slurm
@@ -714,11 +717,11 @@ class SlurmQueue:
         jobs = self._run_squeue(["-r", "--state=PENDING", "-S", "-Q"])
         return filter_pending_gpu(jobs)
 
-    def gpu_summary(self) -> Dict[str, Dict[str, int]]:
+    def gpu_summary(self) -> dict[str, dict[str, int]]:
         """Per-GPU-type queue depth (``-r``-expanded; counts tasks × GPUs)."""
         return summarize_gpu_jobs(self._run_squeue(["-r"]))
 
-    def position_in_gpu_queue(self, job_id: str) -> Optional[tuple[int, int]]:
+    def position_in_gpu_queue(self, job_id: str) -> tuple[int, int] | None:
         """Find ``job_id``'s position in the pending GPU queue.
 
         Returns ``(position, total)`` (1-based) or ``None`` if the job
@@ -728,9 +731,7 @@ class SlurmQueue:
         """
         return find_queue_position(self.pending_gpu_jobs_sorted(), job_id)
 
-    def sacct_job_states(
-        self, base_ids: Sequence[str]
-    ) -> Optional[Dict[str, Dict[str, int]]]:
+    def sacct_job_states(self, base_ids: Sequence[str]) -> dict[str, dict[str, int]] | None:
         """Per-task state counts from accounting — OPTIONAL enrichment.
 
         Unlike squeue (mandatory; its failures are loud), sacct is routinely
@@ -756,7 +757,7 @@ class SlurmQueue:
             return None
         return parse_sacct_job_states(result.stdout)
 
-    def gpu_capacity(self) -> Optional[tuple[Dict[str, Dict[str, int]], int]]:
+    def gpu_capacity(self) -> tuple[dict[str, dict[str, int]], int] | None:
         """Per-type GPU totals + in-use counts from sinfo — OPTIONAL enrichment.
 
         Same contract as :meth:`sacct_job_states`: any failure returns
@@ -779,7 +780,7 @@ class SlurmQueue:
 
     # ----------------------------------------------------------- reservations
 
-    def reservations(self) -> List[Reservation]:
+    def reservations(self) -> list[Reservation]:
         """Parse ``scontrol show reservations`` — upcoming maintenance windows."""
         try:
             result = subprocess.run(
@@ -843,7 +844,7 @@ class SSHSlurmQueue:
             result = await asyncio.wait_for(
                 self._conn.run(cmd, check=False), timeout=self.timeout_s
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise QueueCommandError(
                 f"remote {argv[0]!r} timed out after {self.timeout_s:.0f}s"
             ) from None
@@ -862,32 +863,30 @@ class SSHSlurmQueue:
             raise QueueCommandError("remote `whoami` returned nothing")
         return user
 
-    async def _run_squeue(self, extra_args: List[str]) -> List[QueueJob]:
+    async def _run_squeue(self, extra_args: list[str]) -> list[QueueJob]:
         stdout = await self._run([self.squeue_bin, *squeue_args(extra_args)])
         return parse_squeue_output(stdout)
 
     # ------------------------------------------------------------- user-facing
 
-    async def list_user_jobs(self, user: str) -> List[QueueJob]:
+    async def list_user_jobs(self, user: str) -> list[QueueJob]:
         """All jobs (any state) belonging to ``user`` (collapsed arrays)."""
         return await self._run_squeue(["-u", user])
 
-    async def pending_gpu_jobs_sorted(self) -> List[QueueJob]:
+    async def pending_gpu_jobs_sorted(self) -> list[QueueJob]:
         """Cluster-wide pending GPU tasks, highest priority first (``-r``)."""
         jobs = await self._run_squeue(["-r", "--state=PENDING", "-S", "-Q"])
         return filter_pending_gpu(jobs)
 
-    async def gpu_summary(self) -> Dict[str, Dict[str, int]]:
+    async def gpu_summary(self) -> dict[str, dict[str, int]]:
         """Per-GPU-type queue depth (``-r``-expanded; counts tasks × GPUs)."""
         return summarize_gpu_jobs(await self._run_squeue(["-r"]))
 
-    async def position_in_gpu_queue(self, job_id: str) -> Optional[tuple[int, int]]:
+    async def position_in_gpu_queue(self, job_id: str) -> tuple[int, int] | None:
         """Exact-id position in the pending GPU queue — see :class:`SlurmQueue`."""
         return find_queue_position(await self.pending_gpu_jobs_sorted(), job_id)
 
-    async def sacct_job_states(
-        self, base_ids: Sequence[str]
-    ) -> Optional[Dict[str, Dict[str, int]]]:
+    async def sacct_job_states(self, base_ids: Sequence[str]) -> dict[str, dict[str, int]] | None:
         """Per-task state counts from accounting — OPTIONAL enrichment.
 
         Deliberate asymmetry with the squeue paths: those raise
@@ -903,17 +902,15 @@ class SSHSlurmQueue:
             result = await asyncio.wait_for(
                 self._conn.run(cmd, check=False), timeout=self.timeout_s
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug(f"remote sacct timed out after {self.timeout_s:.0f}s")
             return None
         if result.returncode != 0:
-            logger.debug(
-                f"remote sacct rc={result.returncode}: {(result.stderr or '').strip()}"
-            )
+            logger.debug(f"remote sacct rc={result.returncode}: {(result.stderr or '').strip()}")
             return None
         return parse_sacct_job_states(result.stdout or "")
 
-    async def gpu_capacity(self) -> Optional[tuple[Dict[str, Dict[str, int]], int]]:
+    async def gpu_capacity(self) -> tuple[dict[str, dict[str, int]], int] | None:
         """Per-type GPU totals + in-use from sinfo — OPTIONAL enrichment.
 
         Same None-on-failure contract as :meth:`sacct_job_states` (and the
@@ -924,19 +921,17 @@ class SSHSlurmQueue:
             result = await asyncio.wait_for(
                 self._conn.run(cmd, check=False), timeout=self.timeout_s
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug(f"remote sinfo timed out after {self.timeout_s:.0f}s")
             return None
         if result.returncode != 0:
-            logger.debug(
-                f"remote sinfo rc={result.returncode}: {(result.stderr or '').strip()}"
-            )
+            logger.debug(f"remote sinfo rc={result.returncode}: {(result.stderr or '').strip()}")
             return None
         return parse_sinfo_gpu_capacity(result.stdout or "")
 
     # ----------------------------------------------------------- reservations
 
-    async def reservations(self) -> List[Reservation]:
+    async def reservations(self) -> list[Reservation]:
         """Parse ``scontrol show reservations`` — upcoming maintenance windows."""
         stdout = await self._run([self.scontrol_bin, "show", "reservations"])
         return parse_reservations_output(stdout)
@@ -945,7 +940,7 @@ class SSHSlurmQueue:
 _KV_RE = re.compile(r"([A-Za-z][A-Za-z0-9_]*)=(\S+)")
 
 
-def parse_reservations_output(stdout: str) -> List[Reservation]:
+def parse_reservations_output(stdout: str) -> list[Reservation]:
     """Parse ``scontrol show reservations`` stdout into :class:`Reservation` rows.
 
     Pure (no subprocess) so SSH-driven sources can reuse it over their own
@@ -954,7 +949,7 @@ def parse_reservations_output(stdout: str) -> List[Reservation]:
     separated stanza.
     """
     stanzas = re.split(r"\n\s*\n", (stdout or "").strip())
-    out: List[Reservation] = []
+    out: list[Reservation] = []
     for stanza in stanzas:
         if not stanza.strip() or stanza.lower().startswith("no reservations"):
             continue

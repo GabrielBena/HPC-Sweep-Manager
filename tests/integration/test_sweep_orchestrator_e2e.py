@@ -19,7 +19,6 @@ from hpc_sweep_manager.core.common.sweep_orchestrator import (
     run_sweep_async,
 )
 
-
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 

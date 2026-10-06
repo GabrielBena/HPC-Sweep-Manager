@@ -1,20 +1,20 @@
 """Auto-detect project structure and paths."""
 
 import os
-from pathlib import Path
 import shutil
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any
 
 
 class PathDetector:
     """Auto-detect project structure and paths."""
 
-    def __init__(self, project_root: Optional[Path] = None):
+    def __init__(self, project_root: Path | None = None):
         if project_root is None:
             project_root = Path.cwd()
         self.project_root = Path(project_root)
 
-    def detect_config_dir(self) -> Optional[Path]:
+    def detect_config_dir(self) -> Path | None:
         """Find Hydra config directory."""
         candidates = ["configs", "conf", "config", "cfg"]
         for candidate in candidates:
@@ -55,7 +55,7 @@ class PathDetector:
                 return True
         return False
 
-    def detect_train_script_candidates(self) -> List[Path]:
+    def detect_train_script_candidates(self) -> list[Path]:
         """Return all plausible training-script entrypoints, best guess first.
 
         ``candidates[0]`` is exactly what :meth:`detect_train_script` returns.
@@ -65,7 +65,7 @@ class PathDetector:
         user at whichever sorts first, against the wrong Hydra config.
         """
         seen: set = set()
-        found: List[Path] = []
+        found: list[Path] = []
 
         def _add(path: Path) -> None:
             if not path.is_file():
@@ -98,12 +98,12 @@ class PathDetector:
 
         return found
 
-    def detect_train_script(self) -> Optional[Path]:
+    def detect_train_script(self) -> Path | None:
         """Find the single best-guess training script (first candidate)."""
         candidates = self.detect_train_script_candidates()
         return candidates[0] if candidates else None
 
-    def detect_python_path(self) -> Optional[Path]:
+    def detect_python_path(self) -> Path | None:
         """Detect Python interpreter."""
         # First, try current environment
         current_python = shutil.which("python")
@@ -179,7 +179,7 @@ class PathDetector:
         # No local scheduler detected.
         return "unknown"
 
-    def detect_storage_paths(self) -> Dict[str, Optional[Path]]:
+    def detect_storage_paths(self) -> dict[str, Path | None]:
         """Detect common HPC storage paths."""
         paths = {}
 
@@ -213,7 +213,7 @@ class PathDetector:
 
         return paths
 
-    def get_project_info(self) -> Dict[str, Any]:
+    def get_project_info(self) -> dict[str, Any]:
         """Get comprehensive project information."""
         info = {
             "project_root": self.project_root,
@@ -234,7 +234,7 @@ class PathDetector:
 
         return info
 
-    def validate_paths(self) -> List[str]:
+    def validate_paths(self) -> list[str]:
         """Validate detected paths and return any issues."""
         issues = []
 
@@ -254,7 +254,7 @@ class PathDetector:
 
         return issues
 
-    def suggest_setup(self) -> Dict[str, str]:
+    def suggest_setup(self) -> dict[str, str]:
         """Suggest setup commands based on detected environment."""
         suggestions = {}
 

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import yaml
@@ -33,7 +31,7 @@ class FakeConn:
         self.closed = True
         return False
 
-    async def run(self, cmd: str, *, check: bool = False, input: Optional[str] = None):
+    async def run(self, cmd: str, *, check: bool = False, input: str | None = None):
         self.run_calls.append(cmd)
         return FakeResult(returncode=0)
 
@@ -84,9 +82,7 @@ class TestRemoteClean:
         from click.testing import CliRunner
 
         runner = CliRunner()
-        result = runner.invoke(
-            remote_cli.remote, ["clean", "anahita", "-y", "--all-projects"]
-        )
+        result = runner.invoke(remote_cli.remote, ["clean", "anahita", "-y", "--all-projects"])
         assert result.exit_code == 0
         cmd = fake_ssh["conn"].run_calls[0]
         assert cmd == "rm -rf ~/.hsm/runs"

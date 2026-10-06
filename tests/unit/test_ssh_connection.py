@@ -10,7 +10,6 @@ import pytest
 
 from hpc_sweep_manager.core.remote import discovery
 
-
 pytestmark = pytest.mark.asyncio
 
 

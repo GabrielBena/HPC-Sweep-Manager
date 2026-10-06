@@ -31,14 +31,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from pathlib import Path
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
-
 
 # -----------------------------------------------------------------------------
 # Tune for your S3IT setup. Common knobs are flagged in the inline comments.
@@ -126,8 +125,7 @@ async def submit_and_wait(
 ) -> int:
     if not await src.setup(sweep_dir, "smoke_test"):
         print(
-            "setup() failed — sbatch / squeue / sinfo not on PATH? "
-            "Are you on a Slurm host?",
+            "setup() failed — sbatch / squeue / sinfo not on PATH? Are you on a Slurm host?",
             file=sys.stderr,
         )
         return 2

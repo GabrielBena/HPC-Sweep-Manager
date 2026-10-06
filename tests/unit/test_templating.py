@@ -125,9 +125,7 @@ class TestCondaInitPartialRenders:
     }
 
     def test_slurm_array_emits_init_block_when_uses_conda(self):
-        rendered = render_template(
-            "slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS
-        )
+        rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         # Conda paths
         assert "miniconda3/etc/profile.d/conda.sh" in rendered
         assert "miniforge3/etc/profile.d/conda.sh" in rendered
@@ -138,16 +136,12 @@ class TestCondaInitPartialRenders:
         assert "conda() { micromamba" in rendered
 
     def test_slurm_array_skips_init_block_when_not_uses_conda(self):
-        rendered = render_template(
-            "slurm_array.sh.j2", uses_conda=False, **self._BASE_KWARGS
-        )
+        rendered = render_template("slurm_array.sh.j2", uses_conda=False, **self._BASE_KWARGS)
         assert "MAMBA_EXE" not in rendered
         assert "miniconda3/etc/profile.d/conda.sh" not in rendered
 
     def test_slurm_single_emits_init_block_when_uses_conda(self):
-        rendered = render_template(
-            "slurm_single.sh.j2", uses_conda=True, **self._BASE_KWARGS
-        )
+        rendered = render_template("slurm_single.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         assert "MAMBA_EXE" in rendered
         assert "conda() { micromamba" in rendered
 
@@ -173,9 +167,7 @@ class TestCondaInitPartialRenders:
     def test_micromamba_probe_includes_hsm_clone_path(self):
         # The user's S3IT layout has micromamba INSIDE the HSM clone's bin/,
         # not in any standard location. The probe must include this path.
-        rendered = render_template(
-            "slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS
-        )
+        rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         assert "HPC-Sweep-Manager/bin/micromamba" in rendered
 
     def test_local_template_emits_init_block_when_uses_conda(self):

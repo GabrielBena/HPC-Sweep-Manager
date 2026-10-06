@@ -45,9 +45,10 @@ class TestFromDict:
 
 class TestValidate:
     def test_ok(self):
-        assert ResumableConfig.from_dict(
-            {"enabled": True, "chunk_walltime": "23:00:00"}
-        ).validate() == []
+        assert (
+            ResumableConfig.from_dict({"enabled": True, "chunk_walltime": "23:00:00"}).validate()
+            == []
+        )
 
     def test_enabled_without_walltime(self):
         errs = ResumableConfig(enabled=True).validate()
@@ -58,9 +59,7 @@ class TestValidate:
         assert any("HH:MM:SS" in e for e in errs)
 
     def test_signal_grace_ge_walltime_rejected(self):
-        errs = ResumableConfig(
-            enabled=True, chunk_walltime="00:01:00", signal_grace=120
-        ).validate()
+        errs = ResumableConfig(enabled=True, chunk_walltime="00:01:00", signal_grace=120).validate()
         assert any("smaller than" in e for e in errs)
 
     def test_negative_signal_grace(self):

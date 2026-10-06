@@ -207,6 +207,7 @@ class TestTemplatesExist:
 
     def test_slurm_single_template_exists(self):
         from pathlib import Path
+
         import hpc_sweep_manager
 
         template_dir = Path(hpc_sweep_manager.__file__).parent / "templates"
@@ -214,6 +215,7 @@ class TestTemplatesExist:
 
     def test_slurm_array_template_exists(self):
         from pathlib import Path
+
         import hpc_sweep_manager
 
         template_dir = Path(hpc_sweep_manager.__file__).parent / "templates"
@@ -277,7 +279,7 @@ class TestTemplateRendering:
         assert "#SBATCH --gres=gpu:l4:1" in rendered
         assert "module load l4" in rendered
         assert "$SLURM_ARRAY_TASK_ID" in rendered
-        assert "WANDB_GROUP=\"my_group\"" in rendered
+        assert 'WANDB_GROUP="my_group"' in rendered
 
 
 class TestCondaInitOrdering:
@@ -378,13 +380,9 @@ class TestSelfDescribingParams:
         """Extract the body of the params.yaml heredoc."""
         lines = rendered.splitlines()
         start = next(
-            i
-            for i, ln in enumerate(lines)
-            if path_marker in ln and "HSM_PARAMS_EOF" in ln
+            i for i, ln in enumerate(lines) if path_marker in ln and "HSM_PARAMS_EOF" in ln
         )
-        end = next(
-            i for i in range(start + 1, len(lines)) if lines[i] == "HSM_PARAMS_EOF"
-        )
+        end = next(i for i in range(start + 1, len(lines)) if lines[i] == "HSM_PARAMS_EOF")
         return "\n".join(lines[start + 1 : end])
 
     @pytest.mark.parametrize(
@@ -451,7 +449,7 @@ class TestSelfDescribingParams:
         # The inline python creates the task dir + dumps params.yaml (JSON is
         # valid YAML, so no PyYAML needed on the compute node).
         assert "os.makedirs(_task_dir" in r
-        assert 'params.yaml' in r
+        assert "params.yaml" in r
         assert "json.dump(params" in r
 
 
@@ -542,9 +540,7 @@ class TestArrayParamsExtractionFunctional:
         env = dict(os.environ)
         env["SLURM_ARRAY_TASK_ID"] = "1"
         env["HSM_TEST_ARGS_OUT"] = str(args_out)
-        return subprocess.run(
-            ["bash", str(script)], env=env, capture_output=True, text=True
-        )
+        return subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
 
     def test_overrides_survive_a_stdin_swallowing_wrapper(self, tmp_path):
         # Wrapper that mimics `conda run` on S3IT: argv passes through, but
@@ -617,6 +613,7 @@ class TestMultiGpuTypeLocal:
                 returncode = 0
                 stdout = f"Submitted batch job {next(next_id)}\n"
                 stderr = ""
+
             submitted_scripts.append(cmd[-1])
             return R()
 
@@ -624,9 +621,7 @@ class TestMultiGpuTypeLocal:
         src = SlurmComputeSource(
             project_dir=str(tmp_path),
             script_path="train.py",
-            default_spec=ResourceSpec(
-                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
-            ),
+            default_spec=ResourceSpec(walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")),
             speed_factors={"a100": 1.0, "h200": 0.5},
         )
         src.sweep_dir = tmp_path  # bypass setup(); _ensure_dirs derives from it
@@ -653,9 +648,7 @@ class TestMultiGpuTypeLocal:
         assert sorted(all_globals) == [1, 2, 3, 4]
 
         # Two rendered scripts with per-type GRES + scaled walltime.
-        rendered = "\n".join(
-            p.read_text() for p in (tmp_path / "scripts").glob("*.slurm")
-        )
+        rendered = "\n".join(p.read_text() for p in (tmp_path / "scripts").glob("*.slurm"))
         assert "--gres=gpu:A100:1" in rendered
         assert "--gres=gpu:H200:1" in rendered
         assert "#SBATCH --time=10:00:00" in rendered
@@ -676,9 +669,7 @@ class TestMultiGpuTypeLocal:
         )
         src.sweep_dir = tmp_path
         with pytest.raises(ValueError, match="array mode"):
-            await src.submit_batch(
-                params_list=[{"seed": 0}], sweep_id="s", mode="individual"
-            )
+            await src.submit_batch(params_list=[{"seed": 0}], sweep_id="s", mode="individual")
 
     @pytest.mark.asyncio
     async def test_partial_failure_names_live_arrays(self, tmp_path, monkeypatch, caplog):
@@ -693,15 +684,14 @@ class TestMultiGpuTypeLocal:
                 returncode = 0 if calls["n"] == 1 else 1
                 stdout = "Submitted batch job 301\n" if calls["n"] == 1 else ""
                 stderr = "sbatch: error: limit"
+
             return R()
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
         src = SlurmComputeSource(
             project_dir=str(tmp_path),
             script_path="train.py",
-            default_spec=ResourceSpec(
-                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
-            ),
+            default_spec=ResourceSpec(walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")),
             speed_factors={"a100": 1.0, "h200": 0.5},
         )
         src.sweep_dir = tmp_path
@@ -726,9 +716,7 @@ class TestNativeResumable:
 
         return ResumableContext(
             chunk_index=chunk_index,
-            config=ResumableConfig(
-                enabled=True, chunk_walltime="23:00:00", signal_grace=90
-            ),
+            config=ResumableConfig(enabled=True, chunk_walltime="23:00:00", signal_grace=90),
         )
 
     @pytest.mark.asyncio
@@ -740,6 +728,7 @@ class TestNativeResumable:
                 returncode = 0
                 stdout = "Submitted batch job 500\n"
                 stderr = ""
+
             return R()
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
@@ -788,7 +777,9 @@ class TestNativeResumable:
         src.sweep_dir = tmp_path
         with pytest.raises(ValueError, match="array mode"):
             await src.submit_batch(
-                params_list=[{"seed": 0}], sweep_id="sw", mode="individual",
+                params_list=[{"seed": 0}],
+                sweep_id="sw",
+                mode="individual",
                 resumable=self._ctx(0),
             )
 
@@ -812,11 +803,13 @@ class TestNativeMultiTypeResumable:
                 returncode = 0
                 stdout = f"Submitted batch job {next(ids)}\n"
                 stderr = ""
+
             return R()
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
         src = SlurmComputeSource(
-            project_dir=str(tmp_path), script_path="train.py",
+            project_dir=str(tmp_path),
+            script_path="train.py",
             default_spec=ResourceSpec(walltime="48:00:00", gpus=1, gpu_type=("A100", "H200")),
             speed_factors={"a100": 1.0, "h200": 0.5},
         )
@@ -827,8 +820,12 @@ class TestNativeMultiTypeResumable:
             config=ResumableConfig(enabled=True, chunk_walltime="23:00:00", signal_grace=90),
         )
         await src.submit_batch(
-            params_list=[{"seed": i} for i in range(4)], sweep_id="sw", mode="array",
-            job_name_prefix="sw", dependency="afterany:600:601", resumable=ctx,
+            params_list=[{"seed": i} for i in range(4)],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            dependency="afterany:600:601",
+            resumable=ctx,
         )
         rendered = "\n".join(p.read_text() for p in (tmp_path / "scripts").glob("*.slurm"))
         # Both sub-arrays capped at the chunk walltime (NOT cost-scaled 23/11.5h).

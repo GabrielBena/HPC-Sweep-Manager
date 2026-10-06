@@ -16,7 +16,7 @@ __email__ = "gabriel.bena@gmail.com"
 _BASE_VERSION = "0.1.0"
 
 
-def _git_short_sha() -> Optional[str]:
+def _git_short_sha() -> str | None:
     """Short git SHA when running from a source checkout, else ``None``.
 
     Reads ``.git`` directly (no subprocess) so importing the package stays

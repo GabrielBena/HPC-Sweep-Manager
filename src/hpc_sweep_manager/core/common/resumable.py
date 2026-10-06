@@ -12,8 +12,8 @@ runaway guards live in :mod:`.chain`; this module is purely the configuration.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from dataclasses import dataclass
+from typing import Any
 
 from .chain import ChainConfig
 from .utils import parse_walltime
@@ -57,25 +57,25 @@ class ResumableConfig:
     """Resolved resumable knobs. ``chunk_walltime`` is REQUIRED when enabled."""
 
     enabled: bool = False
-    chunk_walltime: Optional[str] = None  # HH:MM:SS — the pool's QOS cap
+    chunk_walltime: str | None = None  # HH:MM:SS — the pool's QOS cap
     signal_grace: int = 120  # seconds before walltime -> --signal=B:TERM@<grace>
     # Optional CLI override appended on chunks >=2 (e.g. "training.resume_from").
     # Defaults to None (env-only via HSM_RESUME_FROM, which is ALWAYS exported):
     # a non-None default would inject a project-specific hydra key into every
     # consumer's command and break general projects that lack that config key —
     # exactly the framework-coupling the guardrail forbids. Hydra projects opt in.
-    resume_arg: Optional[str] = None
+    resume_arg: str | None = None
     done_sentinel: str = ".hsm_done"  # script writes this under HSM_WORKDIR when complete
     checkpoint_subdir: str = "resume"  # per-task persistent ckpt dir under the workdir
     max_chunks: int = 10  # runaway guard: chain length cap
     max_consecutive_failures: int = 2  # no-progress strikes -> mark the chain FAILED
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "ResumableConfig":
+    def from_dict(cls, data: dict[str, Any] | None) -> ResumableConfig:
         """Build from a plain dict, dropping unknown keys with a warning."""
         if not data:
             return cls()
-        clean: Dict[str, Any] = {}
+        clean: dict[str, Any] = {}
         for k, v in data.items():
             if k not in _KNOWN_KEYS:
                 logger.warning("resumable: ignoring unknown key %r", k)
@@ -129,7 +129,7 @@ class ResumableConfig:
             max_consecutive_failures=self.max_consecutive_failures,
         )
 
-    def to_manifest(self) -> Dict[str, Any]:
+    def to_manifest(self) -> dict[str, Any]:
         """Serialize for ``.hsm_manifest.json`` (so ``advance`` can reconstruct)."""
         return {
             "enabled": self.enabled,
@@ -143,7 +143,7 @@ class ResumableConfig:
         }
 
     @classmethod
-    def from_manifest(cls, data: Optional[Dict[str, Any]]) -> "ResumableConfig":
+    def from_manifest(cls, data: dict[str, Any] | None) -> ResumableConfig:
         return cls.from_dict(data)
 
 
@@ -162,7 +162,7 @@ class ChunkProgress:
     """
 
     done_indices: frozenset[int]
-    checkpoint_mtime: Optional[float]
+    checkpoint_mtime: float | None
 
 
 @dataclass(frozen=True)
@@ -182,11 +182,11 @@ class ResumableContext:
         return self.chunk_index > 0
 
 
-def _filtered_remote_block(remote_block: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def _filtered_remote_block(remote_block: dict[str, Any] | None) -> dict[str, Any]:
     """Keep only cluster-bound keys from a per-remote ``resumable:`` block."""
     if not remote_block:
         return {}
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for k, v in remote_block.items():
         if k in _REMOTE_ALLOWED_KEYS:
             out[k] = v
@@ -202,10 +202,10 @@ def _filtered_remote_block(remote_block: Optional[Dict[str, Any]]) -> Dict[str, 
 
 def resolve_resumable_config(
     *,
-    sweep_block: Optional[Dict[str, Any]] = None,
-    remote_block: Optional[Dict[str, Any]] = None,
-    cli_enabled: Optional[bool] = None,
-    cli_chunk_walltime: Optional[str] = None,
+    sweep_block: dict[str, Any] | None = None,
+    remote_block: dict[str, Any] | None = None,
+    cli_enabled: bool | None = None,
+    cli_chunk_walltime: str | None = None,
 ) -> ResumableConfig:
     """Layer the three config sources into one resolved config.
 
@@ -215,7 +215,7 @@ def resolve_resumable_config(
     (constructing the dataclass per-layer would conflate "defaulted" with
     "explicitly set").
     """
-    merged: Dict[str, Any] = {}
+    merged: dict[str, Any] = {}
     merged.update(_filtered_remote_block(remote_block))
     if sweep_block:
         merged.update({k: v for k, v in sweep_block.items() if v is not None})

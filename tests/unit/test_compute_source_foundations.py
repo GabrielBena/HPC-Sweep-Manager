@@ -6,17 +6,16 @@ own test files.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import (
+    TERMINAL_STATES,
     ComputeSource,
     JobInfo,
-    TERMINAL_STATES,
 )
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 
@@ -29,19 +28,19 @@ class StubComputeSource(ComputeSource):
         self._next_id = 0
         # Map job_id -> list of statuses to yield on successive get_job_status calls.
         # If the list runs out we keep returning the last value.
-        self.status_script: Dict[str, List[str]] = {}
-        self.specs_received: List[Optional[ResourceSpec]] = []
+        self.status_script: dict[str, list[str]] = {}
+        self.specs_received: list[ResourceSpec | None] = []
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:  # pragma: no cover - trivial
         return True
 
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         self._next_id += 1
         job_id = f"job_{self._next_id}"
@@ -73,7 +72,7 @@ class StubComputeSource(ComputeSource):
     async def collect_results(self, job_ids=None) -> bool:  # pragma: no cover - trivial
         return True
 
-    async def health_check(self) -> Dict[str, Any]:  # pragma: no cover - trivial
+    async def health_check(self) -> dict[str, Any]:  # pragma: no cover - trivial
         return {"status": "healthy"}
 
     async def cleanup(self) -> None:  # pragma: no cover - trivial

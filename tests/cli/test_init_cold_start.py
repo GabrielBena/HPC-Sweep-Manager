@@ -34,12 +34,12 @@ class TestGeneratedGuide:
         r = _render_project_readme("myproj")
         for s in (
             "myproj",
-            "outputs/<sweep_id>/",   # output layout
+            "outputs/<sweep_id>/",  # output layout
             "tasks/<task>/",
-            "params.yaml",           # self-describing checkpoints
+            "params.yaml",  # self-describing checkpoints
             "--mode array",
-            "hsm sweep collect",     # recovery
-            "hsm docs",              # docs pointer (not dead local paths)
+            "hsm sweep collect",  # recovery
+            "hsm docs",  # docs pointer (not dead local paths)
         ):
             assert s in r, s
         # The dead-link pattern must be gone.

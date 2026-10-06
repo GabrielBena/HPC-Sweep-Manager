@@ -9,7 +9,7 @@ without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Union
+from collections.abc import Sequence
 
 # Files never worth shipping to a compute node — keeps the rsync payload to
 # source only (no history, caches, prior outputs, data, checkpoints).
@@ -57,9 +57,7 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 #   ship — rename it (no un-exclude mechanism yet).
 
 
-def normalize_gpu_allowlist(
-    gpus: Union[None, int, Sequence[int]], detected: Sequence[int]
-) -> List[int]:
+def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence[int]) -> list[int]:
     """Resolve the per-remote ``gpus`` config against the box's detected GPUs.
 
     - ``None`` → use all detected GPUs.
@@ -84,7 +82,7 @@ def normalize_gpu_allowlist(
 
 def partition_gpu_slots(
     allowed: Sequence[int], gpus_per_job: int, cpu_slots: int
-) -> List[Optional[List[int]]]:
+) -> list[list[int] | None]:
     """Partition the allowed GPUs into execution slots.
 
     Returns a list where each element is a list of GPU indices to expose for
@@ -95,7 +93,7 @@ def partition_gpu_slots(
     """
     allowed = list(allowed)
     if allowed and gpus_per_job and gpus_per_job > 0:
-        slots: List[Optional[List[int]]] = []
+        slots: list[list[int] | None] = []
         for i in range(0, len(allowed), gpus_per_job):
             chunk = allowed[i : i + gpus_per_job]
             if len(chunk) == gpus_per_job:
@@ -105,7 +103,7 @@ def partition_gpu_slots(
     return [None] * max(cpu_slots, 1)
 
 
-def resolve_run_prefix(conda_env: Optional[str], python_path: Optional[str]) -> str:
+def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
     """Build the interpreter invocation for a remote task.
 
     Prefers a conda env *name* (path-independent across boxes); falls back to an
@@ -120,7 +118,7 @@ def resolve_run_prefix(conda_env: Optional[str], python_path: Optional[str]) -> 
 
 def build_rsync_push_cmd(
     local_dir: str, host: str, remote_dir: str, excludes: Sequence[str]
-) -> List[str]:
+) -> list[str]:
     """rsync the local project tree up to the rolling remote code dir.
 
     ``--delete`` keeps the remote copy an exact mirror (files removed locally
@@ -141,7 +139,7 @@ def build_rsync_pull_cmd(
     remote_dir: str,
     local_dir: str,
     excludes: Sequence[str] = (),
-) -> List[str]:
+) -> list[str]:
     """rsync a remote results dir back down (no ``--delete`` — purely additive).
 
     ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task

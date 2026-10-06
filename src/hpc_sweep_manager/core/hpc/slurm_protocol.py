@@ -10,7 +10,6 @@ between them.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
 
 from ..common.resource_spec import ResourceSpec
 
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Map raw Slurm states (from ``squeue -h -o %T``) to the canonical states
 # ComputeSource.update_job_status expects. Unknown states default to RUNNING
 # at the call site — safer than treating them as terminal.
-SLURM_STATE_MAP: Dict[str, str] = {
+SLURM_STATE_MAP: dict[str, str] = {
     "PENDING": "PENDING",
     "RUNNING": "RUNNING",
     "SUSPENDED": "PENDING",
@@ -69,7 +68,7 @@ def render_sbatch_directives(
     renders byte-identically. They append AFTER ``extra_directives`` so a
     chain directive wins a duplicate (Slurm takes the last ``--signal``).
     """
-    lines: List[str] = []
+    lines: list[str] = []
     if spec.walltime:
         lines.append(f"#SBATCH --time={spec.walltime}")
     if spec.cpus_per_task:
@@ -138,7 +137,7 @@ def parse_sbatch_job_id(stdout: str) -> str:
     return text.splitlines()[-1].strip().split()[-1]
 
 
-def parse_sacct_state(stdout: str) -> Optional[str]:
+def parse_sacct_state(stdout: str) -> str | None:
     """Aggregate ``sacct -n -X -o State`` output into one canonical status.
 
     ``sacct`` is the authority once a job has left ``squeue``: it records the
@@ -159,7 +158,7 @@ def parse_sacct_state(stdout: str) -> Optional[str]:
     Tolerates the trailing ``+`` truncation marker and the ``CANCELLED by
     <uid>`` long form (only the first whitespace token of each row is read).
     """
-    mapped: List[str] = []
+    mapped: list[str] = []
     for line in (stdout or "").splitlines():
         line = line.strip()
         if not line:

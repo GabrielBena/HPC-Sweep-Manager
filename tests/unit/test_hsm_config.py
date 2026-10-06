@@ -6,14 +6,11 @@ are the only part with real logic (filter + validate + frozenset construction).
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
 
 from hpc_sweep_manager.core.common.config import HSMConfig, resolve_sweep_dir
-from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
-
 
 # ----------------------------------------------------------------- get_slurm_spec
 
@@ -134,10 +131,10 @@ class TestLocalSpec:
                 {
                     "local": {
                         "gpus": 1,
-                        "gpu_type": "h100",     # should be ignored + warn
-                        "modules": ["h100"],     # should be ignored + warn
-                        "qos": "normal",         # should be ignored + warn
-                        "account": "my-project", # should be ignored + warn
+                        "gpu_type": "h100",  # should be ignored + warn
+                        "modules": ["h100"],  # should be ignored + warn
+                        "qos": "normal",  # should be ignored + warn
+                        "account": "my-project",  # should be ignored + warn
                     }
                 }
             ).get_local_spec()
@@ -170,33 +167,24 @@ class TestLocalVisibleGpus:
         assert v == [1, 2]
 
     def test_empty_list_returns_none(self):
-        assert (
-            HSMConfig({"local": {"visible_gpus": []}}).get_local_visible_gpus()
-            is None
-        )
+        assert HSMConfig({"local": {"visible_gpus": []}}).get_local_visible_gpus() is None
 
     def test_non_list_warns_returns_none(self, caplog):
         # Bare int is the wrong shape — it would be ambiguous with the
         # `first N` CLI semantics. Force the user to write the list form.
         with caplog.at_level("WARNING"):
-            result = HSMConfig(
-                {"local": {"visible_gpus": 3}}
-            ).get_local_visible_gpus()
+            result = HSMConfig({"local": {"visible_gpus": 3}}).get_local_visible_gpus()
         assert result is None
         assert any("must be a list" in r.message for r in caplog.records)
 
     def test_uncoercible_value_returns_none(self, caplog):
         with caplog.at_level("WARNING"):
-            result = HSMConfig(
-                {"local": {"visible_gpus": ["one", "two"]}}
-            ).get_local_visible_gpus()
+            result = HSMConfig({"local": {"visible_gpus": ["one", "two"]}}).get_local_visible_gpus()
         assert result is None
 
     def test_visible_gpus_does_not_leak_into_spec(self):
         # visible_gpus is consumed separately; get_local_spec must NOT carry it.
-        cfg = HSMConfig(
-            {"local": {"gpus": 1, "visible_gpus": [1, 2, 3]}}
-        )
+        cfg = HSMConfig({"local": {"gpus": 1, "visible_gpus": [1, 2, 3]}})
         spec = cfg.get_local_spec()
         assert spec is not None
         assert spec.gpus == 1
@@ -217,9 +205,7 @@ class TestLocalSweepsRoot:
 
     def test_set_returns_raw_string(self):
         # Accessor returns the raw value; expansion happens in resolve_sweep_dir.
-        v = HSMConfig(
-            {"local": {"sweeps_root": "/mnt/big-disk/sweeps"}}
-        ).get_local_sweeps_root()
+        v = HSMConfig({"local": {"sweeps_root": "/mnt/big-disk/sweeps"}}).get_local_sweeps_root()
         assert v == "/mnt/big-disk/sweeps"
 
     def test_envvar_pattern_preserved(self):
@@ -231,25 +217,19 @@ class TestLocalSweepsRoot:
 
     def test_empty_string_warns_returns_none(self, caplog):
         with caplog.at_level("WARNING"):
-            result = HSMConfig(
-                {"local": {"sweeps_root": "  "}}
-            ).get_local_sweeps_root()
+            result = HSMConfig({"local": {"sweeps_root": "  "}}).get_local_sweeps_root()
         assert result is None
 
     def test_non_string_warns_returns_none(self, caplog):
         with caplog.at_level("WARNING"):
-            result = HSMConfig(
-                {"local": {"sweeps_root": ["a", "b"]}}
-            ).get_local_sweeps_root()
+            result = HSMConfig({"local": {"sweeps_root": ["a", "b"]}}).get_local_sweeps_root()
         assert result is None
         assert any("non-empty string" in r.message for r in caplog.records)
 
     def test_sweeps_root_does_not_leak_into_spec(self):
         # Like visible_gpus, sweeps_root is a non-ResourceSpec local field.
         # get_local_spec must NOT carry it and must NOT warn about it.
-        cfg = HSMConfig(
-            {"local": {"gpus": 1, "sweeps_root": "/mnt/big-disk/sweeps"}}
-        )
+        cfg = HSMConfig({"local": {"gpus": 1, "sweeps_root": "/mnt/big-disk/sweeps"}})
         spec = cfg.get_local_spec()
         assert spec is not None
         assert spec.gpus == 1
@@ -294,9 +274,7 @@ class TestResolveSweepDir:
         expanded_root = tmp_path / "expanded" / "sweeps"
         expanded_root.mkdir(parents=True)
         monkeypatch.setenv("HSM_TEST_ROOT", str(tmp_path / "expanded"))
-        cfg = HSMConfig(
-            {"local": {"sweeps_root": "$HSM_TEST_ROOT/sweeps"}}
-        )
+        cfg = HSMConfig({"local": {"sweeps_root": "$HSM_TEST_ROOT/sweeps"}})
         result = resolve_sweep_dir(cfg, "sweep_env", project_dir=tmp_path)
         assert "expanded" in str(result)
         assert result.is_dir()
@@ -388,10 +366,7 @@ class TestCondaEnvAccessor:
 
     def test_whitespace_stripped(self):
         # Defensive: yaml may surface trailing whitespace.
-        assert (
-            HSMConfig({"paths": {"conda_env": "  my-env  "}}).get_conda_env()
-            == "my-env"
-        )
+        assert HSMConfig({"paths": {"conda_env": "  my-env  "}}).get_conda_env() == "my-env"
 
     def test_empty_string_returns_none_with_warning(self, caplog):
         with caplog.at_level("WARNING"):
@@ -422,25 +397,18 @@ class TestSlurmQosWhitelist:
         assert wl == frozenset({"normal", "medium", "long"})
 
     def test_set_returns_frozenset(self):
-        wl = HSMConfig(
-            {"slurm": {"qos_whitelist": {"normal", "long"}}}
-        ).get_slurm_qos_whitelist()
+        wl = HSMConfig({"slurm": {"qos_whitelist": {"normal", "long"}}}).get_slurm_qos_whitelist()
         assert wl == frozenset({"normal", "long"})
 
     def test_string_warns_returns_none(self, caplog):
         # A bare string is a YAML mistake (forgetting the list dashes).
         with caplog.at_level("WARNING"):
-            result = HSMConfig(
-                {"slurm": {"qos_whitelist": "normal"}}
-            ).get_slurm_qos_whitelist()
+            result = HSMConfig({"slurm": {"qos_whitelist": "normal"}}).get_slurm_qos_whitelist()
         assert result is None
         assert any("must be a list" in r.message for r in caplog.records)
 
     def test_empty_list_returns_none(self):
-        assert (
-            HSMConfig({"slurm": {"qos_whitelist": []}}).get_slurm_qos_whitelist()
-            is None
-        )
+        assert HSMConfig({"slurm": {"qos_whitelist": []}}).get_slurm_qos_whitelist() is None
 
 
 # ----------------------------------------------------------- HSMConfig.load merge
@@ -459,7 +427,7 @@ class TestLoadMachineProjectMerge:
 
     def test_neither_file_returns_none(self, tmp_path):
         project_path = tmp_path / "project" / ".hsm" / "config.yaml"  # missing
-        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"     # missing
+        machine_path = tmp_path / "home" / ".hsm" / "config.yaml"  # missing
         result = HSMConfig.load(
             config_path=project_path,
             machine_config_path=machine_path,

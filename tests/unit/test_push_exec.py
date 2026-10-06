@@ -142,13 +142,13 @@ class TestExcludeRsyncSemantics:
         dst = tmp_path / "dst"
         dst.mkdir()
         for rel in (
-            "wandb/run-1/log.txt",            # root output dir → dropped
-            "checkpoints/model.bin",          # root output dir → dropped
-            "multirun/2026/cfg.yaml",         # root output dir → dropped
-            "configs/wandb/default.yaml",     # Hydra config GROUP → must ship
-            "configs/checkpoints/opt.yaml",   # Hydra config GROUP → must ship
-            "configs/multirun/sweep.yaml",    # Hydra config GROUP → must ship
-            "sub/wandb/nested.txt",           # nested junk → ships (accepted cost)
+            "wandb/run-1/log.txt",  # root output dir → dropped
+            "checkpoints/model.bin",  # root output dir → dropped
+            "multirun/2026/cfg.yaml",  # root output dir → dropped
+            "configs/wandb/default.yaml",  # Hydra config GROUP → must ship
+            "configs/checkpoints/opt.yaml",  # Hydra config GROUP → must ship
+            "configs/multirun/sweep.yaml",  # Hydra config GROUP → must ship
+            "sub/wandb/nested.txt",  # nested junk → ships (accepted cost)
             "scripts/train.py",
         ):
             p = src / rel

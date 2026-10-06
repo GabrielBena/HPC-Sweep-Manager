@@ -7,7 +7,6 @@ fake rsync, so the re-attach → sacct-classify → pull/archive flow runs offli
 from __future__ import annotations
 
 import io
-from typing import List, Optional
 
 import pytest
 from rich.console import Console
@@ -25,13 +24,13 @@ class _Result:
 
 class FakeConn:
     def __init__(self):
-        self.run_calls: List[str] = []
-        self._responder: List[tuple] = []
+        self.run_calls: list[str] = []
+        self._responder: list[tuple] = []
 
     def add(self, sub, res):
         self._responder.append((sub, res))
 
-    async def run(self, cmd, *, input: Optional[str] = None, check: bool = False):
+    async def run(self, cmd, *, input: str | None = None, check: bool = False):
         self.run_calls.append(cmd)
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:
@@ -67,7 +66,7 @@ def _manifest(tmp_path, *, job_ids, archive_dir=None):
 @pytest.fixture
 def patched(monkeypatch):
     conn = FakeConn()
-    rsync_calls: List[list] = []
+    rsync_calls: list[list] = []
 
     async def _fake_open(self):
         return conn

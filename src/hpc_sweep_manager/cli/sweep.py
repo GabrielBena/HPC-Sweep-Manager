@@ -1,8 +1,8 @@
 """Sweep execution CLI commands."""
 
-from datetime import datetime, timedelta
 import logging
 import os
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -101,8 +101,8 @@ def _render_paired_groups(paired_parameters: dict, console: Console) -> None:
 
 
 def _generate_parameter_combinations(
-    config: "SweepConfig", max_runs: Optional[int], count_only: bool, console: Console
-) -> Optional[list]:
+    config: "SweepConfig", max_runs: int | None, count_only: bool, console: Console
+) -> list | None:
     """Generate and display parameter combinations."""
     from rich.table import Table
 
@@ -201,7 +201,7 @@ def _render_placement(
     resolved_mode: str,
     spec,
     num_tasks: int,
-    remote_alias: Optional[str],
+    remote_alias: str | None,
     hsm_config: Optional["HSMConfig"],
     console: Console,
 ) -> None:
@@ -281,9 +281,7 @@ def _render_placement(
             if is_slurm:
                 # Slurm remotes schedule GPUs via --gres, not a visible-GPU
                 # allowlist, so a "GPU allowlist" line would be meaningless here.
-                bound = (
-                    f" (client cap {cap})" if cap and cap < 10_000 else " (no client-side cap)"
-                )
+                bound = f" (client cap {cap})" if cap and cap < 10_000 else " (no client-side cap)"
                 console.print(f"  Concurrency: bounded by the remote Slurm scheduler{bound}")
                 if gpus_per_task:
                     console.print(f"  GPUs/task: {_describe_gres(spec, gpus_per_task)}")
@@ -295,8 +293,7 @@ def _render_placement(
                     f"{_describe_gpu_allowlist(getattr(source, '_gpus_config', None))}"
                 )
                 console.print(
-                    f"  Concurrency: {cap} parallel slot(s) on the remote "
-                    f"→ ≈{_waves(cap)} wave(s)"
+                    f"  Concurrency: {cap} parallel slot(s) on the remote → ≈{_waves(cap)} wave(s)"
                 )
                 if gpus_per_task:
                     console.print(
@@ -331,9 +328,10 @@ def _render_placement(
                             # Multi-type child: show each alternative — the
                             # old `gtype + ':'` concat raised TypeError on a
                             # list, which the preview guard silently ate.
-                            gpu_desc = " | ".join(
-                                f"--gres=gpu:{t}:{gres}" for t in gtype
-                            ) + " (one sub-array per type)"
+                            gpu_desc = (
+                                " | ".join(f"--gres=gpu:{t}:{gres}" for t in gtype)
+                                + " (one sub-array per type)"
+                            )
                         else:
                             gpu_desc = f"--gres=gpu:{gtype + ':' if gtype else ''}{gres}"
                     else:
@@ -377,7 +375,7 @@ def _render_gpu_type_plan(
     effective_spec,
     speed_factors,
     costs,
-    walltime_cap: Optional[str] = None,
+    walltime_cap: str | None = None,
 ) -> None:
     """Dry-run preview of the multi-gpu_type split.
 
@@ -445,20 +443,20 @@ def _run_sweep_via_orchestrator(
     project_dir: str,
     combinations: list,
     dry_run: bool,
-    walltime: Optional[str],
-    resources: Optional[str],
-    group: Optional[str],
-    parallel_jobs: Optional[int],
+    walltime: str | None,
+    resources: str | None,
+    group: str | None,
+    parallel_jobs: int | None,
     no_progress: bool,
     console: Console,
     logger: logging.Logger,
-    remote_alias: Optional[str] = None,
-    gpus_arg: Optional[str] = None,
-    remote_submission: Optional[str] = None,
-    costs: Optional[list] = None,
-    sweep_resumable_block: Optional[dict] = None,
+    remote_alias: str | None = None,
+    gpus_arg: str | None = None,
+    remote_submission: str | None = None,
+    costs: list | None = None,
+    sweep_resumable_block: dict | None = None,
     resumable_flag: bool = False,
-    chunk_walltime: Optional[str] = None,
+    chunk_walltime: str | None = None,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
@@ -595,7 +593,7 @@ def _run_sweep_via_orchestrator(
             )
             console.print(f"  signal          = B:TERM@{rconf.signal_grace}")
             console.print(
-                f"  resume pointer  = HSM_RESUME_FROM env"
+                "  resume pointer  = HSM_RESUME_FROM env"
                 + (f" + {rconf.resume_arg}=<path>" if rconf.resume_arg else " (env only)")
             )
             console.print(f"  done sentinel   = $HSM_WORKDIR/{rconf.done_sentinel}")
@@ -651,8 +649,7 @@ def _run_sweep_via_orchestrator(
                 console.print("\n[bold]Command (task 1, as the wrapper runs it):[/bold]")
                 console.print(f"  cd {project_dir} && \\")
                 console.print(
-                    f"  {run_prefix} {src_script} "
-                    f"{params_to_hydra_args(combinations[0])} {suffix}"
+                    f"  {run_prefix} {src_script} {params_to_hydra_args(combinations[0])} {suffix}"
                 )
                 if effective_spec.gpus and resolved_mode == "local":
                     console.print(
@@ -678,8 +675,10 @@ def _run_sweep_via_orchestrator(
 
     progress_cb = None
     if not no_progress:
+
         def _progress(done: int, total: int) -> None:
             console.print(f"  {done}/{total} done", end="\r")
+
         progress_cb = _progress
 
     if rconf.enabled:
@@ -768,9 +767,7 @@ def _run_sweep_via_orchestrator(
                 for ti in sorted(tasks_dir.glob("*/task_info.txt")):
                     try:
                         status_lines = [
-                            ln
-                            for ln in ti.read_text().splitlines()
-                            if ln.startswith("Status: ")
+                            ln for ln in ti.read_text().splitlines() if ln.startswith("Status: ")
                         ]
                     except OSError:
                         continue
@@ -826,20 +823,20 @@ def run_sweep(
     mode: str,
     dry_run: bool,
     count_only: bool,
-    max_runs: Optional[int],
-    walltime: Optional[str],
-    resources: Optional[str],
-    group: Optional[str],
-    parallel_jobs: Optional[int],
+    max_runs: int | None,
+    walltime: str | None,
+    resources: str | None,
+    group: str | None,
+    parallel_jobs: int | None,
     no_progress: bool,
     console: Console,
     logger: logging.Logger,
     hsm_config: Optional["HSMConfig"] = None,
-    remote_alias: Optional[str] = None,
-    gpus_arg: Optional[str] = None,
-    remote_submission: Optional[str] = None,
+    remote_alias: str | None = None,
+    gpus_arg: str | None = None,
+    remote_submission: str | None = None,
     resumable_flag: bool = False,
-    chunk_walltime: Optional[str] = None,
+    chunk_walltime: str | None = None,
 ):
     """Run parameter sweep (orchestrator-only path)."""
 
@@ -969,9 +966,7 @@ def sweep_cmd(ctx):
 )
 @click.option(
     "--mode",
-    type=click.Choice(
-        ["auto", "individual", "array", "local", "distributed", "remote"]
-    ),
+    type=click.Choice(["auto", "individual", "array", "local", "distributed", "remote"]),
     default=None,
     help="Job submission mode (default: 'remote' if --remote given, else 'auto')",
 )
@@ -1044,9 +1039,7 @@ def run_cmd(
     if mode is None:
         mode = "remote" if remote_alias else "auto"
     elif mode == "remote" and not remote_alias:
-        ctx.obj["console"].print(
-            "[red]--mode remote requires --remote <alias>[/red]"
-        )
+        ctx.obj["console"].print("[red]--mode remote requires --remote <alias>[/red]")
         return
     elif remote_alias and mode in ("array", "individual"):
         # For a remote, --mode array|individual chooses the SUBMISSION STYLE;
@@ -1277,9 +1270,7 @@ async def _advance_via_manifest(
             f"re-submit the next chunk.[/red]"
         )
         return
-    combinations = ParameterGenerator(
-        SweepConfig.from_yaml(cfg_path)
-    ).generate_combinations(None)
+    combinations = ParameterGenerator(SweepConfig.from_yaml(cfg_path)).generate_combinations(None)
 
     source = SSHSlurmComputeSource.from_manifest(manifest)
     if not await source.reattach(sweep_dir, sweep_id, manifest):
@@ -1396,9 +1387,7 @@ def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
         return
     try:
         asyncio.run(
-            _advance_via_manifest(
-                sweep_dir, manifest, console, block=(max_iterations == 0)
-            )
+            _advance_via_manifest(sweep_dir, manifest, console, block=(max_iterations == 0))
         )
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]advance failed: {e}[/red]")
@@ -1630,7 +1619,7 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
     console.print(table)
 
     if "task_statuses" in analysis and analysis["task_statuses"]:
-        console.print(f"\n[bold]Task Status Details:[/bold]")
+        console.print("\n[bold]Task Status Details:[/bold]")
         console.print(f"Total tasks found: {len(analysis['task_statuses'])}")
 
         status_groups: dict = {}
@@ -1828,9 +1817,7 @@ def _load_sweep_meta(sweep_dir: Path) -> dict:
 @sweep_cmd.command("watch")
 @click.argument("sweep_id")
 @click.option("--refresh", default=5, type=int, help="Refresh interval in seconds (default 5)")
-@click.option(
-    "--once", is_flag=True, help="Show progress once and exit (don't refresh)"
-)
+@click.option("--once", is_flag=True, help="Show progress once and exit (don't refresh)")
 @common_options
 @click.pass_context
 def watch_cmd(ctx, sweep_id, refresh, once, verbose, quiet):
@@ -1884,6 +1871,7 @@ def watch_cmd(ctx, sweep_id, refresh, once, verbose, quiet):
         lines.append("")
         lines.append(f"Progress: {done}/{total} ({rate:.1f}%)")
         from rich.console import Group
+
         return Panel(
             Group("\n".join(lines), bar),
             title=f"hsm sweep watch — {sweep_id}",
@@ -2166,9 +2154,7 @@ def cleanup_cmd(ctx, older_than_days, keep_incomplete, yes, dry_run):
         candidates.append(sweep_dir)
 
     if not candidates:
-        console.print(
-            f"[green]No sweeps older than {older_than_days} day(s) to delete.[/green]"
-        )
+        console.print(f"[green]No sweeps older than {older_than_days} day(s) to delete.[/green]")
         if skipped:
             console.print(f"[dim]({len(skipped)} skipped — incomplete.)[/dim]")
         return
@@ -2180,7 +2166,7 @@ def cleanup_cmd(ctx, older_than_days, keep_incomplete, yes, dry_run):
     for path in candidates:
         console.print(f"  {path}")
     if dry_run:
-        console.print(f"\n[dim]Dry run — nothing removed.[/dim]")
+        console.print("\n[dim]Dry run — nothing removed.[/dim]")
         return
 
     if not yes:

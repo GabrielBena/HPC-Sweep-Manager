@@ -6,10 +6,10 @@ import logging
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
-import yaml
 
 from ..core.common.config import HSMConfig
 from ..core.remote.discovery import create_ssh_connection
@@ -143,11 +143,7 @@ def list():
     console = Console()
 
     hsm_config = HSMConfig.load()
-    remotes = (
-        hsm_config.config_data.get("distributed", {}).get("remotes", {})
-        if hsm_config
-        else {}
-    )
+    remotes = hsm_config.config_data.get("distributed", {}).get("remotes", {}) if hsm_config else {}
 
     if not remotes:
         console.print("[yellow]No remotes registered yet.[/yellow]")
@@ -417,16 +413,12 @@ def clean(name: str, all_projects: bool, yes: bool):
     registered = distributed_cfg.get("remotes", {})
     remote_cfg = dict(registered.get(name, {}))
     if name not in registered:
-        console.print(
-            f"[dim]{name}: not in hsm_config — treating as a ~/.ssh/config alias[/dim]"
-        )
+        console.print(f"[dim]{name}: not in hsm_config — treating as a ~/.ssh/config alias[/dim]")
 
     host = remote_cfg.get("host") or name
     ssh_key = remote_cfg.get("ssh_key")
     ssh_port = remote_cfg.get("ssh_port")
-    remote_root = remote_cfg.get(
-        "remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs")
-    )
+    remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
     remote_root = remote_root.rstrip("/")
 
     if all_projects:

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
-from typing import Any, Dict
+from typing import Any
 
 
 class ChainDecision(Enum):
@@ -70,11 +70,11 @@ class ChainState:
     done: bool = False
     failed: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any] | None) -> "ChainState":
+    def from_dict(cls, data: dict[str, Any] | None) -> ChainState:
         data = data or {}
         return cls(
             chunk_index=int(data.get("chunk_index", 0)),
@@ -132,9 +132,7 @@ def decide_next(
     if new_no_progress >= config.max_consecutive_failures:
         return ChainStep(
             decision=ChainDecision.FAILED,
-            next_state=replace(
-                state, consecutive_no_progress=new_no_progress, failed=True
-            ),
+            next_state=replace(state, consecutive_no_progress=new_no_progress, failed=True),
             reason=(
                 f"{new_no_progress} consecutive chunk(s) made no progress "
                 f"(no new .hsm_done sentinel and no checkpoint written) — "
@@ -148,9 +146,7 @@ def decide_next(
     if outcome.chunk_index + 1 >= config.max_chunks:
         return ChainStep(
             decision=ChainDecision.FAILED,
-            next_state=replace(
-                state, consecutive_no_progress=new_no_progress, failed=True
-            ),
+            next_state=replace(state, consecutive_no_progress=new_no_progress, failed=True),
             reason=(
                 f"reached max_chunks={config.max_chunks} with "
                 f"{outcome.done_count}/{n} task(s) done — raise chunk_walltime "

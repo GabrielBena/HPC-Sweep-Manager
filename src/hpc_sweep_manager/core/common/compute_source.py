@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import asyncio
+import logging
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 from .resource_spec import ResourceSpec
 
@@ -32,13 +33,13 @@ class JobInfo:
 
     job_id: str
     job_name: str
-    params: Dict[str, Any]
+    params: dict[str, Any]
     source_name: str
     status: str = "PENDING"
-    submit_time: Optional[datetime] = None
-    start_time: Optional[datetime] = None
-    complete_time: Optional[datetime] = None
-    task_dir: Optional[str] = None
+    submit_time: datetime | None = None
+    start_time: datetime | None = None
+    complete_time: datetime | None = None
+    task_dir: str | None = None
 
 
 @dataclass
@@ -53,8 +54,8 @@ class ComputeSourceStats:
     failed_jobs: int = 0
     total_submitted: int = 0
     health_status: str = "unknown"
-    last_health_check: Optional[datetime] = None
-    average_job_duration: Optional[float] = None  # seconds
+    last_health_check: datetime | None = None
+    average_job_duration: float | None = None  # seconds
 
 
 class ComputeSource(ABC):
@@ -64,8 +65,8 @@ class ComputeSource(ABC):
         self.name = name
         self.source_type = source_type  # "local", "ssh_remote"
         self.max_parallel_jobs = max_parallel_jobs
-        self.active_jobs: Dict[str, JobInfo] = {}
-        self.completed_jobs: Dict[str, JobInfo] = {}
+        self.active_jobs: dict[str, JobInfo] = {}
+        self.completed_jobs: dict[str, JobInfo] = {}
         self.stats = ComputeSourceStats(name, source_type, max_parallel_jobs)
 
     @property
@@ -101,11 +102,11 @@ class ComputeSource(ABC):
     @abstractmethod
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         """Submit a single job and return job ID.
 
@@ -120,14 +121,14 @@ class ComputeSource(ABC):
 
     async def submit_batch(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
         mode: SubmissionMode = "individual",
-        spec: Optional[ResourceSpec] = None,
-        wandb_group: Optional[str] = None,
-        job_name_prefix: Optional[str] = None,
-        costs: Optional[Sequence[float]] = None,
-    ) -> List[str]:
+        spec: ResourceSpec | None = None,
+        wandb_group: str | None = None,
+        job_name_prefix: str | None = None,
+        costs: Sequence[float] | None = None,
+    ) -> list[str]:
         """Submit a batch of jobs and return their IDs.
 
         Default implementation submits jobs one-by-one via
@@ -143,7 +144,7 @@ class ComputeSource(ABC):
         """
         if mode == "individual":
             prefix = job_name_prefix or sweep_id
-            job_ids: List[str] = []
+            job_ids: list[str] = []
             for i, params in enumerate(params_list):
                 job_name = f"{prefix}_task_{i + 1:03d}"
                 job_id = await self.submit_job(
@@ -173,7 +174,7 @@ class ComputeSource(ABC):
 
     @abstractmethod
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         """Collect results from completed jobs.
 
@@ -189,7 +190,7 @@ class ComputeSource(ABC):
     # ComputeSource uniformly; only the Slurm sources override them.
     async def chunk_progress(
         self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
-    ) -> "ChunkProgress":
+    ) -> ChunkProgress:
         """Probe per-task done-sentinels + newest checkpoint mtime for a chunk.
 
         Resumable chains are Slurm-only; the base raises so a mis-wired backend
@@ -203,9 +204,9 @@ class ComputeSource(ABC):
     async def persist_chain_manifest(
         self,
         *,
-        resumable: Dict[str, Any],
-        chain: Dict[str, Any],
-        job_ids: List[str],
+        resumable: dict[str, Any],
+        chain: dict[str, Any],
+        job_ids: list[str],
         num_tasks: int,
     ) -> None:
         """Persist chain state for a detached re-attach (``hsm sweep advance``).
@@ -216,7 +217,7 @@ class ComputeSource(ABC):
         return None
 
     @abstractmethod
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         """Perform health check and return status."""
         pass
 
@@ -228,8 +229,8 @@ class ComputeSource(ABC):
     async def wait_for_all(
         self,
         poll_interval: float = 5.0,
-        on_progress: Optional[ProgressCallback] = None,
-    ) -> Dict[str, str]:
+        on_progress: ProgressCallback | None = None,
+    ) -> dict[str, str]:
         """Block until every active job reaches a terminal state.
 
         Returns a mapping of ``job_id -> final_status``. Polls each active job
@@ -238,7 +239,7 @@ class ComputeSource(ABC):
         ``active_jobs``). Override for backends that can poll all jobs at once
         more efficiently (e.g. a single Slurm ``squeue`` call).
         """
-        final_statuses: Dict[str, str] = {}
+        final_statuses: dict[str, str] = {}
         # Seed with anything already moved to completed before we started waiting.
         for job_id, info in list(self.completed_jobs.items()):
             final_statuses[job_id] = info.status

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from rich.console import Console
 
 from hpc_sweep_manager.cli import init as init_mod
