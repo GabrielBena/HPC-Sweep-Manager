@@ -41,7 +41,6 @@ without a real cluster.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import getpass
 import json
@@ -90,12 +89,15 @@ from .push_exec import (
     pin_code_refs,
     remote_interpreter,
     resolve_run_prefix,
+    run_rsync,
     snapshot_prepare_cmd,
 )
 
 logger = logging.getLogger(__name__)
 
 SSH_TIMEOUT_S = 300  # a command that hangs this long counts as a dropped link (bulk ones: none)
+PULL_EVERY_S = 600  # while jobs are live, ``tasks/`` is pulled this often (tracker R7)
+MID_RUN_PULL_EXCLUDES = ("*.ckpt", "*.pt", "*.pth")  # weights come with the final pull only
 
 
 class SSHSlurmComputeSource(SlurmBase):
@@ -197,6 +199,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self._resumable_config: ResumableConfig | None = None
         self._chain_state: ChainState | None = None
         self._down_since: float | None = None  # when the ssh link went down (None: up)
+        self._pulled_at = time.monotonic()  # the last tasks/ pull (or the start)
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
@@ -210,19 +213,9 @@ class SSHSlurmComputeSource(SlurmBase):
         )
 
     async def _run_rsync(self, cmd: list[str]) -> int:
-        """Run an rsync command and return its exit code. Overridden in tests."""
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(
-                f"rsync ({cmd[0]} {self.host}): rc={proc.returncode}\n"
-                f"stderr={(err or b'').decode('utf-8', errors='replace')}"
-            )
-        return proc.returncode or 0
+        """Run an rsync command (a dropped link is retried); return its exit code. Overridden in
+        tests."""
+        return await run_rsync(cmd, self.host)
 
     # ---------------------------------------------------------------- helpers
     def _effective_spec(self, spec: ResourceSpec | None) -> ResourceSpec:
@@ -848,12 +841,12 @@ class SSHSlurmComputeSource(SlurmBase):
         return success
 
     # ----------------------------------------------------------- collection
-    async def _pull_tasks(self) -> int:
+    async def _pull_tasks(self, mid_run: bool = False) -> int:
         """rsync-pull the remote ``tasks/`` dir down (additive, no ``--delete``).
 
         Idempotent and cheap to call repeatedly: rsync only transfers new /
         changed task dirs. Used both for the final pull in ``collect_results``
-        and for the mid-flight incremental pulls in ``wait_for_all`` (T1), so a
+        and for the periodic pulls in ``wait_for_all`` (:meth:`_after_poll`), so a
         stuck task or a dead launcher can't strand the tasks that DID finish.
         """
         remote_tasks = f"{self._remote_sweep_dir}/tasks"
@@ -864,11 +857,14 @@ class SSHSlurmComputeSource(SlurmBase):
             self.host,
             remote_tasks,
             local_tasks,
-            excludes=self._pull_excludes,
+            excludes=[*self._pull_excludes, *(MID_RUN_PULL_EXCLUDES if mid_run else ())],
             agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
-        return await self._run_rsync(pull_cmd)
+        try:
+            return await self._run_rsync(pull_cmd)
+        finally:  # timed from the end: a pull longer than PULL_EVERY_S isn't due again at once
+            self._pulled_at = time.monotonic()
 
     async def chunk_progress(
         self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
@@ -919,14 +915,19 @@ class SSHSlurmComputeSource(SlurmBase):
         return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime)
 
     async def _after_poll(self, newly_done: int) -> None:
-        """Pull ``tasks/`` whenever a job newly finishes (T1), so a stuck task or a dead launcher
-        strands nothing that is done. Additive and idempotent: the final
-        :meth:`collect_results` still runs archive → pull → cleanup (gotchas 4/4b)."""
-        if newly_done and self._remote_sweep_dir:
-            try:
-                await self._pull_tasks()
-            except Exception as e:  # noqa: BLE001 — best-effort; retried in collect_results
-                logger.warning(f"incremental tasks/ pull on {self.host} failed: {e}")
+        """While jobs are live, pull ``tasks/`` every :data:`PULL_EVERY_S` (R7), without weight
+        files: an array is one job, so a pull per finished job came only at its end. Best effort
+        and additive: the final :meth:`collect_results` still runs archive → pull → cleanup
+        (gotchas 4/4b), and brings everything."""
+        due = time.monotonic() - self._pulled_at >= PULL_EVERY_S
+        if not (due and self.active_jobs and self._remote_sweep_dir):
+            return
+        try:
+            failure = f"rc={rc}" if (rc := await self._pull_tasks(mid_run=True)) else None
+        except Exception as e:  # noqa: BLE001 — best effort; collect_results pulls again
+            failure = repr(e)
+        if failure:
+            logger.warning(f"periodic tasks/ pull from {self.host} failed ({failure}); waiting on")
 
     async def collect_results(
         self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False

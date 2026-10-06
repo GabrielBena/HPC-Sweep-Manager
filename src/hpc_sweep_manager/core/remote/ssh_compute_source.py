@@ -60,6 +60,7 @@ from .push_exec import (
     pin_code_refs,
     remote_interpreter,
     resolve_run_prefix,
+    run_rsync,
     snapshot_prepare_cmd,
 )
 
@@ -197,19 +198,9 @@ class SSHComputeSource(ComputeSource):
         )
 
     async def _run_rsync(self, cmd: list[str]) -> int:
-        """Run an rsync command and return its exit code. Overridden in tests."""
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, err = await proc.communicate()
-        if proc.returncode != 0:
-            logger.error(
-                f"rsync ({cmd[0]} {self.host}): rc={proc.returncode}\n"
-                f"stderr={(err or b'').decode('utf-8', errors='replace')}"
-            )
-        return proc.returncode or 0
+        """Run an rsync command (a dropped link is retried); return its exit code. Overridden in
+        tests."""
+        return await run_rsync(cmd, self.host)
 
     async def _resolve_remote_path(self, path: str) -> str:
         """Expand ~ / $USER / $HOME on the remote, once at setup.

@@ -382,8 +382,13 @@ A long sweep where the `hsm sweep run` process exits before every task finishes
 (overnight runs, a task stuck behind a **maintenance reservation**, a dropped
 SSH session) no longer strands results:
 
-- As each task reaches a terminal state mid-flight, HSM pulls its `tasks/<t>/`
-  dir back immediately — a single stuck task can't hold the others hostage.
+- While jobs run, HSM pulls `tasks/` back every 10 minutes (only what changed,
+  and no weight files: `*.ckpt`, `*.pt`, `*.pth` come with the final pull), so a
+  stuck task or a dead launcher strands at most a few minutes of finished work.
+  A file a task is still writing may arrive half-written; the final pull (or
+  `hsm sweep collect`) brings the finished copy. A pull or push cut by a dropped
+  link is tried again (5 s, then 20 s later); rsync deletes a file it was cut off
+  in, so none is left truncated.
 - At submit, HSM warns if the cluster has a Slurm reservation whose window
   could outlast this launcher.
 - Submit writes a `.hsm_manifest.json` (locally + on the remote). Re-attach any

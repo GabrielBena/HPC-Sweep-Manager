@@ -210,6 +210,18 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   (params file, manifest, `.archived`) that fails now raises instead of passing
   silently. Slurm sources poll every 60 s instead of 10 s; local and ssh sources stay at
   10 s (a distributed sweep still polls its Slurm children every 10 s).
+- **Results come back during a long array; a dropped link no longer fails an rsync (R7).**
+  The mid-run pull fired when a *job* finished, and an array is one job, so a 1–3-day
+  array brought nothing back until its last task was done. A Slurm-over-SSH launcher now
+  pulls `tasks/` every 10 min while any job is live, in place of the pull per finished
+  job (the final pull is `collect`'s), timed from the end of the last pull and without
+  weight files (`*.ckpt`, `*.pt`, `*.pth`, which the final pull brings); a failed pull
+  logs a warning and the wait goes on. Every rsync of both SSH sources, push and pull, is
+  tried again after a dropped link (rc 255, 10, 12, 30 or 35), 5 s and then 20 s later;
+  any other rc is final. **For consumers:** finished tasks' logs and results reach the
+  local sweep dir within about 10 min, their weights at the end; with `--mode
+  individual`, a job's tasks arrive up to 10 min after it ends instead of at the next
+  poll.
 - **GPU indices are nvidia-smi's, and HSM never joins a busy GPU unless told `all` (X4).**
   HSM numbers GPUs as `nvidia-smi` does (PCI bus order), but CUDA's default order is
   fastest-first, so on anahita an index inside a list (`--gpus 1,2`) ran on nvidia-smi #3
