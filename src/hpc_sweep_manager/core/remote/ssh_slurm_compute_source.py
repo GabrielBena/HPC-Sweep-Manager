@@ -1066,12 +1066,13 @@ def build_ssh_slurm_source(
     host = remote_cfg.get("host") or name
     ssh_key = remote_cfg.get("ssh_key")
     ssh_port = remote_cfg.get("ssh_port")
-    max_parallel_jobs = remote_cfg.get("max_parallel_jobs")  # None = no cap
-    if max_parallel_jobs is not None:
-        if isinstance(max_parallel_jobs, bool) or not isinstance(max_parallel_jobs, int):
-            raise ValueError(f"remote {name!r}: max_parallel_jobs must be an integer")
-        if max_parallel_jobs < 1:
-            raise ValueError(f"remote {name!r}: max_parallel_jobs must be >= 1")
+    max_parallel_jobs = remote_cfg.get("max_parallel_jobs")  # None or 0 = no cap, as before
+    if max_parallel_jobs is not None and (
+        isinstance(max_parallel_jobs, bool)
+        or not isinstance(max_parallel_jobs, int)
+        or max_parallel_jobs < 0
+    ):
+        raise ValueError(f"remote {name!r}: max_parallel_jobs must be a whole number (0: no cap)")
 
     remote_spec_dict = remote_cfg.get("spec")
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:

@@ -103,9 +103,11 @@ backs `hsm sweep status` / `hsm sweep report`.
   `build_rsync_pull_cmd`).
 - [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py) —
   `_build_ssh_children` dispatches per-remote on `backend:` (`ssh`/`slurm`) so a single distributed run can mix both.
-  One worker per child over a shared task queue (a child takes a task when it has room; a failed
-  submit marks the task FAILED and retires the child), then each child's own `wait_for_all` and
-  `collect_results` — never a collect while any task is active.
+  One worker per child over a shared task queue (a child takes a task when it has room, 50 at
+  most for an uncapped Slurm child; a failed submit or refresh retires the child and hands its
+  task to another, up to 3 tries; 40% FAILED from 5 jobs retires it too), then each child's own
+  `wait_for_all` and `collect_results` — never a collect while any task is active, and every
+  remote dir kept when a task failed or two remotes share one.
 - [`core/common/config.py`](src/hpc_sweep_manager/core/common/config.py) —
   `HSMConfig.load()` merges `~/.hsm/config.yaml` (machine) with `<project>/.hsm/config.yaml` (project); `local:` is deep-merged field-by-field with project winning on collisions, other blocks only honored from the project file (machine-level `slurm:`/`distributed:` are dropped with a warning). `get_local_sweeps_root()` + `resolve_sweep_dir(hsm_config, sweep_id, project_dir)` — when `local.sweeps_root` is set, sweep dirs land there with a discovery symlink in the project dir; **hard-errors** if the path doesn't exist on the current machine (catches the "config copied to a machine where the mount isn't present" footgun).
 - [`core/common/sweep_analysis.py`](src/hpc_sweep_manager/core/common/sweep_analysis.py) —
