@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name={{ job_name }}
-#SBATCH --array=1-{{ num_jobs }}
+#SBATCH --array=1-{{ num_jobs }}{{ ("%" ~ array_throttle) if array_throttle else "" }}
 #SBATCH --output={{ logs_dir }}/{{ job_name }}_%A_%a.out
 #SBATCH --error={{ logs_dir }}/{{ job_name }}_%A_%a.err
 {{ sbatch_directives }}

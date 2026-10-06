@@ -124,6 +124,15 @@ class TestCondaInitPartialRenders:
         "wandb_group": "g",
     }
 
+    def test_array_throttle_renders_as_percent_n(self):
+        base = {**self._BASE_KWARGS, "num_jobs": 600}
+        assert "#SBATCH --array=1-600%50\n" in render_template(
+            "slurm_array.sh.j2", uses_conda=False, array_throttle=50, **base
+        )
+        assert "#SBATCH --array=1-600\n" in render_template(
+            "slurm_array.sh.j2", uses_conda=False, **base
+        )
+
     def test_slurm_array_emits_init_block_when_uses_conda(self):
         rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         # Conda paths
