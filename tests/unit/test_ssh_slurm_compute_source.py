@@ -159,10 +159,10 @@ class TestSetup:
         assert ok is True
         # Tilde expansion happened — remote paths are absolute.
         project_name = tmp_path.name
-        assert src._remote_code_dir == f"/home/gbena/.hsm/runs/{project_name}/code"
+        assert src._remote_code_dir == f"/home/gbena/.hsm/runs/{project_name}/snapshots/sweep_x"
         assert src._remote_sweep_dir == f"/home/gbena/.hsm/runs/{project_name}/sweeps/sweep_x"
         # mkdir issued once with all four dirs.
-        mkdir_calls = [c for c in conn.run_calls if c["cmd"].startswith("mkdir -p")]
+        mkdir_calls = [c for c in conn.run_calls if "mkdir -p" in c["cmd"]]
         assert len(mkdir_calls) == 1
         assert "tasks" in mkdir_calls[0]["cmd"]
         assert "logs" in mkdir_calls[0]["cmd"]
@@ -516,11 +516,15 @@ class TestStatus:
     """The SSH seam of SlurmBase's refresh (the semantics: test_slurm_base.py)."""
 
     @staticmethod
-    async def _tracking(tmp_path, conn, *jobs):
+    async def _tracking(tmp_path, conn, *jobs, replies=()):
+        """Set up a source tracking ``jobs``; ``replies`` are scripted after setup, so no setup
+        command (whose paths contain the test's name) can consume them."""
         src = _StubSrc(
             name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py", fake_conn=conn
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
+        for reply in replies:
+            conn.add(*reply)
         for job in jobs:
             src.active_jobs[job] = JobInfo(job, job, {}, src.name)
         return src
@@ -528,9 +532,11 @@ class TestStatus:
     @pytest.mark.asyncio
     async def test_one_squeue_and_one_sacct_on_the_wire(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("squeue -u", _Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n"))
-        conn.add("sacct", _Result(0, stdout="101|FAILED\n102|COMPLETED\n"))
-        src = await self._tracking(tmp_path, conn, "100", "101", "102")
+        replies = [
+            ("squeue -u", _Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n")),
+            ("sacct", _Result(0, stdout="101|FAILED\n102|COMPLETED\n")),
+        ]
+        src = await self._tracking(tmp_path, conn, "100", "101", "102", replies=replies)
         await src.update_all_job_statuses()
         wire = [c["cmd"] for c in conn.run_calls if c["cmd"].startswith(("squeue", "sacct"))]
         assert wire == ["squeue -u gbena -h -o '%i %T'", "sacct -j 101,102 -n -X -P -o JobID,State"]
@@ -544,9 +550,8 @@ class TestStatus:
         # Tracker S1: squeue (slurmctld) or sacct (slurmdbd) failing read as COMPLETED, so the
         # launcher went on to collect, archive and rm -rf a live sweep dir.
         conn = FakeConn(responder=_setup_ok_responder())
-        for _ in range(200):
-            conn.add(failing, _Result(1, stderr="Unable to contact slurm controller/database"))
-        src = await self._tracking(tmp_path, conn, "777")
+        outage = _Result(1, stderr="Unable to contact slurm controller/database")
+        src = await self._tracking(tmp_path, conn, "777", replies=[(failing, outage)] * 200)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(src.wait_for_all(poll_interval=0.001), timeout=0.2)
         assert "777" in src.active_jobs
@@ -554,8 +559,7 @@ class TestStatus:
     @pytest.mark.asyncio
     async def test_a_signal_killed_command_is_a_failure(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("squeue -u", _Result(None))
-        src = await self._tracking(tmp_path, conn)
+        src = await self._tracking(tmp_path, conn, replies=[("squeue -u", _Result(None))])
         assert (await src._sh(["squeue", "-u", "gbena"]))[0] == 255
 
 
@@ -633,6 +637,7 @@ class TestManifest:
         assert m["job_ids"] == ["5"]
         assert "/scratch/gbena/hsm-runs" in m["remote_sweep_dir"]
         assert m["resolved_archive_dir"] == "/shares/gbena/arch"
+        assert m["remote_code_dir"].endswith("/snapshots/sw1")  # this sweep's code (S4)
         # Remote manifest cat-piped too.
         remote_manifest = [
             c
@@ -801,10 +806,11 @@ class TestCollectResults:
         assert len(src._rsync_calls) == 2
         pull = src._rsync_calls[-1]
         assert pull[0] == "rsync"
-        # Remote dir was cleaned.
+        # Remote dir was cleaned, with the sweep's own code snapshot (S4).
         rm_calls = [c for c in conn.run_calls if c["cmd"].startswith("rm -rf")]
         assert len(rm_calls) == 1
         assert src._remote_sweep_dir in rm_calls[0]["cmd"]
+        assert rm_calls[0]["cmd"].endswith("/snapshots/sweep_1")
 
     @pytest.mark.asyncio
     async def test_no_cleanup_on_failure(self, tmp_path):
@@ -846,6 +852,19 @@ class TestCollectResults:
 
 
 # ----------------------------------------------------------- workdir / archive
+
+
+class TestLegacyCodeDir:
+    @pytest.mark.asyncio
+    async def test_a_reattached_old_manifest_never_cleans_the_shared_code_dir(self, tmp_path):
+        # An old chain's manifest names the shared .../code dir: tasks of other sweeps use it.
+        conn = FakeConn()
+        src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
+        manifest = {"remote_sweep_dir": "/r/proj/sweeps/sw1", "remote_code_dir": "/r/proj/code"}
+        await src.reattach(tmp_path / "sw1", "sw1", manifest)
+        await src.collect_results()
+        rm_calls = [c["cmd"] for c in conn.run_calls if c["cmd"].startswith("rm -rf")]
+        assert rm_calls == ["rm -rf /r/proj/sweeps/sw1"]
 
 
 class TestStorageTier:
@@ -960,6 +979,7 @@ class TestStorageTier:
             if "rsync -a" in c["cmd"] and "/shares/payvand/hsm-archive/sw1" in c["cmd"]
         ]
         assert len(arch_calls) == 1
+        assert "/snapshots/sw1/ /shares/payvand/hsm-archive/sw1/code/" in arch_calls[0]["cmd"]
         # Sentinel was written.
         sentinel_calls = [
             c for c in conn.run_calls if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]
@@ -1499,7 +1519,6 @@ class TestChunkProgress:
 
     async def _src(self, tmp_path, stdout):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("find", _Result(0, stdout=stdout))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1508,6 +1527,7 @@ class TestChunkProgress:
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sw", "sw")
+        conn.add("find", _Result(0, stdout=stdout))  # after setup: its snapshot GC runs a find
         return src
 
     @pytest.mark.asyncio

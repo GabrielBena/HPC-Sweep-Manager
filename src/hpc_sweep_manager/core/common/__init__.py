@@ -4,13 +4,7 @@ from .compute_source import ComputeSource, ComputeSourceStats, JobInfo
 from .config import HSMConfig, SweepConfig
 from .param_generator import ParameterGenerator
 from .path_detector import PathDetector
-from .utils import (
-    ProgressTracker,
-    create_sweep_id,
-    format_duration,
-    format_memory,
-    setup_logging,
-)
+from .utils import create_sweep_id, setup_logging
 
 __all__ = [
     "ComputeSource",
@@ -22,7 +16,4 @@ __all__ = [
     "PathDetector",
     "setup_logging",
     "create_sweep_id",
-    "format_duration",
-    "format_memory",
-    "ProgressTracker",
 ]

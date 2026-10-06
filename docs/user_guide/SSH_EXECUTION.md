@@ -53,8 +53,12 @@ ls sweeps/outputs/<sweep-id>/tasks/
 
 Replace `my-box` with whatever your alias is. HSM will:
 
-1. rsync your project to `~/.hsm/runs/<project-name>/code/` on the remote
-   (rolling mirror — diffs only, excludes `.git`, `__pycache__`, etc.).
+1. rsync your project to `~/.hsm/runs/<project-name>/snapshots/<sweep_id>/`
+   on the remote (excludes `.git`, `__pycache__`, etc.), hard-linked against the
+   previous sweep's snapshot so only changed files cost transfer or space. Tasks
+   run from their own sweep's snapshot: a later push never changes the code of
+   tasks still queued. Every wrapper exports `$HSM_CODE_DIR` (the task's own
+   snapshot).
 2. Probe `nvidia-smi` to discover GPUs.
 3. Partition them into per-task slots (1 task per GPU here, since
    `--gpus 1` is the allowlist and `--resources --gpus=1` is per-task).
@@ -124,29 +128,26 @@ with `ModuleNotFoundError: No module named 'yourpkg'`.
 
 Two fixes; pick one:
 
-1. **Install the package into the remote env** (durable — survives HSM
-   re-pushes; do it once per env):
+1. **Install the package into the remote env** (durable; a regular, non-editable
+   install of a version you choose). An editable install into the pushed code is
+   no longer a good idea: each sweep's code lives in its own snapshot, and old
+   snapshots are cleaned up.
 
-   ```bash
-   ssh my-box "cd ~/.hsm/runs/<project-name>/code && conda run -n my-env pip install -e ."
-   ```
-
-2. **Point `PYTHONPATH` at the pushed code dir** (zero-install — lives in
-   config, applies to every task):
+2. **Point `PYTHONPATH` at the task's code** (zero-install; lives in config and
+   applies to every task):
 
    ```yaml
    distributed:
      remotes:
        my-box:
-         pre_script:
-           - export PYTHONPATH=$HOME/.hsm/runs/<project-name>/code:$PYTHONPATH
+         spec:
+           pre_script:
+             - export PYTHONPATH=$HSM_CODE_DIR:$PYTHONPATH
    ```
 
-Option 2 always imports exactly the code that was just pushed (no stale
-installed copy), which is usually what you want for active development.
-Note option 1's editable install points at the *rolling* code dir — HSM
-re-pushes into the same path, so the install stays current too; it only
-goes stale if you change the project name or `remote_root`.
+   `$HSM_CODE_DIR` is the task's own sweep snapshot, exported by every HSM wrapper
+   before `pre_script` runs, so a task imports exactly the code its sweep pushed.
+   (`pre_script` belongs inside `spec:`; at the remote level it is ignored.)
 
 ## `.hsm/config.yaml` — the `distributed:` block
 
@@ -395,8 +396,13 @@ config, example):
 
 ## Housekeeping
 
-The rolling code cache at `~/.hsm/runs/<project>/code/` is reused across
-sweeps. Per-sweep dirs are auto-cleaned on success, kept on failure.
+Each sweep's code snapshot lives at `~/.hsm/runs/<project>/snapshots/<sweep_id>/`
+(hard links make it cheap) for as long as its sweep dir: both are removed on
+success and kept on failure. With an `archive_dir`, the snapshot is archived
+with the results (`<archive>/<sweep_id>/code/`). A `code/` dir left by an older
+HSM is never written to or deleted (tasks it launched may still use it); remove
+it yourself once nothing runs from it. A `pre_script` that still names
+`.../<project>/code` is pointed at `$HSM_CODE_DIR`, with a warning.
 
 To wipe everything HSM left on a remote:
 
