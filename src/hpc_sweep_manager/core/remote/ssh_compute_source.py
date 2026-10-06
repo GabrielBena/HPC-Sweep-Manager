@@ -33,6 +33,7 @@ from typing import Any
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
+from .discovery import agent_stalled
 from .gpu_probe import NVIDIA_SMI_QUERY, parse_nvidia_smi_csv
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
@@ -203,6 +204,7 @@ class SSHComputeSource(ComputeSource):
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
+            agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
@@ -428,7 +430,9 @@ class SSHComputeSource(ComputeSource):
             return False
         remote_tasks = f"{self._remote_sweep_dir}/tasks"
         local_tasks = str(self.sweep_dir / "tasks")
-        pull_cmd = build_rsync_pull_cmd(self.host, remote_tasks, local_tasks)
+        pull_cmd = build_rsync_pull_cmd(
+            self.host, remote_tasks, local_tasks, agentless=agent_stalled(self.host)
+        )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
         rc = await self._run_rsync(pull_cmd)
         if rc != 0:

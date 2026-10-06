@@ -679,6 +679,23 @@ class TestCancel:
 
 class TestCollectResults:
     @pytest.mark.asyncio
+    async def test_rsync_skips_an_agent_that_stalled(self, tmp_path, monkeypatch):
+        from hpc_sweep_manager.core.remote import discovery
+
+        monkeypatch.setattr(discovery, "_AGENT_STALLED", {"uzh"})
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("rm -rf", _Result(0))
+        src = _StubSrc(
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py", fake_conn=conn
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        src.update_job_status(await src.submit_job({"s": 0}, "task_0", "sweep_1"), "COMPLETED")
+        await src.collect_results()
+        push, pull = src._rsync_calls
+        assert all("-o IdentityAgent=none" in cmd[cmd.index("-e") + 1] for cmd in (push, pull))
+
+    @pytest.mark.asyncio
     async def test_pull_then_cleanup_on_success(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))

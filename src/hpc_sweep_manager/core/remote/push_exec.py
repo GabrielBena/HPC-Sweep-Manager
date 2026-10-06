@@ -57,6 +57,11 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 #   ship — rename it (no un-exclude mechanism yet).
 
 
+# The ssh under every rsync: never prompt (a headless launcher would wait forever),
+# bound the connect, and give up on a link that stops answering mid-transfer.
+RSYNC_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30"
+
+
 def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence[int]) -> list[int]:
     """Resolve the per-remote ``gpus`` config against the box's detected GPUs.
 
@@ -117,16 +122,18 @@ def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
 
 
 def build_rsync_push_cmd(
-    local_dir: str, host: str, remote_dir: str, excludes: Sequence[str]
+    local_dir: str, host: str, remote_dir: str, excludes: Sequence[str], agentless: bool = False
 ) -> list[str]:
     """rsync the local project tree up to the rolling remote code dir.
 
     ``--delete`` keeps the remote copy an exact mirror (files removed locally
     vanish remotely); trailing slashes put *contents* of ``local_dir`` into
     ``remote_dir``. Relies on the system ssh transport, which reads
-    ``~/.ssh/config`` natively, so ``host`` may be an alias.
+    ``~/.ssh/config`` natively, so ``host`` may be an alias. ``agentless`` skips
+    the SSH agent, for a host whose agent stalled (``discovery.agent_stalled``).
     """
-    cmd = ["rsync", "-az", "--delete"]
+    ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
+    cmd = ["rsync", "-az", "--delete", "-e", ssh]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{local_dir.rstrip('/')}/")
@@ -139,15 +146,17 @@ def build_rsync_pull_cmd(
     remote_dir: str,
     local_dir: str,
     excludes: Sequence[str] = (),
+    agentless: bool = False,
 ) -> list[str]:
     """rsync a remote results dir back down (no ``--delete`` — purely additive).
 
     ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task
     ``resume/`` checkpoint dir on intermediate pulls so a multi-GB checkpoint
     isn't dragged over the WAN at every chunk seam — it rides the cheap
-    cluster-internal archive instead.
+    cluster-internal archive instead. ``agentless`` as in :func:`build_rsync_push_cmd`.
     """
-    cmd = ["rsync", "-az"]
+    ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
+    cmd = ["rsync", "-az", "-e", ssh]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")

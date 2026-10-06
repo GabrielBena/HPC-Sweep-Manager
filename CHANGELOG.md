@@ -22,14 +22,23 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   refresh.
 - **`sbatch` output without a `Submitted batch job <id>` line now raises** instead
   of guessing an id from the last word of the output.
-
-Two field reports drove this cycle: SSH-Slurm → S3IT first use
-([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
-and the first blind agent-driven consumer run from Comp-PVR
-([`2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)).
-
-### Fixed (2026-10 maintenance pass — cli lane)
-
+- **A stale SSH agent no longer breaks the connection (X2).** When `SSH_AUTH_SOCK`
+  pointed at an agent that no longer answers (often one forwarded by an old
+  session), asyncssh waited in auth until the server reset the connection: HSM
+  reported a bare `Connection reset by peer` while `ssh <host>` worked, and the
+  workaround was `env -u SSH_AUTH_SOCK hsm …`. The login is now bounded at 30 s; a
+  login timeout or reset while an agent is in use is retried once without the
+  agent, with a warning that names it and the lasting fix (`IdentityAgent none` in
+  `~/.ssh/config`). HSM then skips the agent for that host for the rest of the run,
+  rsync included. A login that still fails says so: `SSH login to <host> timed out
+  or was reset …`.
+- **An unreachable host fails within 60 s, with a clear message.** The whole
+  connect, ProxyJump hops included, is bounded at 60 s (`Could not reach <host>
+  within 60 s …`), instead of the OS's TCP timeout (about 2 min).
+- **rsync no longer hangs on a prompt or a dead link.** Every rsync runs ssh with
+  `BatchMode=yes`, `ConnectTimeout=30` and `ServerAliveInterval=30` (passed with
+  `-e`, so it overrides `RSYNC_RSH`): a push or a pull fails instead of waiting for
+  a password, or for TCP keepalive to notice a dead link (about 2 h).
 - **`--remote X --mode auto` ran locally (C1).** `auto` resolved to
   `local`/`array` and ignored the alias. With `--remote`, `auto` now means
   remote, and `build_compute_source` refuses an alias with any other mode.
@@ -48,6 +57,11 @@ and the first blind agent-driven consumer run from Comp-PVR
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+
+Two field reports drove this cycle: SSH-Slurm → S3IT first use
+([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
+and the first blind agent-driven consumer run from Comp-PVR
+([`2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)).
 
 ### Fixed (queue inspection audit, 2026-06-04)
 

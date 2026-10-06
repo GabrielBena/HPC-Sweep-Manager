@@ -71,6 +71,7 @@ from ..hpc.slurm_protocol import (
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
+from .discovery import agent_stalled
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
@@ -320,6 +321,7 @@ class SSHSlurmComputeSource(SlurmBase):
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
+            agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
@@ -797,7 +799,11 @@ class SSHSlurmComputeSource(SlurmBase):
         # _pull_excludes is set by the resumable driver to skip the heavy
         # checkpoint subdir (issue #12); empty for ordinary sweeps.
         pull_cmd = build_rsync_pull_cmd(
-            self.host, remote_tasks, local_tasks, excludes=self._pull_excludes
+            self.host,
+            remote_tasks,
+            local_tasks,
+            excludes=self._pull_excludes,
+            agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
         return await self._run_rsync(pull_cmd)

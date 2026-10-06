@@ -24,6 +24,14 @@ except ImportError:  # pragma: no cover - asyncssh is a hard runtime dep
 
 logger = logging.getLogger(__name__)
 
+# Hosts whose login stalled on the SSH agent and then worked without it, this run.
+_AGENT_STALLED: set[str] = set()
+
+
+def agent_stalled(host: str) -> bool:
+    """True once a login to ``host`` stalled on the SSH agent: later logins and rsync skip it."""
+    return host in _AGENT_STALLED
+
 
 def expand_ssh_key_path(ssh_key_path: str) -> str | None:
     """Expand ``~`` / env vars in an ssh key path; return absolute or None if missing."""
@@ -45,11 +53,16 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     ``ssh_key`` / ``ssh_port`` arguments (from ``hsm_config.yaml``) override
     the corresponding ssh-config directives. Host keys are verified against
     ``~/.ssh/known_hosts`` (and any ``UserKnownHostsFile`` /
-    ``StrictHostKeyChecking`` the config specifies).
+    ``StrictHostKeyChecking`` the config specifies). A login that stalls on a
+    stale SSH agent is retried once without it (:func:`_connect`).
     """
     logger.debug(f"Attempting SSH connection to {host}")
 
-    connection_kwargs: dict[str, Any] = {"host": host}
+    # End a stuck login before sshd's LoginGraceTime does (asyncssh waits 120 s), and
+    # bound the whole connect, ProxyJump hops included (asyncssh sets no bound).
+    connection_kwargs: dict[str, Any] = {"host": host, "login_timeout": 30, "connect_timeout": 60}
+    if agent_stalled(host):
+        connection_kwargs["agent_path"] = None
 
     # Hand asyncssh the user's ssh config so aliases resolve like `ssh <alias>`.
     ssh_config_path = os.path.expanduser("~/.ssh/config")
@@ -73,7 +86,7 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     # known_hosts is intentionally NOT set to None → asyncssh verifies against
     # ~/.ssh/known_hosts and honors the config's host-key directives.
     try:
-        conn = await asyncssh.connect(**connection_kwargs)
+        conn = await _connect(host, connection_kwargs)
         logger.debug(f"✓ SSH connection established to {host}")
         return conn
     except asyncssh.PermissionDenied as e:
@@ -87,3 +100,44 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     except Exception as e:
         logger.error(f"SSH connection to {host} failed: {type(e).__name__}: {e}")
         raise
+
+
+async def _connect(host: str, kwargs: dict[str, Any]):
+    """``asyncssh.connect`` with clear errors; a login stalled on an SSH agent is retried once
+    without it.
+
+    asyncssh asks the agent before the key files, so a stale agent (a forwarded
+    ``SSH_AUTH_SOCK`` whose session is gone) stalls auth until our login_timeout
+    or the server's LoginGraceTime resets the connection (field report 2026-09-29).
+    """
+    try:
+        try:
+            return await asyncssh.connect(**kwargs)
+        except (asyncssh.ConnectionLost, ConnectionResetError) as e:
+            # The agent asyncssh used: '' if SSH_AUTH_SOCK is unset or `IdentityAgent none`.
+            agent = _login_stalled(e) and asyncssh.SSHClientConnectionOptions(**kwargs).agent_path
+            if not agent:
+                raise
+            logger.warning(
+                f"SSH login to {host} stalled ({e!r}) on the agent at {agent}, usually a stale "
+                f"(e.g. forwarded) SSH_AUTH_SOCK. Retrying, and skipping the agent for {host} "
+                f"for the rest of this run; to skip it for good, set `IdentityAgent none` for "
+                f"{host} in ~/.ssh/config."
+            )
+        conn = await asyncssh.connect(**kwargs, agent_path=None)
+    except TimeoutError as e:  # connect_timeout: TCP connect, handshake, ProxyJump hops
+        raise ConnectionError(
+            f"Could not reach {host} within {kwargs['connect_timeout']} s: host down, "
+            f"network/VPN off, or a ProxyJump hop stuck (e.g. on a stale SSH agent)"
+        ) from e
+    except (asyncssh.ConnectionLost, ConnectionResetError) as e:
+        if not _login_stalled(e):
+            raise
+        raise ConnectionError(f"SSH login to {host} timed out or was reset ({e!r})") from e
+    _AGENT_STALLED.add(host)
+    return conn
+
+
+def _login_stalled(e: Exception) -> bool:
+    """Our login_timeout fired, or the server reset the connection (its LoginGraceTime)."""
+    return isinstance(e, ConnectionResetError) or "Login timeout" in str(e)
