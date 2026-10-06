@@ -116,3 +116,52 @@ class TestResumableBackendGate:
             resumable=True,
         )
         assert mode == "remote"
+
+
+class TestRemoteAliasGuards:
+    """C1: an alias never runs locally; C6: an unregistered alias is an error
+    once the project registers remotes (bare aliases stay for projects without)."""
+
+    import pytest
+
+    @pytest.mark.parametrize("mode", ["auto", "local", "array"])
+    def test_alias_with_non_remote_mode_refused(self, tmp_path, mode):
+        import pytest as _pytest
+
+        with _pytest.raises(ValueError, match="needs mode='remote'"):
+            build_compute_source(
+                mode=mode,
+                python_path="python",
+                script_path="train.py",
+                project_dir=str(tmp_path),
+                hsm_config=_cfg("slurm"),
+                remote_alias="r",
+            )
+
+    def test_unregistered_alias_refused_with_suggestion(self, tmp_path):
+        import pytest as _pytest
+
+        cfg = FakeConfig({"distributed": {"remotes": {"uzh": {"backend": "slurm"}}}})
+        with _pytest.raises(ValueError, match="did you mean 'uzh'"):
+            build_compute_source(
+                mode="remote",
+                python_path="python",
+                script_path="train.py",
+                project_dir=str(tmp_path),
+                hsm_config=cfg,
+                remote_alias="uzhh",
+            )
+
+    def test_bare_alias_kept_without_remotes_block(self, tmp_path):
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+
+        src, mode, _sub = build_compute_source(
+            mode="remote",
+            python_path="python",
+            script_path="train.py",
+            project_dir=str(tmp_path),
+            hsm_config=FakeConfig({"distributed": {"conda_env": "lab"}}),
+            remote_alias="my-box",
+        )
+        assert isinstance(src, SSHComputeSource)
+        assert (src.host, mode) == ("my-box", "remote")

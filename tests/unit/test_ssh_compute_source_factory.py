@@ -163,6 +163,18 @@ class TestBuildSshSource:
         # No duplicates introduced by the extend.
         assert len(src.rsync_excludes) == len(set(src.rsync_excludes))
 
+    def test_spec_typo_keeps_other_fields(self, caplog):
+        # C2: one unknown key used to drop the whole per-remote spec.
+        remote = {"spec": {"walltime": "02:00:00", "mem": "8G", "cpus": 4}}
+        with caplog.at_level("WARNING"):
+            src = build_ssh_source(name="box", remote_cfg=remote, **self.DEFAULTS)
+        assert (src.default_spec.walltime, src.default_spec.mem) == ("02:00:00", "8G")
+        assert any("'box'" in r.message and "cpus" in r.message for r in caplog.records)
+
+    def test_spec_invalid_value_raises(self):
+        with pytest.raises(ValueError, match="remote 'box' spec"):
+            build_ssh_source(name="box", remote_cfg={"spec": {"gpus": -1}}, **self.DEFAULTS)
+
     def test_default_spec_passed_through(self):
         spec = ResourceSpec(gpus=2, modules=("foo",))
         src = build_ssh_source(name="anahita", default_spec=spec, **self.DEFAULTS)

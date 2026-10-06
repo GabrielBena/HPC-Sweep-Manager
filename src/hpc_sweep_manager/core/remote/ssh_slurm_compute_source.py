@@ -1052,24 +1052,15 @@ def build_ssh_slurm_source(
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:
         if "speed_factors" in remote_spec_dict:
             # Plausible misplacement: it belongs BESIDE spec:, not inside it
-            # (per-source planner knob, not a per-job resource). Dropping it
-            # here would otherwise surface as an opaque "unexpected keyword
-            # argument" that nukes the whole spec block.
+            # (per-source planner knob, not a per-job resource). Filtered here
+            # so this hint replaces from_dict's generic unknown-key warning.
             logger.warning(
                 f"remote {name!r}: `speed_factors` belongs at the remote "
                 f"level (sibling of `spec:`), not inside it — ignoring the "
                 f"misplaced entry. Move it up one level."
             )
             remote_spec_dict = {k: v for k, v in remote_spec_dict.items() if k != "speed_factors"}
-        try:
-            per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
-            per_remote_spec = None
-    else:
-        per_remote_spec = None
-
-    if per_remote_spec is not None:
+        per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
     conda_env = (

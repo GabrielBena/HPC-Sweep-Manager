@@ -28,6 +28,27 @@ Two field reports drove this cycle: SSH-Slurm → S3IT first use
 and the first blind agent-driven consumer run from Comp-PVR
 ([`2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)).
 
+### Fixed (2026-10 maintenance pass — cli lane)
+
+- **`--remote X --mode auto` ran locally (C1).** `auto` resolved to
+  `local`/`array` and ignored the alias. With `--remote`, `auto` now means
+  remote, and `build_compute_source` refuses an alias with any other mode.
+- **One unknown key dropped a whole spec block (C2).** A typo such as
+  `cpus: 4` in a per-remote `spec:` or the `slurm:` block discarded every
+  field (account, qos, `--exclude`, …) behind a single log line. Now only the
+  unknown key is dropped, with a warning naming it; an invalid value of a
+  known key stops the run with an error naming the block.
+- **An unregistered `--remote` alias became a bare ssh-bash remote (C6).** A
+  typo'd `uzh` could train on the cluster's login node. When the project has
+  a `distributed.remotes:` block, an alias missing from it is now an error
+  with a "did you mean" suggestion; projects without the block keep bare
+  `~/.ssh/config` aliases.
+- **Same-second launches shared a sweep dir (C7).** Sweep ids have
+  one-second resolution and the dir was created with `exist_ok`, so two
+  launches shared their local and remote dirs, and one's cleanup could delete
+  the other's. The dir is now created exclusively; on a collision the id gets
+  a `_2` (`_3`, …) suffix.
+
 ### Fixed (queue inspection audit, 2026-06-04)
 
 Live audit against S3IT (Slurm 25.05) with two sweeps in flight found

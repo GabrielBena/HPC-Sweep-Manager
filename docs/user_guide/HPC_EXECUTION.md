@@ -561,6 +561,11 @@ distributed:
 per-remote `spec:` > hardcoded defaults. `hsm remote add` writes the
 connection fields only — add `spec:` and `gpus:` by hand-editing.
 
+An unknown key in `spec:` (or in the `slurm:` / `local:` blocks) is dropped
+with a warning that names it; the rest of the block still applies. An
+invalid value of a known key (`gpus: -1`, `gpu_type` without `gpus`) stops
+the run with an error naming the block.
+
 ### Direct Python (still supported)
 
 For fully programmatic use, you can also drive `SlurmComputeSource`

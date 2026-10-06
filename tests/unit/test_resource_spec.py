@@ -131,6 +131,20 @@ class TestResourceSpecFromDict:
         assert spec.walltime == "04:00:00"
         assert spec.qos is None
 
+    def test_unknown_key_dropped_alone_with_warning(self, caplog):
+        # C2: a typo (`cpus`) used to TypeError and cost the whole block.
+        with caplog.at_level("WARNING"):
+            spec = ResourceSpec.from_dict({"account": "a", "cpus": 4}, where="remote 'uzh' spec")
+        assert spec.account == "a"
+        assert any(
+            "remote 'uzh' spec" in r.message and "['cpus']" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.parametrize("bad", [0, "4"])  # rejected value; wrong type
+    def test_invalid_value_raises_naming_where(self, bad):
+        with pytest.raises(ValueError, match="remote 'uzh' spec: "):
+            ResourceSpec.from_dict({"cpus_per_task": bad}, where="remote 'uzh' spec")
+
 
 class TestMultiGpuType:
     """gpu_type as a LIST — heterogeneous scheduling (issue #7)."""

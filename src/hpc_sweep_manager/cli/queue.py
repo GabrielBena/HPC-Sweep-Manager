@@ -230,9 +230,9 @@ def _slurm_backend_remotes(hsm_config: HSMConfig | None) -> dict[str, dict]:
 def _remote_params(alias: str, hsm_config: HSMConfig | None) -> dict[str, Any]:
     """Resolve an alias to SSH connection params.
 
-    Mirrors ``build_ssh_slurm_source``: per-remote ``host``/``ssh_key``/
-    ``ssh_port`` from ``distributed.remotes.<alias>``; an unregistered alias
-    is treated as a bare ``~/.ssh/config`` alias (host = alias).
+    Per-remote ``host``/``ssh_key``/``ssh_port`` from ``distributed.remotes.<alias>``;
+    any other alias is a bare ``~/.ssh/config`` alias (host = alias) — unlike
+    ``hsm sweep run --remote``, on purpose: queue views are read-only.
     """
     remotes: dict[str, Any] = {}
     if hsm_config is not None:

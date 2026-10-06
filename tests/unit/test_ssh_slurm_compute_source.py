@@ -1147,6 +1147,44 @@ class TestFactory:
         assert src.archive_dir is None
         assert src.archive_on == "completed"
 
+    def test_spec_typo_keeps_account_qos_exclude(self, tmp_path, caplog):
+        # C2: one unknown key used to drop the whole spec — account, qos and
+        # the --exclude that keeps CPU jobs off GPU nodes went with it.
+        spec = {
+            "account": "lab",
+            "qos": "medium",
+            "extra_directives": {"--exclude": "gpu[01-02]"},
+            "cpus": 4,  # typo of cpus_per_task
+            "speed_factors": {"a100": 1.0},  # misplaced: belongs beside spec:
+        }
+        with caplog.at_level("WARNING"):
+            src = build_ssh_slurm_source(
+                name="uzh",
+                remote_cfg={"host": "uzh", "spec": spec},
+                distributed_cfg={},
+                project_dir=str(tmp_path),
+                script_path="train.py",
+            )
+        assert (src.default_spec.account, src.default_spec.qos) == ("lab", "medium")
+        assert dict(src.default_spec.extra_directives) == {"--exclude": "gpu[01-02]"}
+        messages = [r.message for r in caplog.records]
+        assert any("['cpus']" in m for m in messages)
+        # Only the "move it up" hint mentions speed_factors — no generic duplicate.
+        assert [m for m in messages if "speed_factors" in m] == [
+            m for m in messages if "up one level" in m
+        ]
+        assert len([m for m in messages if "up one level" in m]) == 1
+
+    def test_spec_invalid_value_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="remote 'uzh' spec: .*gpu_type requires gpus"):
+            build_ssh_slurm_source(
+                name="uzh",
+                remote_cfg={"host": "uzh", "spec": {"account": "lab", "gpu_type": "H100"}},
+                distributed_cfg={},
+                project_dir=str(tmp_path),
+                script_path="train.py",
+            )
+
     def test_bad_qos_whitelist_falls_back_to_none(self, tmp_path):
         src = build_ssh_slurm_source(
             name="uzh",
