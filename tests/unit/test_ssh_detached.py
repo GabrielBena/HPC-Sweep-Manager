@@ -261,3 +261,23 @@ async def test_no_collect_while_the_launcher_runs(box, tmp_path, monkeypatch):
     assert "launcher is still running" in await _collect(box, tmp_path, monkeypatch)
     assert Path(box._remote_sweep_dir).is_dir()
     await box.cleanup()
+
+
+async def test_a_task_not_yet_its_own_group_is_running(tmp_path):
+    # Just after launch the task has a pid but hasn't called setsid: no group by that id yet.
+    # A poll then must say "run", not "gone" (a CI run caught that race).
+    import subprocess
+
+    from hpc_sweep_manager.core.remote.ssh_compute_source import _POLL_FN
+
+    proc = subprocess.Popen(["sleep", "30"])  # pytest's group, as a task is before setsid
+    try:
+        poll = subprocess.run(
+            ["bash", "-c", f"{_POLL_FN}; p {tmp_path} {proc.pid} j"],
+            capture_output=True,
+            text=True,
+        )
+        assert poll.stdout.split() == ["j", "run"]
+    finally:
+        proc.kill()
+        proc.wait()
