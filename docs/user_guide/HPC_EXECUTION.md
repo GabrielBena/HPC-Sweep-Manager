@@ -343,7 +343,9 @@ NOT run it (or a cron of it) while a live `hsm sweep run --resumable` launcher
 is still driving the same chain: both could submit the next chunk (a `.hsm_chain.lock`
 is a planned follow-up; for now, pick one driver). A narrow launcher-crash
 window between submit and manifest-persist can likewise orphan a chunk — also a
-hardening follow-up.
+hardening follow-up. `hsm sweep cancel <id>` cancels the chain's running chunk (and
+any chunk queued after it), then marks the chain stopped so `advance` won't resubmit
+it; stop a live launcher first, or it submits the next chunk.
 
 ## The typed `local:` block — defaults for `--mode local`
 
@@ -649,8 +651,10 @@ before submission.
 
 Use `hsm sweep watch <sweep_id>` for live job state, `hsm sweep queue`
 for the cluster's queue, or `scancel <id>` directly to cancel a Slurm
-job. `hsm sweep cancel <sweep_id>` dispatches to `scancel` for every
-job ID recorded in the sweep.
+job. `hsm sweep cancel <sweep_id>` cancels a live sweep: both Slurm
+sources write `.hsm_manifest.json` as they submit, and `cancel` runs one
+`scancel` naming every job in it (over ssh for a `backend: slurm`
+remote). A `scancel` that fails or gets no answer exits 1.
 
 Per-task outputs land in `sweeps/outputs/<sweep-id>/tasks/task_NNN/`
 (see [`examples/test_train.py`](../../examples/test_train.py) for the

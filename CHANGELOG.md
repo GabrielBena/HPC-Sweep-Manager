@@ -267,6 +267,19 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   shared by the ssh and ssh-slurm factories. **For consumers:** a remote with a
   `python_path` and no `conda_env`, or with neither under a `distributed:` block that sets a
   `python_path`, now runs that `python_path` instead of `conda run -n <paths.conda_env>`.
+- **`hsm sweep cancel` cancels a live Slurm sweep (S9).** It took the job ids from
+  `submission_summary.txt`, which is written only once the sweep's wait ends, so a running
+  sweep had none; an SSH-Slurm sweep fell through to "unknown backend", and native Slurm
+  wrote no manifest. Native Slurm now writes `.hsm_manifest.json` as it submits (also when
+  submission stops partway, and a native chain keeps its chunks there), as SSH-Slurm does.
+  `cancel` reads it and runs one `scancel` naming every job, over ssh for a `backend:
+  slurm` remote and on this machine for native Slurm, and reports the ids; a `scancel` that
+  fails or gets no answer exits 1. For a resumable chain it cancels the running chunk and
+  any chunk queued after it, then marks the chain stopped so `hsm sweep advance` won't
+  resubmit it (a launcher still driving the chain would: stop it first). A sweep without a
+  manifest is cancelled as before. **For consumers:** native Slurm sweep dirs now hold a
+  `.hsm_manifest.json`, so `hsm queue mine` links a live native sweep's jobs to it;
+  `hsm sweep advance` refuses a native chain (it re-attaches over SSH only).
 
 ### Removed (2026-10 maintenance pass)
 

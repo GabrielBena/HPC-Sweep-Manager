@@ -212,6 +212,22 @@ class SlurmComputeSource(SlurmBase):
         params_list: list[dict[str, Any]],
         sweep_id: str,
         mode: SubmissionMode = "individual",
+        *args: Any,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Submit, then name the live jobs in ``.hsm_manifest.json``, also when submission stops
+        partway, so that ``hsm sweep cancel`` finds them. A chain's driver writes its own."""
+        try:
+            return await self._submit_batch(params_list, sweep_id, mode, *args, **kwargs)
+        finally:
+            if self.active_jobs and kwargs.get("resumable") is None:
+                await self._write_manifest(list(self.active_jobs), mode, len(params_list))
+
+    async def _submit_batch(
+        self,
+        params_list: list[dict[str, Any]],
+        sweep_id: str,
+        mode: SubmissionMode = "individual",
         spec: ResourceSpec | None = None,
         wandb_group: str | None = None,
         job_name_prefix: str | None = None,
@@ -295,7 +311,7 @@ class SlurmComputeSource(SlurmBase):
         except Exception:
             if job_ids:
                 # Earlier sub-arrays are LIVE — name them so the user can
-                # decide (no manifest machinery on the native-local path).
+                # decide (outside a chain, the manifest names them too).
                 logger.error(
                     f"array submission failed partway — {len(job_ids)} "
                     f"sub-array(s) already live: {', '.join(job_ids)}. "

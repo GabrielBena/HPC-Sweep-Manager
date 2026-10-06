@@ -214,8 +214,7 @@ class ComputeSource(ABC):
     ) -> None:
         """Persist chain state for a detached re-attach (``hsm sweep advance``).
 
-        Default no-op — only SSH-Slurm has an off-box manifest to update; a
-        local Slurm chain is driven in-process and needs nothing persisted.
+        Default no-op; the Slurm sources write ``.hsm_manifest.json``.
         """
         return None
 
