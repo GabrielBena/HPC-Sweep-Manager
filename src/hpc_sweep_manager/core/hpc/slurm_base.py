@@ -156,44 +156,58 @@ class SlurmBase(ComputeSource):
         Only with an explicit partition (the default one isn't known here) that has CPU nodes
         too: excluding every node would leave the job nowhere to run.
         """
-        extra = {directive_flag(k): v for k, v in spec.extra_directives}
-        asks_gpus = spec.gpus or any(k.startswith(("--gres", "--gpu")) for k in extra)
-        if asks_gpus or spec.cpu_only_nodes is False or not spec.partition:
+        if not cpu_only(spec):
             return spec
         part = spec.partition
         if part not in self._gpu_nodes:
             rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
             rows = [line.split()[:2] for line in out.splitlines() if len(line.split()) > 1]
             nodes = {node for node, _ in rows} if rc == 0 else set()
-            gpu = {node for node, gres in rows if gres != "(null)"} if rc == 0 else set()
+            gpu = {node for node, gres in rows if "gpu" in gres} if rc == 0 else set()
             self._gpu_nodes[part] = sorted(gpu) if gpu < nodes else []
             if self._gpu_nodes[part]:
-                logger.info(f"CPU-only jobs exclude {len(gpu)} GPU node(s) of {part}")
+                logger.info(
+                    f"CPU-only jobs exclude {len(gpu)} GPU node(s) of {part} "
+                    f"(spec.cpu_only_nodes: false allows them)"
+                )
         if not self._gpu_nodes[part]:
             return spec
-        extra["--exclude"] = ",".join(
-            filter(None, [extra.get("--exclude"), *self._gpu_nodes[part]])
-        )
+        given = [v for k, v in spec.extra_directives if directive_flag(k) == "--exclude"]
+        extra = {directive_flag(k): v for k, v in spec.extra_directives}
+        extra["--exclude"] = ",".join([*given, *self._gpu_nodes[part]])
         return replace(spec, extra_directives=tuple(extra.items()))
 
     async def _warn_reservations(self, walltime: str | None) -> None:
         """Warn when a maintenance reservation starts before a job of ``walltime`` could end:
-        Slurm then holds the job until the reservation is over (once ~20 h, 1,600 CPUs idle)."""
-        rc, out, _ = await self._sh(["bash", "-c", "date +%FT%T; scontrol show reservations"])
-        try:  # best effort: a check that can't read the cluster's clock says nothing
-            now = datetime.fromisoformat(out.splitlines()[0].strip()) if rc == 0 else None
-        except (ValueError, IndexError):
-            now = None
-        if now is None:
+        Slurm then holds the job until the reservation is over (once ~20 h, 1,600 CPUs idle).
+        Best effort: a check that fails (transport, clock, an unbounded walltime) says nothing."""
+        try:
+            rc, out, _ = await self._sh(["bash", "-c", "date +%FT%T; scontrol show reservations"])
+            if rc != 0:
+                return
+            now = datetime.fromisoformat(out.splitlines()[0].strip())
+            span = parse_walltime(walltime) if walltime else 0
+            hits = blocking_reservations(parse_reservations_output(out), now, span)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"reservation check skipped: {e}")
             return
-        span = parse_walltime(walltime) if walltime else 0
-        for res in blocking_reservations(parse_reservations_output(out), now, span):
+        for res in hits:
             free = int((datetime.fromisoformat(res.start_time) - now).total_seconds())
             hint = f"; a walltime ≤ {format_walltime(free)} would start now" if free > 0 else ""
             logger.warning(
                 f"Reservation {res.name} ({res.start_time} → {res.end_time}) overlaps a "
                 f"{walltime or 'job'} walltime: jobs won't start before {res.end_time}{hint}."
             )
+
+
+# Directives that ask for GPUs or pin placement: such a job keeps every node it could use.
+_PLACED = ("--gres", "--gpu", "--tres-per", "--nodelist", "--constraint", "-w", "-C", "-G")
+
+
+def cpu_only(spec: ResourceSpec) -> bool:
+    """Whether :meth:`SlurmBase._off_gpu_nodes` would keep this job off GPU nodes."""
+    placed = any(directive_flag(k).startswith(_PLACED) for k, _ in spec.extra_directives)
+    return not (spec.gpus or placed or spec.cpu_only_nodes is False or not spec.partition)
 
 
 def blocking_reservations(
@@ -206,7 +220,7 @@ def blocking_reservations(
             start, end = (datetime.fromisoformat(t) for t in (res.start_time, res.end_time))
         except ValueError:
             continue
-        maint = "MAINT" in res.flags or res.nodes == "ALL"
+        maint = "MAINT" in res.flags or "ALL_NODES" in res.flags or res.nodes == "ALL"
         if maint and end > now and start.timestamp() < now.timestamp() + walltime_s:
             hits.append(res)
     return hits
