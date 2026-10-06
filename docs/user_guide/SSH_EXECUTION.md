@@ -448,6 +448,22 @@ was auto-cleaned.
 For the SSH-Slurm variant, see
 [`examples/smoke_ssh_slurm_cli.sh`](../../examples/smoke_ssh_slurm_cli.sh).
 
+## How a task runs on an ssh box
+
+Each task starts detached (`setsid nohup`), in one short command, so it holds no
+ssh channel (sshd's `MaxSessions` no longer caps your parallelism) and outlives
+the launcher:
+
+- Its output goes to `tasks/<task>/hsm.log`, pulled back with its results.
+- Its exit code goes to `tasks/<task>/.hsm_rc`; one command per poll reads every
+  running task's. A task that died without one (killed hard, the box rebooted)
+  is FAILED.
+- A network blip reconnects and changes no status; a launch that fails three
+  times is FAILED and the sweep carries on.
+- **Ctrl-C stops the launcher, not the tasks** (as with Slurm). HSM logs the
+  command that stops them: `ssh <host> kill -TERM -- -<pid> …`. A cancel TERMs
+  the task's whole process group.
+
 ## Troubleshooting
 
 - **`Connection reset by peer` (or a login that hangs) while `ssh my-box`

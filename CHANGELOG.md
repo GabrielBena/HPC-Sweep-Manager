@@ -191,6 +191,18 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
 
+- **ssh tasks run detached (X1, X-2).** Each task held an ssh channel for its whole run, so
+  about 10 concurrent tasks hit sshd's `MaxSessions` and a submit failure aborted the sweep;
+  a dropped connection marked every running task FAILED; a stop killed them all; their
+  output was buffered in the launcher and lost. Now each task starts detached (`setsid
+  nohup`) in one short command and holds no channel. Its output goes to
+  `tasks/<task>/hsm.log` and its exit code to `.hsm_rc`, which one command per poll reads
+  for every running task. A dropped connection reconnects once (with a 30 s keepalive) and
+  changes no status. A launch that fails three times is FAILED and the sweep carries on.
+  **Ctrl-C now leaves started tasks running**, as Slurm jobs do, and logs the command that
+  stops them; a cancel TERMs the task's process group. The remote root must resolve to an
+  absolute path at setup, and the remote sweep dir is never removed while a task runs.
+
 ### Removed (2026-10 maintenance pass)
 
 - **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,

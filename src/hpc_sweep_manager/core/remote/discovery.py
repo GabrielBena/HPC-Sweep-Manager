@@ -44,7 +44,12 @@ def expand_ssh_key_path(ssh_key_path: str) -> str | None:
     return None
 
 
-async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port: int | None = None):
+async def create_ssh_connection(
+    host: str,
+    ssh_key: str | None = None,
+    ssh_port: int | None = None,
+    keepalive_interval: int | None = None,
+):
     """Open an SSH connection, reusing the user's ``~/.ssh/config`` when present.
 
     ``host`` may be a plain hostname, a ``user@host`` string, or an alias
@@ -61,6 +66,8 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     # End a stuck login before sshd's LoginGraceTime does (asyncssh waits 120 s), and
     # bound the whole connect, ProxyJump hops included (asyncssh sets no bound).
     connection_kwargs: dict[str, Any] = {"host": host, "login_timeout": 30, "connect_timeout": 60}
+    if keepalive_interval:  # only for a caller that reconnects: it ends a stalled link
+        connection_kwargs["keepalive_interval"] = keepalive_interval
     if agent_stalled(host):
         connection_kwargs["agent_path"] = None
 

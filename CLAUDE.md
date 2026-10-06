@@ -450,6 +450,13 @@ it's trying to reintroduce them, push back.
    never mixes two sweeps' code. Don't reintroduce a `code` symlink: a task that
    entered a snapshot through it outlives that snapshot's sweep.
 
+15. **ssh tasks are detached; never hold a channel per task (tracker X1).**
+   `SSHComputeSource` starts each task with `setsid nohup` in one short command
+   and reads every running task's `.hsm_rc` with one command per poll. A channel
+   held per task hit sshd's `MaxSessions` at ~10 tasks, and a dropped link
+   failed them all. Status changes only on an exit code (or a task gone without
+   one), never on a connection error; `cleanup()` never kills tasks.
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1

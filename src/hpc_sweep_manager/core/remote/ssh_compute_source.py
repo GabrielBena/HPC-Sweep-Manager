@@ -8,12 +8,16 @@ coroutine — but ships the work to a remote box. The model:
        snapshot (``~/.hsm/runs/<project>/snapshots/<sweep_id>/``); probe
        ``nvidia-smi`` and partition its GPUs into slots; create a per-sweep dir
        on the remote.
-    2. submit_job(): acquire a slot, render the wrapper template, write it to
-       the remote via ``cat >``, ``create_process(bash <path>)``, spawn a
-       monitor coro that releases the slot when the channel exits.
-    3. collect_results(): rsync ``sweeps/<id>/tasks/`` back; on full success
+    2. submit_job(): take a free slot, render the wrapper template, and in one short
+       command write it and start it detached (``setsid nohup``), getting its pid. The
+       task holds no channel and outlives the launcher; its output goes to
+       ``tasks/<task>/hsm.log``.
+    3. update_all_job_statuses(): ONE command per poll for every running task reads its
+       ``.hsm_rc`` (or sees it still running, or gone); a finished task frees its slot.
+       A dropped connection is reopened once and never changes a status.
+    4. collect_results(): rsync ``sweeps/<id>/tasks/`` back; on full success
        ``rm -rf`` the per-sweep remote dir and its code snapshot.
-    4. cleanup(): cancel any leftover processes, close the connection.
+    5. cleanup(): close the connection. Tasks still running keep running.
 
 The class delegates command-shape decisions to pure helpers in
 :mod:`push_exec` and parses GPU output via :mod:`gpu_probe`, so it stays
@@ -26,11 +30,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shlex
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import asyncssh
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
@@ -50,6 +57,18 @@ from .push_exec import (
 )
 
 logger = logging.getLogger(__name__)
+
+LAUNCH_TRIES = 3  # a task whose launch fails this often is FAILED
+
+# One poll for every running task: `p <task dir> <pid> <job id>` prints "<job> rc <code>",
+# "<job> run" or "<job> gone" (dead without an exit code: killed hard, or the host rebooted).
+# The second rc check closes the race with a task that ends between the first and `kill -0`.
+_POLL_FN = (
+    'p() { if [ -f "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
+    'elif kill -0 "$2" 2>/dev/null; then echo "$3 run"; '
+    'elif [ -f "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
+    'else echo "$3 gone"; fi; }'
+)
 
 
 class SSHComputeSource(ComputeSource):
@@ -124,18 +143,24 @@ class SSHComputeSource(ComputeSource):
         self._slot_count: int = max_parallel_jobs
         self._run_prefix: str = "python"
 
-        # Job bookkeeping
-        self._procs: dict[str, Any] = {}
-        self._monitors: dict[str, asyncio.Task] = {}
+        # Job bookkeeping: each running task's pid, remote task dir and slot
+        self._pids: dict[str, int] = {}
+        self._task_dirs: dict[str, str] = {}
+        self._slots: dict[str, Any] = {}
+        self.slot_poll_s = 10.0  # how often a submit waiting for a slot polls
         self._job_counter: int = 0
         self._counter_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
-        """Open the persistent asyncssh connection. Overridden in tests."""
+        """Open the persistent asyncssh connection. Overridden in tests.
+
+        With a keepalive: a dead link closes within ~90 s, and :meth:`_run` reconnects."""
         from .discovery import create_ssh_connection
 
-        return await create_ssh_connection(self.host, self.ssh_key, self.ssh_port)
+        return await create_ssh_connection(
+            self.host, self.ssh_key, self.ssh_port, keepalive_interval=30
+        )
 
     async def _run_rsync(self, cmd: list[str]) -> int:
         """Run an rsync command and return its exit code. Overridden in tests."""
@@ -166,8 +191,10 @@ class SSHComputeSource(ComputeSource):
             return path
         result = await self._conn.run(f"echo {path}", check=False)
         lines = (result.stdout or "").strip().splitlines()
-        first = lines[0].strip() if lines else ""
-        return first or path
+        resolved = lines[-1].strip() if lines else ""  # the last line: rc-file noise comes first
+        if not resolved.startswith("/"):
+            raise RuntimeError(f"could not resolve {path!r} on {self.host} (got {resolved!r})")
+        return resolved
 
     # ------------------------------------------------------------------ setup
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
@@ -190,7 +217,12 @@ class SSHComputeSource(ComputeSource):
         # `output.dir=~/path` (or `/scratch/$USER/...`) passed to python inside
         # quoted COMMAND strings do NOT — nor does the locally-run rsync. One
         # remote-shell echo at setup gives a single absolute path used everywhere.
-        resolved_root = await self._resolve_remote_path(self.remote_root)
+        try:
+            resolved_root = await self._resolve_remote_path(self.remote_root)
+        except RuntimeError as e:  # every remote command below needs an absolute path
+            logger.error(f"SSHComputeSource {self.name}: {e}")
+            self.stats.health_status = "unhealthy"
+            return False
         project_root = f"{resolved_root}/{self._project_name}"
         self._remote_code_dir = f"{project_root}/snapshots/{sweep_id}"
         self._remote_sweep_dir = f"{project_root}/sweeps/{sweep_id}"
@@ -282,8 +314,7 @@ class SSHComputeSource(ComputeSource):
         local_task_dir.mkdir(parents=True, exist_ok=True)
         remote_task_dir = f"{self._remote_sweep_dir}/tasks/{local_task_dir.name}"
 
-        # Block here when all slots are busy — natural back-pressure.
-        slot = await self._slot_queue.get()
+        slot = await self._acquire_slot()
         cuda_visible = ",".join(str(i) for i in slot) if slot else None
 
         script_content = render_template(
@@ -302,126 +333,106 @@ class SSHComputeSource(ComputeSource):
             script_path=self.script_path,
             uses_conda=bool(self.conda_env),
         )
-        remote_script_path = f"{self._remote_sweep_dir}/scripts/{job_name}.sh"
-
-        try:
-            await self._conn.run(
-                f"cat > {remote_script_path} && chmod +x {remote_script_path}",
-                input=script_content,
-                check=False,
-            )
-            proc = await self._conn.create_process(f"bash {remote_script_path}")
-        except BaseException:
-            self._slot_queue.put_nowait(slot)
-            raise
-
-        self._procs[job_id] = proc
+        script = shlex.quote(f"{self._remote_sweep_dir}/scripts/{job_name}.sh")
+        task = shlex.quote(remote_task_dir)
+        # Idempotent: a retry after a lost reply finds the task already running by its pid file
+        # (and never rewrites a script bash is reading).
+        launch = (
+            f'if [ -f {task}/.hsm_pid ] && kill -0 "$(cat {task}/.hsm_pid)" 2>/dev/null; '
+            f"then cat {task}/.hsm_pid; else mkdir -p {task} && rm -f {task}/.hsm_rc && "
+            f"cat > {script} && {{ setsid nohup bash {script} > {task}/hsm.log 2>&1 "
+            f"< /dev/null & echo $!; }}; fi"
+        )
+        now = datetime.now()
         self.active_jobs[job_id] = JobInfo(
             job_id=job_id,
             job_name=job_name,
             params=params,
             source_name=self.name,
             status="RUNNING",
-            submit_time=datetime.now(),
-            start_time=datetime.now(),
+            submit_time=now,
+            start_time=now,
             task_dir=str(local_task_dir),
         )
+        self._slots[job_id], self._task_dirs[job_id] = slot, remote_task_dir
         self.stats.total_submitted += 1
-        self._monitors[job_id] = asyncio.create_task(self._monitor(job_id, proc, slot))
-        gpu_msg = f" on GPU(s) {cuda_visible}" if cuda_visible else ""
-        logger.info(f"Submitted ssh job {job_id} ({job_name}) to {self.host}{gpu_msg}")
+        for attempt in range(1, LAUNCH_TRIES + 1):
+            try:
+                out = ((await self._run(launch, input=script_content)).stdout or "").strip()
+            except (OSError, asyncssh.Error) as e:
+                out = repr(e)
+            if out.isdigit():
+                self._pids[job_id] = int(out)
+                gpu_msg = f" on GPU(s) {cuda_visible}" if cuda_visible else ""
+                logger.info(f"Started {job_name} ({job_id}) on {self.host}{gpu_msg}, pid {out}")
+                return job_id
+            logger.warning(f"{job_name}: launch {attempt}/{LAUNCH_TRIES} on {self.host}: {out!r}")
+        self._finish(job_id, "FAILED")
         return job_id
 
-    async def _monitor(self, job_id: str, proc: Any, slot) -> None:
-        try:
-            result = await proc.wait()
-            exit_status = getattr(result, "exit_status", None)
-            if exit_status is None:
-                # killed by signal / channel torn down → treat as failure
-                exit_status = -1
-            status = "COMPLETED" if exit_status == 0 else "FAILED"
-            existing = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
-            if existing and existing.status == "CANCELLED":
-                status = "CANCELLED"
-            if job_id in self.active_jobs:
-                self.update_job_status(job_id, status)
-            logger.info(f"SSH job {job_id} finished status={status} exit_status={exit_status}")
-        finally:
-            self._procs.pop(job_id, None)
+    async def _acquire_slot(self) -> Any:
+        """A free slot; while none is, poll, so that finished tasks free theirs."""
+        assert self._slot_queue is not None
+        while self._slot_queue.empty():
+            await asyncio.sleep(self.slot_poll_s)
+            await self.update_all_job_statuses()
+        return self._slot_queue.get_nowait()
+
+    def _finish(self, job_id: str, status: str) -> None:
+        """Mark a job terminal and free its slot."""
+        self.update_job_status(job_id, status)
+        if job_id in self._slots:
             assert self._slot_queue is not None
-            self._slot_queue.put_nowait(slot)
+            self._slot_queue.put_nowait(self._slots.pop(job_id))
+
+    async def _run(self, cmd: str, input: str | None = None) -> Any:
+        """One remote command; a dropped connection is reopened once (and changes no status)."""
+        try:
+            return await self._conn.run(cmd, input=input, check=False)
+        except (OSError, asyncssh.Error) as e:
+            logger.warning(f"{self.host}: connection lost ({e!r}); reconnecting")
+            self._conn = await self._open_connection()
+            return await self._conn.run(cmd, input=input, check=False)
 
     # ----------------------------------------------------------------- status
+    async def update_all_job_statuses(self) -> None:
+        """One remote command reads every running task's state (see :data:`_POLL_FN`)."""
+        live = [job for job in self.active_jobs if job in self._pids]
+        if not live:
+            return
+        calls = "; ".join(
+            f"p {shlex.quote(self._task_dirs[j])} {self._pids[j]} {shlex.quote(j)}" for j in live
+        )
+        try:
+            out = (await self._run(f"{_POLL_FN}; {calls}")).stdout or ""
+        except (OSError, asyncssh.Error) as e:
+            logger.warning(f"{self.host}: status poll failed ({e!r}); job states kept")
+            return
+        for job, state, *rc in (line.split() for line in out.splitlines() if " " in line):
+            if job not in self.active_jobs or state == "run":
+                continue
+            if state == "gone":
+                logger.warning(f"{job}: its process is gone without an exit code (killed?)")
+            self._finish(job, "COMPLETED" if rc == ["0"] else "FAILED")
+
     async def get_job_status(self, job_id: str) -> str:
-        if job_id in self.active_jobs:
-            proc = self._procs.get(job_id)
-            if proc is None:
-                pass
-            elif getattr(proc, "exit_status", None) is None:
-                return "RUNNING"
-            else:
-                status = "COMPLETED" if proc.exit_status == 0 else "FAILED"
-                self.update_job_status(job_id, status)
-                return status
-        if job_id in self.completed_jobs:
-            return self.completed_jobs[job_id].status
-        return "UNKNOWN"
+        """The state the last poll saw."""
+        info = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
+        return info.status if info else "UNKNOWN"
 
     async def cancel_job(self, job_id: str) -> bool:
-        proc = self._procs.get(job_id)
-        if proc is None:
+        """TERM the task's whole process group (the wrapper and the training process)."""
+        pid = self._pids.get(job_id)
+        if pid is None or job_id not in self.active_jobs:
             return False
         try:
-            proc.terminate()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"terminate() on ssh job {job_id} raised: {e}")
+            # The group exists once the task has called setsid; just after launch, the pid does.
+            await self._run(f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid}")
+        except (OSError, asyncssh.Error) as e:
+            logger.warning(f"Cancelling {job_id} on {self.host} failed: {e!r}")
             return False
-
-        if job_id in self.active_jobs:
-            self.update_job_status(job_id, "CANCELLED")
-
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except TimeoutError:
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except TimeoutError:  # pragma: no cover
-                logger.warning(f"SSH job {job_id} did not exit after kill()")
+        self._finish(job_id, "CANCELLED")
         return True
-
-    async def wait_for_all(
-        self,
-        poll_interval: float = 5.0,
-        on_progress=None,
-    ) -> dict[str, str]:
-        """Await per-job monitor tasks directly.
-
-        Same pattern as :class:`LocalComputeSource` — the monitor coroutines
-        are a stronger signal than polling :meth:`get_job_status`, because
-        each monitor is what actually transitions a job out of
-        ``active_jobs``.
-        """
-        pending_ids = list(self.active_jobs.keys())
-        if not pending_ids:
-            final = {jid: info.status for jid, info in self.completed_jobs.items()}
-            if on_progress is not None:
-                on_progress(len(final), max(len(final), 1))
-            return final
-
-        monitors = [self._monitors[jid] for jid in pending_ids if jid in self._monitors]
-        total = len(pending_ids) + len(self.completed_jobs)
-        if on_progress is not None:
-            on_progress(len(self.completed_jobs), max(total, 1))
-
-        for fut in asyncio.as_completed(monitors):
-            await fut
-            if on_progress is not None:
-                on_progress(len(self.completed_jobs), max(total, 1))
-        return {jid: info.status for jid, info in self.completed_jobs.items()}
 
     # ----------------------------------------------------------- collection
     async def collect_results(
@@ -443,10 +454,10 @@ class SSHComputeSource(ComputeSource):
             return False
 
         any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
-        if not any_failed and not self.keep_remote_on_success:
+        if not any_failed and not self.keep_remote_on_success and not self.active_jobs:
             try:
                 dirs = [self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id)]
-                await self._conn.run("rm -rf " + " ".join(d for d in dirs if d), check=False)
+                await self._run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
@@ -488,11 +499,13 @@ class SSHComputeSource(ComputeSource):
 
     # --------------------------------------------------------------- cleanup
     async def cleanup(self) -> None:
-        for job_id in list(self._procs.keys()):
-            await self.cancel_job(job_id)
-        if self._monitors:
-            await asyncio.gather(*self._monitors.values(), return_exceptions=True)
-        self._monitors.clear()
+        """Close the connection. Tasks still running keep running (as Slurm jobs do)."""
+        if running := [self._pids[j] for j in self.active_jobs if j in self._pids]:
+            groups = " ".join(f"-{pid}" for pid in running)
+            logger.warning(
+                f"{len(running)} task(s) keep running on {self.host}, detached; to stop them: "
+                f"ssh {self.host} kill -TERM -- {groups}"
+            )
         if self._conn is not None:
             try:
                 self._conn.close()

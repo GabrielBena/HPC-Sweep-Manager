@@ -28,84 +28,44 @@ NVIDIA_SMI_SAMPLE_4_GPUS = (
 
 
 class _Result:
-    """Mimic asyncssh's `SSHCompletedProcess` / process result enough for our use."""
+    """Mimic asyncssh's ``SSHCompletedProcess`` enough for our use."""
 
-    def __init__(
-        self,
-        returncode: int = 0,
-        stdout: str = "",
-        stderr: str = "",
-        exit_status: int | None = None,
-    ):
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-        # asyncssh's create_process().wait() returns a result with `exit_status`,
-        # which is what _monitor reads.
-        self.exit_status = exit_status if exit_status is not None else returncode
-
-
-class FakeProc:
-    """Minimal stand-in for asyncssh.SSHClientProcess.
-
-    Call :meth:`finish` with an exit status to release the awaiting
-    :meth:`wait`. Mirrors enough of the real surface that
-    ``SSHComputeSource._monitor`` and ``cancel_job`` can drive it.
-    """
-
-    def __init__(self, cmd: str):
-        self.cmd = cmd
-        self._done = asyncio.Event()
-        self.exit_status: int | None = None
-        self.terminated = False
-        self.killed = False
-
-    async def wait(self) -> _Result:
-        await self._done.wait()
-        return _Result(returncode=self.exit_status or 0, exit_status=self.exit_status)
-
-    def finish(self, exit_status: int = 0) -> None:
-        if self.exit_status is None:
-            self.exit_status = exit_status
-        self._done.set()
-
-    def terminate(self) -> None:
-        self.terminated = True
-        # Signal a non-zero exit so the monitor sees it as FAILED (which
-        # cancel_job overrides to CANCELLED).
-        if self.exit_status is None:
-            self.exit_status = -15
-        self._done.set()
-
-    def kill(self) -> None:
-        self.killed = True
-        if self.exit_status is None:
-            self.exit_status = -9
-        self._done.set()
 
 
 class FakeConn:
-    """Records run() / create_process() calls so tests can assert on them."""
+    """Records run() calls. A launch answers a pid; a poll answers each job's ``states``
+    entry ("run" until a test sets "rc 0", "rc 2" or "gone")."""
 
     def __init__(self, *, gpu_csv: str = "", nvidia_smi_rc: int = 0):
         self.run_calls: list[dict[str, Any]] = []
-        self.processes: list[FakeProc] = []
+        self.states: dict[str, str] = {}
         self.closed = False
         self._gpu_csv = gpu_csv
         self._nvidia_smi_rc = nvidia_smi_rc
+        self._pid = 4241
 
     async def run(self, cmd: str, *, input: str | None = None, check: bool = False) -> _Result:
         self.run_calls.append({"cmd": cmd, "input": input, "check": check})
         if "nvidia-smi" in cmd:
             return _Result(returncode=self._nvidia_smi_rc, stdout=self._gpu_csv)
+        if cmd.startswith("echo ~"):  # the remote shell expanding remote_root
+            return _Result(stdout="/home/fake" + cmd[len("echo ~") :] + "\n")
         if cmd == "date":
             return _Result(returncode=0, stdout="Mon Jan 1 00:00:00 UTC 2026\n")
+        if "setsid nohup" in cmd:
+            self._pid += 1
+            return _Result(stdout=f"{self._pid}\n")
+        if cmd.startswith("p() {"):
+            jobs = [call.split()[-1] for call in cmd.split("; ") if call.startswith("p ")]
+            return _Result(stdout="".join(f"{j} {self.states.get(j, 'run')}\n" for j in jobs))
         return _Result(returncode=0, stdout="")
 
-    async def create_process(self, cmd: str) -> FakeProc:
-        proc = FakeProc(cmd)
-        self.processes.append(proc)
-        return proc
+    def launches(self) -> list[dict[str, Any]]:
+        return [c for c in self.run_calls if "setsid nohup" in c["cmd"]]
 
     def close(self) -> None:
         self.closed = True
@@ -270,6 +230,19 @@ class TestSetup:
         assert src._remote_sweep_dir.startswith("/home/gbena/.hsm/runs/")
         assert "~" not in src._remote_sweep_dir
 
+    @pytest.mark.parametrize(("echo", "ok"), [("", False), ("motd\n/home/x/r\n", True)])
+    async def test_setup_needs_an_absolute_root(self, tmp_path, echo, ok):
+        # Every remote command quotes its paths, so a "~" left unexpanded would never expand;
+        # rc-file noise comes before the path.
+        class EchoConn(FakeConn):
+            async def run(self, cmd, *, input=None, check=False):
+                if cmd.startswith("echo "):
+                    return _Result(stdout=echo)
+                return await super().run(cmd, input=input, check=check)
+
+        src = _make_src(tmp_path, fake_conn=EchoConn())
+        assert await src.setup(tmp_path / "sweep", "test_sweep") is ok
+
     async def test_setup_absolute_remote_root_unchanged(self, tmp_path):
         # An already-absolute remote_root should NOT trigger the $HOME probe.
         fake_conn = FakeConn()
@@ -354,27 +327,18 @@ class TestSubmit:
         with pytest.raises(RuntimeError, match="not set up"):
             await src.submit_job({"x": 1}, "task_001", "test_sweep")
 
-    async def test_submit_uploads_script_and_launches(self, tmp_path):
+    async def test_one_command_writes_the_script_and_starts_it_detached(self, tmp_path):
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn, max_parallel_jobs=2)
         await src.setup(tmp_path / "sweep", "test_sweep")
 
         job_id = await src.submit_job({"lr": 0.01}, "task_001", "test_sweep")
-        assert job_id in src.active_jobs
+        assert job_id in src.active_jobs and src._pids[job_id] == 4242
 
-        # The script-upload `cat > … && chmod +x …` is in run_calls with input set.
-        uploads = [c for c in fake_conn.run_calls if c["input"] is not None]
-        assert len(uploads) == 1
-        assert "cat >" in uploads[0]["cmd"]
-        # Script content should contain the rendered hydra args.
-        content = uploads[0]["input"]
-        assert "lr=0.01" in content
-        # The wrapper invokes our run_prefix.
-        assert "conda run -n lab python" in content
-
-        # create_process called once with `bash <remote_script_path>`.
-        assert len(fake_conn.processes) == 1
-        assert fake_conn.processes[0].cmd.startswith("bash ")
+        (launch,) = fake_conn.launches()  # one channel, released at once
+        assert "cat >" in launch["cmd"] and "/tasks/task_001/hsm.log" in launch["cmd"]
+        assert "lr=0.01" in launch["input"]
+        assert "conda run -n lab python" in launch["input"]
 
     async def test_submit_picks_gpu_slot_into_template(self, tmp_path):
         fake_conn = FakeConn(gpu_csv=NVIDIA_SMI_SAMPLE_4_GPUS)
@@ -386,43 +350,49 @@ class TestSubmit:
         )
         await src.setup(tmp_path / "sweep", "test_sweep")
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
-
-        uploads = [c for c in fake_conn.run_calls if c["input"] is not None]
         # First slot popped is [0]; CUDA_VISIBLE_DEVICES should be set to "0".
-        assert "CUDA_VISIBLE_DEVICES=0" in uploads[0]["input"]
+        assert "CUDA_VISIBLE_DEVICES=0" in fake_conn.launches()[0]["input"]
 
     async def test_slot_back_pressure(self, tmp_path):
-        """Third submission blocks until a slot frees up."""
+        """The third submission waits, polling, until a task finishes and frees its slot."""
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn, max_parallel_jobs=2)
+        src.slot_poll_s = 0.01
         await src.setup(tmp_path / "sweep", "test_sweep")
 
-        await src.submit_job({"i": 1}, "task_001", "test_sweep")
+        first = await src.submit_job({"i": 1}, "task_001", "test_sweep")
         await src.submit_job({"i": 2}, "task_002", "test_sweep")
         third = asyncio.create_task(src.submit_job({"i": 3}, "task_003", "test_sweep"))
         await asyncio.sleep(0.05)
-        assert not third.done(), "third submit should wait on slot"
+        assert not third.done(), "third submit should wait on a slot"
 
-        # Finish job #1 → frees a slot → third completes.
-        fake_conn.processes[0].finish(exit_status=0)
+        fake_conn.states[first] = "rc 0"
         await asyncio.wait_for(third, timeout=1.0)
-        assert third.done()
-        # Drain the rest so cleanup doesn't await indefinitely.
-        for p in fake_conn.processes:
-            p.finish(exit_status=0)
-        await src.wait_for_all()
+        assert src.completed_jobs[first].status == "COMPLETED"
 
-    async def test_monitor_moves_active_to_completed(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("state", "status"), [("rc 0", "COMPLETED"), ("rc 2", "FAILED"), ("gone", "FAILED")]
+    )
+    async def test_a_poll_settles_finished_jobs(self, tmp_path, state, status):
         fake_conn = FakeConn()
-        src = _make_src(tmp_path, fake_conn=fake_conn, max_parallel_jobs=2)
+        src = _make_src(tmp_path, fake_conn=fake_conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
-
         job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        assert job_id in src.active_jobs
-        fake_conn.processes[0].finish(exit_status=0)
-        await src.wait_for_all()
-        assert job_id in src.completed_jobs
-        assert src.completed_jobs[job_id].status == "COMPLETED"
+        await src.update_all_job_statuses()
+        assert job_id in src.active_jobs  # "run"
+        fake_conn.states[job_id] = state
+        await src.wait_for_all(poll_interval=0)
+        assert src.completed_jobs[job_id].status == status
+
+    async def test_one_command_per_poll_whatever_the_task_count(self, tmp_path):
+        fake_conn = FakeConn()
+        src = _make_src(tmp_path, fake_conn=fake_conn, max_parallel_jobs=8)
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        for i in range(8):
+            await src.submit_job({"i": i}, f"task_{i:03d}", "test_sweep")
+        before = len(fake_conn.run_calls)
+        await src.update_all_job_statuses()
+        assert len(fake_conn.run_calls) == before + 1
 
     async def test_conda_env_emits_init_source_block(self, tmp_path):
         # conda_env="lab" → the rendered script must `. <conda.sh>` before
@@ -433,8 +403,7 @@ class TestSubmit:
         await src.setup(tmp_path / "sweep", "test_sweep")
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
-        uploads = [c for c in fake_conn.run_calls if c["input"] is not None]
-        content = uploads[0]["input"]
+        content = fake_conn.launches()[0]["input"]
         assert "miniconda3/etc/profile.d/conda.sh" in content
         # The source loop runs BEFORE the actual conda invocation.
         idx_source = content.index("conda.sh")
@@ -456,19 +425,56 @@ class TestSubmit:
         await src.setup(tmp_path / "sweep", "test_sweep")
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
-        uploads = [c for c in fake_conn.run_calls if c["input"] is not None]
-        content = uploads[0]["input"]
+        content = fake_conn.launches()[0]["input"]
         assert "conda.sh" not in content
         assert "/usr/bin/python3 train.py" in content
 
-    async def test_failed_exit_marks_failed(self, tmp_path):
-        fake_conn = FakeConn()
-        src = _make_src(tmp_path, fake_conn=fake_conn)
+
+class FlakyConn(FakeConn):
+    """A FakeConn whose next ``drops`` commands raise as a dead connection would."""
+
+    def __init__(self, drops: int = 0, **kw):
+        super().__init__(**kw)
+        self.drops = drops
+
+    async def run(self, cmd: str, *, input: str | None = None, check: bool = False) -> _Result:
+        if self.drops and not cmd.startswith(("echo", "mkdir", "nvidia-smi")):
+            self.drops -= 1
+            raise ConnectionResetError("connection lost")
+        return await super().run(cmd, input=input, check=check)
+
+
+class TestConnectionLoss:
+    """Tracker S11 (ssh side): a blip reconnects once and never changes a status."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_a_dropped_poll_reconnects_and_keeps_states(self, tmp_path):
+        conn = FlakyConn()
+        src = _make_src(tmp_path, fake_conn=conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
         job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        fake_conn.processes[0].finish(exit_status=2)
-        await src.wait_for_all()
+        conn.drops = 1
+        await src.update_all_job_statuses()  # dropped, reopened, polled
+        assert src.active_jobs[job_id].status == "RUNNING"
+
+    async def test_a_dead_link_keeps_states(self, tmp_path):
+        conn = FlakyConn()
+        src = _make_src(tmp_path, fake_conn=conn)
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
+        conn.drops = 2  # the reconnect's command fails too
+        await src.update_all_job_statuses()
+        assert src.active_jobs[job_id].status == "RUNNING"
+
+    async def test_a_launch_that_keeps_failing_is_failed_and_frees_its_slot(self, tmp_path):
+        conn = FlakyConn()
+        src = _make_src(tmp_path, fake_conn=conn, max_parallel_jobs=1)
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        conn.drops = 6  # three launches, each with its one reconnect
+        job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
         assert src.completed_jobs[job_id].status == "FAILED"
+        assert src._slot_queue.qsize() == 1
 
 
 # --------------------------------------------------------------------- cancel
@@ -477,18 +483,16 @@ class TestSubmit:
 class TestCancel:
     pytestmark = pytest.mark.asyncio
 
-    async def test_cancel_marks_cancelled(self, tmp_path):
+    async def test_cancel_terms_the_process_group(self, tmp_path):
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
         job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
-        proc = fake_conn.processes[0]
-        ok = await src.cancel_job(job_id)
-        assert ok is True
-        assert proc.terminated is True
-        await src.wait_for_all()
+        assert await src.cancel_job(job_id) is True
+        assert fake_conn.run_calls[-1]["cmd"].startswith("kill -TERM -- -4242")
         assert src.completed_jobs[job_id].status == "CANCELLED"
+        assert await src.cancel_job(job_id) is False  # already done
 
 
 # ------------------------------------------------------------------- collect
@@ -515,48 +519,31 @@ class TestCollectResults:
         assert pull[-2].startswith("anahita:") and pull[-2].endswith("/tasks/")
         assert pull[-1].endswith("/tasks/")
 
-    async def test_collect_cleans_remote_on_success(self, tmp_path):
+    async def _collect_after(self, tmp_path, state, **kw) -> list[str]:
         fake_conn = FakeConn()
-        src = _make_src(tmp_path, fake_conn=fake_conn)
+        src = _make_src(tmp_path, fake_conn=fake_conn, **kw)
         await src.setup(tmp_path / "sweep", "test_sweep")
-        await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        fake_conn.processes[0].finish(exit_status=0)
-        await src.wait_for_all()
-
-        # Spot the rm -rf call in conn.run history.
+        job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
+        if state:
+            fake_conn.states[job_id] = state
+            await src.wait_for_all(poll_interval=0)
         before = len(fake_conn.run_calls)
         await src.collect_results()
-        new_calls = fake_conn.run_calls[before:]
-        rm_calls = [c for c in new_calls if c["cmd"].startswith("rm -rf")]
-        assert len(rm_calls) == 1
-        assert "/sweeps/test_sweep" in rm_calls[0]["cmd"]
+        return [c["cmd"] for c in fake_conn.run_calls[before:] if c["cmd"].startswith("rm -rf")]
+
+    async def test_collect_cleans_remote_on_success(self, tmp_path):
+        (rm,) = await self._collect_after(tmp_path, "rc 0")
+        assert "/sweeps/test_sweep" in rm
 
     async def test_collect_keeps_remote_on_failure(self, tmp_path):
-        fake_conn = FakeConn()
-        src = _make_src(tmp_path, fake_conn=fake_conn)
-        await src.setup(tmp_path / "sweep", "test_sweep")
-        await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        fake_conn.processes[0].finish(exit_status=1)
-        await src.wait_for_all()
-
-        before = len(fake_conn.run_calls)
-        await src.collect_results()
-        new_calls = fake_conn.run_calls[before:]
-        rm_calls = [c for c in new_calls if c["cmd"].startswith("rm -rf")]
-        assert not rm_calls, "must not rm remote sweep dir when a job FAILED"
+        assert not await self._collect_after(tmp_path, "rc 1")
 
     async def test_keep_remote_on_success_flag(self, tmp_path):
-        fake_conn = FakeConn()
-        src = _make_src(tmp_path, fake_conn=fake_conn, keep_remote_on_success=True)
-        await src.setup(tmp_path / "sweep", "test_sweep")
-        await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        fake_conn.processes[0].finish(exit_status=0)
-        await src.wait_for_all()
+        assert not await self._collect_after(tmp_path, "rc 0", keep_remote_on_success=True)
 
-        before = len(fake_conn.run_calls)
-        await src.collect_results()
-        new_calls = fake_conn.run_calls[before:]
-        assert not [c for c in new_calls if c["cmd"].startswith("rm -rf")]
+    async def test_never_removes_the_dir_of_a_running_task(self, tmp_path):
+        # e.g. a collect after an interrupted wait: the task is still running there.
+        assert not await self._collect_after(tmp_path, None)
 
 
 # -------------------------------------------------------------------- health
@@ -596,11 +583,11 @@ class TestCleanup:
         assert fake_conn.closed is True
         assert src._conn is None
 
-    async def test_cleanup_cancels_active_jobs(self, tmp_path):
+    async def test_cleanup_leaves_running_tasks_running(self, tmp_path, caplog):
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
-        proc = fake_conn.processes[0]
         await src.cleanup()
-        assert proc.terminated is True
+        assert not [c for c in fake_conn.run_calls if c["cmd"].startswith("kill")]
+        assert "ssh anahita kill -TERM -- -4242" in caplog.text
