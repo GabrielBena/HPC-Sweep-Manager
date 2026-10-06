@@ -135,6 +135,41 @@ class TestRemoteAliasGuards:
         assert "did you mean 'uzh'" in out
         assert "Execution backend" not in out
 
+    def test_null_remotes_block_keeps_bare_alias(self, tmp_path, monkeypatch):
+        # `remotes:` with no entries loads as None — must not AttributeError.
+        _make_project(tmp_path)
+        cfg_path = tmp_path / ".hsm" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["distributed"]["remotes"] = None
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        monkeypatch.chdir(tmp_path)
+        out = _dry_run(remote_alias="my-box")
+        assert "Execution backend" in out and "DRY RUN" in out
+
+
+class TestSpecBlockErrors:
+    @pytest.mark.parametrize("mode,block", [("local", "local"), ("array", "slurm")])
+    def test_bad_value_is_one_clean_message(self, tmp_path, monkeypatch, mode, block):
+        # C2 review: spec_from_cli sat outside the CLI's error handling, so a bad
+        # value printed a traceback (twice) instead of the red one-liner.
+        from click.testing import CliRunner
+
+        _make_project(tmp_path)
+        cfg_path = tmp_path / ".hsm" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg[block] = {"cpus_per_task": 0}
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        monkeypatch.chdir(tmp_path)
+        buf = io.StringIO()
+        obj = {"console": Console(file=buf, width=200), "logger": logging.getLogger("t")}
+        args = ["run", "-c", "sweeps/sweep.yaml", "--mode", mode, "--dry-run"]
+        result = CliRunner().invoke(sweep_cli.sweep_cmd, args, obj=obj)
+        out = buf.getvalue()
+        assert result.exception is None, result.exception
+        assert f"`{block}:` block: ResourceSpec: cpus_per_task must be >= 1" in out
+        assert "Traceback" not in out + result.output
+        assert "Execution backend" not in out
+
 
 class TestRemoteModeReconciliation:
     """run_cmd reconciles `--remote <alias> --mode array|individual` into

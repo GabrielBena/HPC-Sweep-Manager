@@ -1263,8 +1263,13 @@ class TestFactory:
             )
         assert (src.default_spec.account, src.default_spec.qos) == ("lab", "medium")
         assert dict(src.default_spec.extra_directives) == {"--exclude": "gpu[01-02]"}
-        messages = " ".join(r.message for r in caplog.records)
-        assert "cpus" in messages and "up one level" in messages
+        messages = [r.message for r in caplog.records]
+        assert any("['cpus']" in m for m in messages)
+        # Only the "move it up" hint mentions speed_factors — no generic duplicate.
+        assert [m for m in messages if "speed_factors" in m] == [
+            m for m in messages if "up one level" in m
+        ]
+        assert len([m for m in messages if "up one level" in m]) == 1
 
     def test_spec_invalid_value_raises(self, tmp_path):
         with pytest.raises(ValueError, match="remote 'uzh' spec: .*gpu_type requires gpus"):

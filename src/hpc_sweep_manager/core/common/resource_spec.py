@@ -76,9 +76,8 @@ class ResourceSpec:
     def from_dict(cls, data: dict[str, Any] | None, where: str = "spec") -> ResourceSpec:
         """Build a spec from a plain dict, converting list/dict fields to tuples.
 
-        Unknown keys are dropped with a warning naming them — one typo must not
-        cost the rest of the block. Invalid values of known keys raise a
-        ``ValueError`` naming ``where`` (the config block they came from).
+        Unknown keys are dropped with a warning (a typo must not cost the whole
+        block); invalid values raise ``ValueError`` naming ``where``, the block.
         """
         if not data:
             return cls()

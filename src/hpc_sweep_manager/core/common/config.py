@@ -406,9 +406,8 @@ class HSMConfig:
         The ``slurm:`` block in ``.hsm/config.yaml`` is the canonical place to
         express HPC fields the opaque ``--resources`` CLI string can't reach:
         ``gpu_type``, ``modules``, ``pre_script``, ``account``,
-        ``extra_directives``. All keys are optional. Sibling keys like
-        ``qos_whitelist`` are stripped before construction; other unknown keys
-        are dropped with a warning, and invalid values raise ``ValueError``.
+        ``extra_directives``. All keys are optional. Extra (non-ResourceSpec)
+        keys like ``qos_whitelist`` are stripped before construction.
 
         Example::
 
@@ -593,11 +592,8 @@ class HSMConfig:
 
 
 def _mkdir_fresh(parent: Path, sweep_id: str) -> Path:
-    """Create ``parent/<sweep_id>`` exclusively, suffixing ``_2``, ``_3``, … on collision.
-
-    Sweep ids have 1-second resolution: without this, two same-second launches
-    share their local and remote sweep dirs (and one's cleanup deletes the other's).
-    """
+    """Create ``parent/<sweep_id>`` exclusively, suffixing ``_2``, ``_3``, … on collision
+    (1-second ids: same-second launches would share, and clean up, one sweep dir)."""
     path, n = parent / sweep_id, 1
     while True:
         try:
@@ -626,9 +622,8 @@ def resolve_sweep_dir(
 
     The returned ``Path`` is the *target* (where data actually lives),
     not the symlink, so callers using it for ``mkdir``, ``glob``, etc.
-    operate on the canonical location. It is always a NEW dir: if
-    ``<sweep_id>`` is taken it becomes ``<sweep_id>_2`` (``_3``, …), so the
-    caller must take the returned dir's ``.name`` as the sweep id.
+    operate on the canonical location. It is always a NEW dir (``<sweep_id>_2``
+    … if taken): take its ``.name`` as the sweep id.
 
     Raises:
         FileNotFoundError: when ``local.sweeps_root`` is set but resolves
@@ -660,8 +655,8 @@ def resolve_sweep_dir(
     link_parent.mkdir(parents=True, exist_ok=True)
     link = link_parent / target.name
 
-    # If a stale symlink already exists at the link path (e.g., its old
-    # target was deleted), replace it with one pointing at the new
+    # If a stale symlink already exists at the link path (e.g., from a
+    # collision on sweep_id), replace it with one pointing at the new
     # target. Never touch a real directory living at the link path —
     # that would be data loss.
     if link.is_symlink():

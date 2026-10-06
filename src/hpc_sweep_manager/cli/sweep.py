@@ -475,8 +475,7 @@ def _run_sweep_via_orchestrator(
     remote_resumable_block = None
     if remote_alias and hsm_config is not None:
         remote_resumable_block = (
-            hsm_config.config_data.get("distributed", {})
-            .get("remotes", {})
+            (hsm_config.config_data.get("distributed", {}).get("remotes") or {})
             .get(remote_alias, {})
             .get("resumable")
         )
@@ -498,14 +497,10 @@ def _run_sweep_via_orchestrator(
     # otherwise mode='auto' would silently read the slurm: block on every machine.
     resolved_mode_for_spec = resolve_auto_mode(mode)
     scheduler_hint = "slurm" if resolved_mode_for_spec in ("array", "individual") else None
-    spec = spec_from_cli(
-        walltime=walltime,
-        resources=resources,
-        scheduler=scheduler_hint,
-        hsm_config=hsm_config,
-        mode=resolved_mode_for_spec,
-    )
     try:
+        spec = spec_from_cli(
+            walltime, resources, scheduler_hint, hsm_config, resolved_mode_for_spec
+        )
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
