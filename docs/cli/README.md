@@ -53,6 +53,8 @@ hsm sweep run [OPTIONS]
   --group TEXT                       W&B group name for this sweep.
   -p, --parallel-jobs INTEGER        Max concurrent jobs (local / remote slot count).
   --no-progress                      Suppress progress callback prints.
+  --force                            Launch as asked, even on a hot shared account
+                                     (skips the fair-share prompt; see QUEUE.md).
   -v, --verbose                      Enable verbose (DEBUG) logging.
   -q, --quiet                        Suppress non-error output.
 ```
