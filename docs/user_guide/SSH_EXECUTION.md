@@ -114,10 +114,12 @@ The wrapper script's interpreter comes from the narrowest place that sets one:
 
 A level that sets either key is taken whole, so a remote's `python_path` wins over a
 `paths.conda_env`; a key left empty counts as unset. To run a remote outside the project's
-env, give it `python_path: python` (or a full path). A conda env renders `conda run -n <env> python`, and the script sources
-`conda.sh` from the standard locations (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`,
-`/opt/conda`) first, since non-interactive SSH shells skip `~/.bashrc`. A `python_path`
-renders that path as is. Within one level, `conda_env` wins over `python_path`.
+env, give it `python_path: python` (or a full path). A conda env renders
+`conda run -n <env> python`. Non-interactive SSH shells skip `~/.bashrc`, so unless a conda
+is already on PATH (`module load` in `pre_script`), the script first sources the `conda.sh`
+of the first install that has the env, among `$CONDA_EXE`'s prefix, `~/miniconda3`,
+`~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `~/.miniconda3` and `/opt/conda` (else the
+first one found). A `python_path` renders that path as is. Within one level, `conda_env` wins over `python_path`.
 
 Quick reachability check before your first sweep:
 
@@ -510,8 +512,8 @@ the launcher:
   record the host key.
 - **`conda: command not found` in task output:** your conda install is
   in a non-standard location. Either set `python_path:
-  /full/path/to/python` per-remote, or symlink your `conda.sh` into one
-  of the standard spots.
+  /full/path/to/python` per-remote, export `CONDA_EXE` (`<prefix>/bin/conda`)
+  in a `pre_script`, or symlink your `conda.sh` into one of the standard spots.
 - **Tasks succeed but `output.dir` is empty locally:** check that your
   `train.py` actually honors the `output.dir` Hydra arg HSM passes in.
   See [`examples/test_train.py`](../../examples/test_train.py) for the

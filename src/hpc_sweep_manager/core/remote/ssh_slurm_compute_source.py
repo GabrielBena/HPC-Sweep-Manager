@@ -457,6 +457,7 @@ class SSHSlurmComputeSource(SlurmBase):
             params_yaml=params_to_yaml(params),
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
+            conda_env=self.conda_env,
         )
         job_id = await self._sbatch(job_name, script_content)
 
@@ -788,6 +789,7 @@ class SSHSlurmComputeSource(SlurmBase):
             script_path=self.script_path,
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
+            conda_env=self.conda_env,
             gpu_type=sub.gpu_type,
             resumable=resumable is not None,
             resume_from_present=(resumable.resume_from_present if resumable else False),

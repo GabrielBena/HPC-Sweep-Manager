@@ -393,6 +393,7 @@ class SSHComputeSource(ComputeSource):
             run_prefix=self._run_prefix,
             script_path=self.script_path,
             uses_conda=bool(self.conda_env),
+            conda_env=self.conda_env,
         )
         script = shlex.quote(f"{self._remote_sweep_dir}/scripts/{job_name}.sh")
         task = shlex.quote(remote_task_dir)

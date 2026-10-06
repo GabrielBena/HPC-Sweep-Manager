@@ -245,6 +245,7 @@ class LocalComputeSource(ComputeSource):
             modules=list(effective_spec.modules),
             pre_script=list(effective_spec.pre_script),
             uses_conda=bool(self.conda_env),
+            conda_env=self.conda_env,
         )
         script_path = scripts_dir / f"{job_name}.sh"
         script_path.write_text(script_content)

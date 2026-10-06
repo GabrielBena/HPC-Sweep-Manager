@@ -539,7 +539,7 @@ class TestSubmit:
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
         content = fake_conn.launches()[0]["input"]
-        assert "miniconda3/etc/profile.d/conda.sh" in content
+        assert "$HOME/miniconda3" in content and "/etc/profile.d/conda.sh" in content
         # The source loop runs BEFORE the actual conda invocation.
         idx_source = content.index("conda.sh")
         idx_run = content.index("conda run -n lab")
