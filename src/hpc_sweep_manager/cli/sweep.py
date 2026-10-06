@@ -2,6 +2,7 @@
 
 import logging
 import os
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -1160,6 +1161,8 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
     source = SSHSlurmComputeSource.from_manifest(manifest)
+    if ((manifest.get("chain") or {}).get("state") or {}).get("failed"):
+        source.keep_remote_on_success = True  # a stopped chain's checkpoints stay on the remote
     sweep_id = manifest["sweep_id"]
     if not await source.reattach(sweep_dir, sweep_id, manifest):
         console.print(f"[red]Could not connect to {source.host} to collect.[/red]")
@@ -1200,11 +1203,12 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             )
         else:
             ok = await source.collect_results()
-            failed = sum(1 for s in terminal.values() if s == "FAILED")
-            colour = "red" if failed else "green"
+            counts = Counter(terminal.values())
+            colour = "green" if set(counts) == {"COMPLETED"} else "red"
             console.print(
                 f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal: "
-                f"{len(terminal) - failed} COMPLETED, {failed} FAILED.[/{colour}]"
+                + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+                + f".[/{colour}]"
             )
             archived = " + archived" if source.archive_dir else ""
             console.print(
@@ -1308,12 +1312,15 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
-    done = ((manifest.get("chain") or {}).get("state") or {}).get("done")
-    if (manifest.get("resumable") or {}).get("enabled") and not done:
+    state = (manifest.get("chain") or {}).get("state") or {}
+    if (manifest.get("resumable") or {}).get("enabled") and not (
+        state.get("done") or state.get("failed")
+    ):
         # collect would archive + rm -rf the remote dir on "all terminal" — but a
         # chain's chunk is terminal between chunks, and deleting it loses the
         # resume checkpoints. Refuse; point at advance (which is chain-aware). A
-        # done chain is collected (e.g. after its final archive was cut short).
+        # done chain is collected (e.g. after its final archive was cut short), and
+        # a failed one (cancelled) too, keeping its remote dir.
         console.print(
             f"[red]{sweep_id} is a resumable chain not done — `hsm sweep collect` could "
             f"delete the remote checkpoints between chunks.[/red]"
@@ -1323,7 +1330,10 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"it pulls/archives automatically when the chain completes.[/yellow]"
         )
         return
-    missing = [k for k in ("remote_sweep_dir", "host", "job_ids") if not manifest.get(k)]
+    if not manifest.get("host"):  # native Slurm wrote its results here already
+        console.print(f"{sweep_id} ran on this machine's Slurm: nothing to collect.")
+        return
+    missing = [k for k in ("remote_sweep_dir", "job_ids") if not manifest.get(k)]
     if missing:
         console.print(
             f"[red]Manifest {manifest_path} is missing required field(s): "
@@ -1492,8 +1502,8 @@ def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
             f"its manifest). For an ordinary sweep use `hsm sweep collect`.[/red]"
         )
         return
-    if manifest.get("backend") != "slurm":
-        console.print("[red]advance supports backend=slurm chains only.[/red]")
+    if manifest.get("backend") != "slurm" or not manifest.get("host"):
+        console.print("[red]advance re-attaches Slurm-over-SSH chains only.[/red]")
         return
     try:
         asyncio.run(
@@ -2121,6 +2131,24 @@ def queue_cmd(ctx):
     )
 
 
+async def _scancel(sweep_dir: Path, manifest: dict, job_ids: list[str]) -> tuple[int, str]:
+    """One ``scancel`` naming every job: over ssh for an SSH-Slurm sweep, else on this machine."""
+    from ..core.hpc.slurm_compute_source import SlurmComputeSource
+    from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
+
+    if not manifest.get("host"):  # native Slurm
+        rc, _, err = await SlurmComputeSource()._sh(["scancel", *job_ids])
+        return rc, err
+    source = SSHSlurmComputeSource.from_manifest(manifest)
+    if not await source.reattach(sweep_dir, manifest["sweep_id"], manifest):
+        return 255, f"could not connect to {source.host}"
+    try:
+        rc, _, err = await source._sh(["scancel", *job_ids])  # rc 255: no answer
+    finally:
+        await source.cleanup()
+    return rc, err
+
+
 @sweep_cmd.command("cancel")
 @click.argument("sweep_id")
 @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt")
@@ -2128,7 +2156,10 @@ def queue_cmd(ctx):
 def cancel_cmd(ctx, sweep_id, yes):
     """Cancel a running sweep.
 
-    Routes by backend (read from ``submission_summary.txt``):
+    A Slurm sweep (native or over SSH) is found by its ``.hsm_manifest.json``, written at
+    submission: one ``scancel`` names all its jobs (a chain's: the running chunk and any queued
+    after it), and the chain is marked stopped so ``hsm sweep advance`` won't resubmit it.
+    Without a manifest, routes by backend (read from ``submission_summary.txt``):
 
     - Slurm → ``scancel <job_id>`` per job ID.
     - PBS   → ``qdel <job_id>`` per job ID.
@@ -2140,6 +2171,7 @@ def cancel_cmd(ctx, sweep_id, yes):
       ``hsm queue mine --remote <alias>`` + ``scancel`` for Slurm children,
       and ``pkill -f <sweep_id>`` locally and on each ssh host.
     """
+    import json
     import shutil
     import subprocess
 
@@ -2147,6 +2179,38 @@ def cancel_cmd(ctx, sweep_id, yes):
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
         console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
+        return
+
+    manifest_path = sweep_dir / ".hsm_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    except (OSError, ValueError) as e:
+        console.print(f"[red]Could not read manifest {manifest_path}: {e}[/red]")
+        raise SystemExit(1) from e
+    if manifest.get("backend") == "slurm":
+        chain = manifest.get("chain") or {}
+        # A chain's running chunk, and the one queued after it (`afterany`), if any.
+        chunk_ids = [j for c in (chain.get("chunks") or [])[-2:] for j in c.get("job_ids", [])]
+        job_ids = list(dict.fromkeys(map(str, [*chunk_ids, *manifest.get("job_ids", [])])))
+        where = manifest.get("host") or "this machine"
+        console.print(f"[bold]Cancelling sweep:[/bold] {sweep_id} (Slurm on {where})")
+        console.print(f"  Job IDs: {' '.join(job_ids)}")
+        if not yes and not click.confirm("Proceed?", default=False):
+            console.print("Cancelled.")
+            return
+        rc, err = asyncio.run(_scancel(sweep_dir, manifest, job_ids))
+        if rc != 0:
+            console.print(f"[red]✗ scancel failed (rc={rc}): {err.strip()}[/red]")
+            raise SystemExit(1)
+        console.print(f"[green]✓ Cancelled job(s) {' '.join(job_ids)} on {where}.[/green]")
+        if chain:  # re-read: a driver may have recorded a chunk meanwhile
+            manifest = json.loads(manifest_path.read_text())
+            manifest["chain"].setdefault("state", {})["failed"] = True
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            console.print(
+                "[yellow]The chain is marked stopped: `hsm sweep advance` won't resubmit it. "
+                "If its launcher still runs, stop it too (Ctrl-C).[/yellow]"
+            )
         return
 
     meta = _load_sweep_meta(sweep_dir)
