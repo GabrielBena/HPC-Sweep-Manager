@@ -17,12 +17,21 @@ from hpc_sweep_manager.core.remote.push_exec import (
     pin_code_refs,
     resolve_run_prefix,
     snapshot_prepare_cmd,
+    warn_cpu_fallback,
 )
 
 
 class TestNormalizeGpuAllowlist:
     def test_none_uses_all_detected(self):
         assert normalize_gpu_allowlist(None, [0, 1, 2, 3]) == [0, 1, 2, 3]
+
+    def test_none_skips_busy_gpus(self):
+        assert normalize_gpu_allowlist(None, [0, 1, 2, 3], busy=[0, 2]) == [1, 3]
+
+    def test_an_explicit_allowlist_keeps_busy_gpus(self):
+        assert normalize_gpu_allowlist("all", [0, 1, 2, 3], busy=[0, 2]) == [0, 1, 2, 3]
+        assert normalize_gpu_allowlist([0, 1], [0, 1, 2, 3], busy=[0, 2]) == [0, 1]
+        assert normalize_gpu_allowlist(1, [0, 1, 2, 3], busy=[0]) == [0]
 
     def test_zero_is_cpu(self):
         assert normalize_gpu_allowlist(0, [0, 1, 2, 3]) == []
@@ -56,17 +65,27 @@ class TestPartitionGpuSlots:
     def test_drops_remainder(self):
         assert partition_gpu_slots([0, 1, 2], 2, cpu_slots=4) == [[0, 1]]
 
-    def test_request_exceeds_supply_falls_back_to_cpu(self):
-        assert partition_gpu_slots([0], 2, cpu_slots=3) == [None, None, None]
+    def test_request_exceeds_supply_falls_back_to_cpu_with_no_gpu_visible(self):
+        assert partition_gpu_slots([0], 2, cpu_slots=3) == [[], [], []]
 
-    def test_no_gpus_uses_cpu_slots(self):
-        assert partition_gpu_slots([], 1, cpu_slots=2) == [None, None]
+    def test_no_gpus_uses_cpu_slots_with_no_gpu_visible(self):
+        assert partition_gpu_slots([], 1, cpu_slots=2) == [[], []]
+        assert partition_gpu_slots([], 0, cpu_slots=2) == [[], []]  # --gpus cpu
 
-    def test_gpus_per_job_zero_uses_cpu_slots(self):
+    def test_gpus_per_job_zero_leaves_the_environment_alone(self):
         assert partition_gpu_slots([0, 1], 0, cpu_slots=2) == [None, None]
 
     def test_cpu_slots_floor_of_one(self):
-        assert partition_gpu_slots([], 1, cpu_slots=0) == [None]
+        assert partition_gpu_slots([], 1, cpu_slots=0) == [[]]
+
+    def test_a_gpu_job_left_on_cpu_warns(self, caplog):
+        with caplog.at_level("WARNING"):
+            warn_cpu_fallback("box", [None], 0, [0, 1])  # asked for none: silent
+            warn_cpu_fallback("box", [[0]], 1, [0, 1])  # on a GPU: silent
+            assert not caplog.records
+            warn_cpu_fallback("box", [[], []], 2, [3])
+        [r] = caplog.records
+        assert r.message.startswith("box: 2 GPU(s) per task, but 1 allowed GPU(s) [3]")
 
 
 class TestResolveRunPrefix:

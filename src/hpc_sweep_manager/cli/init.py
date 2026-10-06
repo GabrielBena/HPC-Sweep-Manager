@@ -192,7 +192,7 @@ def _render_machine_config(sweeps_root: str | None) -> str:
             "  # pointing here so status/report tooling keeps working.\n"
             f"  sweeps_root: {sweeps_root}\n"
             "\n"
-            "  # Optional: which GPU indices --mode local may use.\n"
+            "  # Optional: which GPUs (nvidia-smi indices) --mode local may use.\n"
             "  # Useful on shared boxes where (e.g.) GPU:0 is reserved.\n"
             "  # visible_gpus: [1, 2, 3]\n"
             "\n"
@@ -209,7 +209,7 @@ def _render_machine_config(sweeps_root: str | None) -> str:
         "#   # pointing here so status/report tooling keeps working.\n"
         "#   sweeps_root: /mnt/big-drive/<user>/hsm-sweeps\n"
         "#\n"
-        "#   # Which GPU indices --mode local may use.\n"
+        "#   # Which GPUs (nvidia-smi indices) --mode local may use.\n"
         "#   visible_gpus: [1, 2, 3]\n"
         "#\n"
         "#   # Default python interpreter for --mode local.\n"
@@ -290,11 +290,11 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
     if gpu_count > 0:
         # When >1 GPU is present, surface visible_gpus as a discoverable hint
         # (shared boxes often reserve GPU:0 for interactive work) — but keep it
-        # commented so the default behavior is "use every GPU."
+        # commented so the default behavior is "use every free GPU."
         if gpu_count > 1:
             allowlist_example = list(range(1, gpu_count))  # e.g. 4 GPUs -> [1, 2, 3]
             visible_hint = (
-                f"# Allowlist (optional): restrict which GPU indices this box uses.\n"
+                f"# Allowlist (optional): which GPUs this box uses, as nvidia-smi indices.\n"
                 f"# CLI `--gpus 0,1,3` overrides. Useful on shared boxes where (e.g.)\n"
                 f"# GPU:0 is reserved for interactive work.\n"
                 f"#   visible_gpus: {allowlist_example}    # would exclude GPU:0\n"

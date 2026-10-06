@@ -19,9 +19,10 @@ class TestParseGpusArg:
     def test_empty_returns_none(self):
         assert parse_gpus_arg("") is None
 
-    def test_all_returns_none(self):
-        assert parse_gpus_arg("all") is None
-        assert parse_gpus_arg("ALL") is None
+    def test_all_is_kept_distinct_from_no_allowlist(self):
+        # None = every free GPU; "all" = busy ones too.
+        assert parse_gpus_arg("all") == "all"
+        assert parse_gpus_arg("ALL") == "all"
 
     def test_cpu_returns_zero(self):
         assert parse_gpus_arg("cpu") == 0

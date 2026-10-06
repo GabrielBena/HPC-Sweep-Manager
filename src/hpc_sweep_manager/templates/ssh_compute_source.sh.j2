@@ -4,6 +4,8 @@
 set -e
 
 {% if cuda_visible_devices is not none %}
+# HSM's GPU indices are nvidia-smi's (PCI order); CUDA's default is fastest-first.
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% endif %}
 # The code this task runs (its sweep's snapshot on a remote); pre_script may use it.
@@ -26,7 +28,7 @@ mkdir -p {{ remote_task_dir }}
     echo "Task: {{ job_name }}"
     echo "Node: $(hostname)"
     echo "Parameters: {{ params_hydra }}"
-    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
+    echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES-<unset>}"
     echo "Started: $(date)"
 } > {{ remote_task_dir }}/task_info.txt
 # Self-describing artifact: the exact overrides for this task (Tier 2).

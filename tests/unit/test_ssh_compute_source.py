@@ -315,7 +315,46 @@ class TestSetup:
         assert src._gpu_indices == []
         assert src._slot_count == 3
         slots = [src._slot_queue.get_nowait() for _ in range(3)]
-        assert slots == [None, None, None]
+        assert slots == [[], [], []]  # CPU slots, no GPU visible
+
+    async def test_no_allowlist_skips_busy_gpus_and_capacity_is_the_slot_count(self, tmp_path):
+        busy_0_2 = NVIDIA_SMI_SAMPLE_4_GPUS.replace(
+            "0, NVIDIA H100, 12, 81920, 0", "0, NVIDIA H100, 30000, 81920, 97"
+        ).replace("2, NVIDIA H100, 12", "2, NVIDIA H100, 9000")
+        src = _make_src(
+            tmp_path,
+            fake_conn=FakeConn(gpu_csv=busy_0_2),
+            max_parallel_jobs=1,
+            default_spec=ResourceSpec(gpus=1),
+        )
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        assert [src._slot_queue.get_nowait() for _ in range(2)] == [[1], [3]]
+        assert src.max_parallel_jobs == src._slot_count == 2
+
+    async def test_an_explicit_allowlist_keeps_a_busy_gpu(self, tmp_path):
+        busy_0 = NVIDIA_SMI_SAMPLE_4_GPUS.replace(
+            "0, NVIDIA H100, 12, 81920, 0", "0, NVIDIA H100, 30000, 81920, 97"
+        )
+        for gpus, want in (([0, 1], [[0], [1]]), ("all", [[0], [1], [2], [3]])):
+            src = _make_src(
+                tmp_path,
+                fake_conn=FakeConn(gpu_csv=busy_0),
+                gpus=gpus,
+                default_spec=ResourceSpec(gpus=1),
+            )
+            await src.setup(tmp_path / "sweep", "test_sweep")
+            assert [src._slot_queue.get_nowait() for _ in range(len(want))] == want
+
+    async def test_a_gpu_job_left_on_cpu_warns(self, tmp_path, caplog):
+        src = _make_src(
+            tmp_path,
+            fake_conn=FakeConn(gpu_csv=NVIDIA_SMI_SAMPLE_4_GPUS),
+            gpus=0,
+            default_spec=ResourceSpec(gpus=1),
+        )
+        with caplog.at_level("WARNING"):
+            await src.setup(tmp_path / "sweep", "test_sweep")
+        assert any("anahita@anahita: 1 GPU(s) per task" in r.message for r in caplog.records)
 
     async def test_rsync_failure_marks_unhealthy(self, tmp_path):
         fake_conn = FakeConn()
@@ -388,8 +427,20 @@ class TestSubmit:
         await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
         uploads = [c for c in fake_conn.run_calls if c["input"] is not None]
-        # First slot popped is [0]; CUDA_VISIBLE_DEVICES should be set to "0".
-        assert "CUDA_VISIBLE_DEVICES=0" in uploads[0]["input"]
+        # First slot popped is [0]; CUDA_VISIBLE_DEVICES should be set to "0", in nvidia-smi order.
+        assert (
+            "export CUDA_DEVICE_ORDER=PCI_BUS_ID\nexport CUDA_VISIBLE_DEVICES=0\n"
+            in (uploads[0]["input"])
+        )
+
+    async def test_cpu_renders_an_empty_cuda_visible_devices(self, tmp_path):
+        fake_conn = FakeConn(gpu_csv=NVIDIA_SMI_SAMPLE_4_GPUS)
+        src = _make_src(tmp_path, fake_conn=fake_conn, gpus=0)  # --gpus cpu
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        await src.submit_job({"i": 1}, "task_001", "test_sweep")
+
+        [upload] = [c["input"] for c in fake_conn.run_calls if c["input"] is not None]
+        assert "\nexport CUDA_VISIBLE_DEVICES=\n" in upload
 
     async def test_slot_back_pressure(self, tmp_path):
         """Third submission blocks until a slot frees up."""

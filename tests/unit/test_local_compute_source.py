@@ -10,7 +10,6 @@ from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.local.local_compute_source import (
     LocalComputeSource,
     _detect_gpus,
-    compute_gpu_slots,
 )
 
 
@@ -22,11 +21,15 @@ class TestGPUDetection:
 
     async def test_reports_configured_count(self, fake_gpus):
         fake_gpus.set_count(2)
-        assert await _detect_gpus() == [0, 1]
+        assert [g.index for g in await _detect_gpus()] == [0, 1]
 
     async def test_reports_eight(self, fake_gpus):
         fake_gpus.set_count(8)
-        assert await _detect_gpus() == [0, 1, 2, 3, 4, 5, 6, 7]
+        assert [g.index for g in await _detect_gpus()] == [0, 1, 2, 3, 4, 5, 6, 7]
+
+    async def test_reports_which_gpus_are_busy(self, fake_gpus):
+        fake_gpus.set_busy(1)
+        assert [g.is_free for g in await _detect_gpus()] == [True, False, True, True]
 
     async def test_disable(self, fake_gpus):
         fake_gpus.disable()
@@ -40,11 +43,11 @@ class TestSlotAllocation:
         src = LocalComputeSource(max_parallel_jobs=3)
         assert await src.setup(tmp_path / "sweep", "test_sweep")
         assert src._slot_count == 3
-        # All slots should be None (CPU).
+        # CPU slots, no GPU visible (CUDA_VISIBLE_DEVICES=).
         slots = []
         for _ in range(3):
             slots.append(src._slot_queue.get_nowait())
-        assert slots == [None, None, None]
+        assert slots == [[], [], []]
 
     async def test_gpus_detected_no_request_uses_cpu_slots(self, tmp_path, fake_gpus):
         fake_gpus.set_count(4)
@@ -97,10 +100,10 @@ class TestSlotAllocation:
             default_spec=ResourceSpec(gpus=4),  # asked for 4, have 2
         )
         assert await src.setup(tmp_path / "sweep", "test_sweep")
-        # Falls back to CPU mode with max_parallel_jobs slots
+        # Falls back to CPU mode with max_parallel_jobs slots, no GPU visible
         assert src._slot_count == 4
         slots = [src._slot_queue.get_nowait() for _ in range(4)]
-        assert slots == [None, None, None, None]
+        assert slots == [[], [], [], []]
 
 
 class TestVisibleGpusAllowlist:
@@ -149,12 +152,12 @@ class TestVisibleGpusAllowlist:
         )
         assert await src.setup(tmp_path / "sweep", "test_sweep")
         assert src._gpu_indices == []
-        # No GPUs visible AND gpus_per_job=1 — falls back to CPU slots.
+        # No GPUs visible AND gpus_per_job=1 — falls back to CPU slots that hide the GPUs.
         slots = [src._slot_queue.get_nowait() for _ in range(3)]
-        assert slots == [None, None, None]
+        assert slots == [[], [], []]
 
     async def test_none_means_use_all_detected(self, tmp_path, fake_gpus):
-        # Sanity: visible_gpus=None preserves the pre-feature behavior.
+        # Sanity: visible_gpus=None uses every GPU when none is busy.
         fake_gpus.set_count(4)
         src = LocalComputeSource(
             max_parallel_jobs=10,
@@ -163,6 +166,41 @@ class TestVisibleGpusAllowlist:
         )
         assert await src.setup(tmp_path / "sweep", "test_sweep")
         assert src._gpu_indices == [0, 1, 2, 3]
+
+    async def test_no_allowlist_skips_busy_gpus(self, tmp_path, fake_gpus, caplog):
+        fake_gpus.set_busy(0, 2)  # a co-tenant's
+        src = LocalComputeSource(max_parallel_jobs=10, default_spec=ResourceSpec(gpus=1))
+        with caplog.at_level("INFO"):
+            assert await src.setup(tmp_path / "sweep", "test_sweep")
+        slots = [src._slot_queue.get_nowait() for _ in range(src._slot_queue.qsize())]
+        assert slots == [[1], [3]]
+        assert any("busy GPU(s) skipped: [0, 2]" in r.message for r in caplog.records)
+
+    async def test_an_explicit_allowlist_keeps_a_busy_gpu(self, tmp_path, fake_gpus):
+        fake_gpus.set_busy(0, 2)
+        for allow, want in (([2, 3], [[2], [3]]), ("all", [[0], [1], [2], [3]])):
+            src = LocalComputeSource(
+                max_parallel_jobs=10, default_spec=ResourceSpec(gpus=1), visible_gpus=allow
+            )
+            assert await src.setup(tmp_path / "sweep", "test_sweep")
+            assert [src._slot_queue.get_nowait() for _ in range(len(want))] == want
+
+    async def test_capacity_is_the_slot_count(self, tmp_path, fake_gpus):
+        # The distributed dispatcher reads max_parallel_jobs: it must match the slots.
+        fake_gpus.set_busy(0)
+        src = LocalComputeSource(max_parallel_jobs=1, default_spec=ResourceSpec(gpus=1))
+        assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src.max_parallel_jobs == src._slot_count == 3
+
+    async def test_a_gpu_job_left_on_cpu_warns(self, tmp_path, fake_gpus, caplog):
+        fake_gpus.set_busy(0, 1, 2, 3)  # every GPU busy, no allowlist
+        src = LocalComputeSource(max_parallel_jobs=2, default_spec=ResourceSpec(gpus=1))
+        with caplog.at_level("WARNING"):
+            assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert [src._slot_queue.get_nowait() for _ in range(2)] == [[], []]
+        [warning] = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert "1 GPU(s) per task, but 0 allowed GPU(s) []" in warning
+        assert "on CPU, with no GPU visible" in warning
 
     async def test_stale_indices_warned_and_dropped(self, tmp_path, fake_gpus, caplog):
         # User says [1, 2, 7] but the box has GPUs 0..3 — index 7 is stale.
@@ -226,32 +264,6 @@ class TestConstruction:
         # The base class respects available_slots which uses max_parallel_jobs.
         src = LocalComputeSource(max_parallel_jobs=0)
         assert src.max_parallel_jobs == 1
-
-
-class TestComputeGpuSlots:
-    """The pure slot-math helper shared by setup() and plan_layout()."""
-
-    def test_one_gpu_per_job(self):
-        slots, count, gpu_mode = compute_gpu_slots([0, 1, 2, 3], 1, 8)
-        assert (slots, count, gpu_mode) == ([[0], [1], [2], [3]], 4, True)
-
-    def test_two_gpus_per_job_drops_remainder(self):
-        slots, count, gpu_mode = compute_gpu_slots([0, 1, 2], 2, 8)
-        # GPU 2 can't form a full slot of 2 → dropped.
-        assert (slots, count, gpu_mode) == ([[0, 1]], 1, True)
-
-    def test_allowlist_indices_preserved(self):
-        slots, count, gpu_mode = compute_gpu_slots([1, 2, 3], 1, 8)
-        assert slots == [[1], [2], [3]] and gpu_mode is True
-
-    def test_no_gpus_is_cpu_with_max_parallel(self):
-        assert compute_gpu_slots([], 0, 5) == ([], 5, False)
-
-    def test_gpus_present_but_zero_per_job_is_cpu(self):
-        assert compute_gpu_slots([0, 1, 2, 3], 0, 5) == ([], 5, False)
-
-    def test_too_few_gpus_for_one_slot_falls_back_to_cpu(self):
-        assert compute_gpu_slots([0], 2, 4) == ([], 4, False)
 
 
 class TestPlanLayout:

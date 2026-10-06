@@ -187,6 +187,8 @@ def _detect_project_paths(
 def _describe_gpu_allowlist(allow) -> str:
     """Human description of a ``--gpus``-style allowlist value."""
     if allow is None:
+        return "every free GPU (busy ones skipped)"
+    if allow == "all":
         return "all detected GPUs"
     if isinstance(allow, bool):  # bool is an int subclass — guard first
         return "all detected GPUs" if allow else "CPU only"
@@ -241,11 +243,12 @@ def _render_placement(
                 console.print("  GPUs: (could not probe nvidia-smi; resolved at run time)")
                 return
             detected = plan["detected_gpus"]
+            busy = f", busy: {plan['busy_gpus']}" if plan["busy_gpus"] else ""
             if plan["gpu_mode"]:
                 slots = plan["slot_count"]
                 console.print(
                     f"  GPUs: using {plan['visible_gpus']} "
-                    f"(of {detected or '[]'} detected) — {gpus_per_task} GPU/task"
+                    f"(of {detected or '[]'} detected{busy}) — {gpus_per_task} GPU/task"
                 )
                 console.print(
                     f"  Concurrency: {slots} parallel slot(s) · {num_tasks} task(s) "
@@ -256,7 +259,10 @@ def _render_placement(
                 if detected and gpus_per_task == 0:
                     why = f"{len(detected)} GPU(s) present but spec.gpus=0 — set local.gpus"
                 elif detected and gpus_per_task:
-                    why = f"allowlist {plan['visible_gpus']} smaller than {gpus_per_task} GPU/task"
+                    why = (
+                        f"allowed {plan['visible_gpus']} (of {detected}{busy}) "
+                        f"smaller than {gpus_per_task} GPU/task"
+                    )
                 else:
                     why = "no GPUs detected"
                 console.print(f"  GPUs: CPU-only ({why})")
@@ -1024,8 +1030,9 @@ def sweep_cmd(ctx):
     "--gpus",
     "gpus_arg",
     help=(
-        "GPU allowlist: 'all' (default), 'cpu', an int N (first N detected), "
-        "or a comma-separated list of indices like '0,1,3'. Works with both "
+        "GPU allowlist, nvidia-smi indices: every free GPU by default; 'all' (busy "
+        "ones too), 'cpu', an int N (first N detected), or a comma-separated list "
+        "like '0,1,3'. Works with both "
         "--mode local and --mode remote. For --mode local, the sticky-per-machine "
         "default lives in `local.visible_gpus`; CLI here overrides it."
     ),

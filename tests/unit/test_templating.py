@@ -266,3 +266,41 @@ class TestComputeSourceCondaEnvWrap:
 
         src = SlurmComputeSource(python_path="/abs/python")
         assert src.python_path == "/abs/python"
+
+
+class TestGpuPinning:
+    """HSM's slot indices are nvidia-smi's (PCI order): every script that pins
+    ``CUDA_VISIBLE_DEVICES`` says so, or CUDA would read them fastest-first."""
+
+    _KWARGS = dict(
+        job_name="j",
+        job_id="abc",
+        params_hydra='"seed=1"',
+        wandb_group="g",
+        modules=[],
+        pre_script=[],
+        uses_conda=False,
+        # local
+        task_dir="/tmp/task",
+        project_dir="/tmp/project",
+        python_path="python",
+        script_path="train.py",
+        # ssh
+        remote_code_dir="/remote/code",
+        remote_task_dir="/remote/tasks/j",
+        run_prefix="python",
+    )
+
+    @pytest.mark.parametrize("template", ["local_compute_source.sh.j2", "ssh_compute_source.sh.j2"])
+    @pytest.mark.parametrize("cvd", ["1,2", ""])  # a GPU slot; a CPU slot (no GPU visible)
+    def test_pinned_slots_are_in_nvidia_smi_order(self, template, cvd):
+        rendered = render_template(template, cuda_visible_devices=cvd, **self._KWARGS)
+        assert (
+            f"export CUDA_DEVICE_ORDER=PCI_BUS_ID\nexport CUDA_VISIBLE_DEVICES={cvd}\n" in rendered
+        )
+
+    @pytest.mark.parametrize("template", ["local_compute_source.sh.j2", "ssh_compute_source.sh.j2"])
+    def test_an_unpinned_slot_leaves_the_environment_alone(self, template):
+        rendered = render_template(template, cuda_visible_devices=None, **self._KWARGS)
+        assert "export CUDA_VISIBLE_DEVICES" not in rendered
+        assert "CUDA_DEVICE_ORDER" not in rendered

@@ -512,9 +512,13 @@ absent; it's safe to delete and re-create.
 
 ### `local.visible_gpus` — restrict which GPU indices the slot queue uses
 
-By default `LocalComputeSource` calls `nvidia-smi -L` and uses *every*
-index it reports. On a shared GPU box where (e.g.) `GPU:0` is reserved
-for interactive work, set `visible_gpus` to exclude it:
+By default `LocalComputeSource` asks `nvidia-smi` for its GPUs and uses
+every one that is *free* (under 5% utilisation and 500 MB used); a GPU a
+co-tenant is using is skipped, and the setup log names it. On a shared GPU
+box where (e.g.) `GPU:0` is reserved for interactive work, set
+`visible_gpus` to exclude it even when idle. Indices are **nvidia-smi's**
+(PCI bus order), not CUDA's default fastest-first order; the task script
+exports `CUDA_DEVICE_ORDER=PCI_BUS_ID` so CUDA agrees:
 
 ```yaml
 local:
@@ -527,16 +531,24 @@ CLI `--gpus` uses the same shape and overrides the config value:
 ```bash
 hsm sweep run --mode local --gpus 1,2,3        # explicit allowlist (overrides config)
 hsm sweep run --mode local --gpus 2            # first 2 visible GPUs
-hsm sweep run --mode local --gpus cpu          # CPU-only
-hsm sweep run --mode local --gpus all          # every detected GPU (default)
+hsm sweep run --mode local --gpus cpu          # CPU-only (CUDA_VISIBLE_DEVICES=)
+hsm sweep run --mode local --gpus all          # every detected GPU, busy or not
 ```
 
-Indices in `visible_gpus` that aren't in `nvidia-smi -L` output are
+An explicit allowlist is used as given, busy GPUs included. Indices in
+`visible_gpus` that aren't in `nvidia-smi` output are
 warned-and-dropped at setup time (stale allowlists fail loud but don't
-crash the sweep).
+crash the sweep). A task with `gpus: N` that finds no full slot of allowed
+GPUs runs on CPU with no GPU visible, and HSM warns. The source runs one
+task per slot at a time (`--parallel-jobs` / `local_max_jobs` only sizes
+the CPU fallback).
 
 **Precedence** (highest wins): CLI `--gpus` > `local.visible_gpus` >
-every detected GPU.
+every free GPU.
+
+> **Upgrading:** an allowlist written in CUDA's default order must be
+> restated in nvidia-smi order (`nvidia-smi -L`). On anahita, CUDA `[2, 3]`
+> (the A6000s) is nvidia-smi `[1, 2]`.
 
 ## Per-remote `spec:` — defaults for `--remote` and `--mode distributed`
 
@@ -553,7 +565,8 @@ distributed:
   remotes:
     anahita:
       max_parallel_jobs: 4
-      gpus: all                  # CLI --gpus default for this remote
+      gpus: all                  # CLI --gpus default for this remote (nvidia-smi
+                                 #   indices; omit for every free GPU)
       conda_env: my-env
       spec:                      # default ResourceSpec for this remote
         walltime: "04:00:00"

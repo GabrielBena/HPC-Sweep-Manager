@@ -154,11 +154,17 @@ returns the slot list:
   GPUs each).
 - 3 GPUs allowed, `gpus_per_job=2` → `[[0, 1]]` (1 slot, GPU 2 unused —
   remainder dropped).
-- No GPUs (or `gpus_per_job=0`) → `[None] * cpu_slots` (CPU fallback).
+- No full slot → `cpu_slots` CPU slots: `[]` (the task sees no GPU), or
+  `None` (environment left alone) when `gpus_per_job=0` and some GPU is
+  allowed. A GPU job (`gpus_per_job>0`) left on CPU slots logs a warning.
 
 The same pattern drives `LocalComputeSource`. The `--gpus` CLI flag
 populates `allowed` (via `parse_gpus_arg` in `ssh_compute_source.py`);
-`spec.gpus` (from `--resources --gpus=N`) is `gpus_per_job`.
+`spec.gpus` (from `--resources --gpus=N`) is `gpus_per_job`. Indices are
+nvidia-smi's (PCI order): the rendered script exports
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` with `CUDA_VISIBLE_DEVICES`. With no allowlist,
+only the GPUs nvidia-smi shows free (`GpuInfo.is_free`) are allowed. After
+setup a source's `max_parallel_jobs` is its slot count.
 
 ## Slurm path
 

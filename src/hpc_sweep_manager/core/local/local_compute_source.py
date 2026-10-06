@@ -1,6 +1,6 @@
 """Self-contained local compute source.
 
-Probes ``nvidia-smi -L`` at setup to enumerate GPUs, partitions them into
+Probes ``nvidia-smi`` at setup to enumerate GPUs, partitions them into
 slots of size ``spec.gpus`` (the per-job GPU count), and injects
 ``CUDA_VISIBLE_DEVICES`` per worker via a rendered wrapper script. Falls back
 to CPU-only execution when no GPUs are present or ``spec.gpus`` is 0.
@@ -27,17 +27,22 @@ from typing import Any
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
-from ..remote.push_exec import resolve_run_prefix
+from ..remote.gpu_probe import NVIDIA_SMI_QUERY, GpuInfo, parse_nvidia_smi_csv
+from ..remote.push_exec import (
+    normalize_gpu_allowlist,
+    partition_gpu_slots,
+    resolve_run_prefix,
+    warn_cpu_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def _detect_gpus() -> list[int]:
-    """Return GPU indices reported by ``nvidia-smi -L``, or [] if unavailable."""
+async def _detect_gpus() -> list[GpuInfo]:
+    """Return this box's GPUs from ``nvidia-smi`` (index, memory, utilisation), or []."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "nvidia-smi",
-            "-L",
+            *NVIDIA_SMI_QUERY.split(),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -46,34 +51,7 @@ async def _detect_gpus() -> list[int]:
     stdout, _ = await proc.communicate()
     if proc.returncode != 0:
         return []
-    indices: list[int] = []
-    for line in stdout.decode("utf-8", errors="replace").splitlines():
-        m = re.match(r"GPU\s+(\d+):", line)
-        if m:
-            indices.append(int(m.group(1)))
-    return indices
-
-
-def compute_gpu_slots(
-    gpu_indices: Sequence[int], gpus_per_job: int, max_parallel_jobs: int
-) -> tuple[list[list[int]], int, bool]:
-    """Partition a GPU allowlist into per-job slots (pure: no detection, no I/O).
-
-    Returns ``(gpu_slots, slot_count, gpu_mode)``. ``gpu_mode`` is True only
-    when at least one full slot of ``gpus_per_job`` GPUs fits; otherwise the
-    source runs ``max_parallel_jobs`` CPU workers (the slot list is empty).
-    Shared by :meth:`LocalComputeSource.setup` and the side-effect-free preview
-    :meth:`LocalComputeSource.plan_layout`, so the slot math has one home.
-    """
-    if gpu_indices and gpus_per_job > 0:
-        slots = [
-            list(gpu_indices[i : i + gpus_per_job])
-            for i in range(0, len(gpu_indices), gpus_per_job)
-            if len(gpu_indices[i : i + gpus_per_job]) == gpus_per_job
-        ]
-        if slots:
-            return slots, len(slots), True
-    return [], max_parallel_jobs, False
+    return parse_nvidia_smi_csv(stdout.decode("utf-8", errors="replace"))
 
 
 class LocalComputeSource(ComputeSource):
@@ -91,8 +69,8 @@ class LocalComputeSource(ComputeSource):
         """Build a local slot-queue compute source.
 
         ``visible_gpus`` is the GPU allowlist (same shape as the ``--gpus``
-        CLI flag and ``normalize_gpu_allowlist``): ``None`` = every GPU
-        ``nvidia-smi -L`` reports, ``0`` = CPU-only, ``N`` = first N
+        CLI flag and ``normalize_gpu_allowlist``): ``None`` = every free GPU
+        (``"all"``: busy too), ``0`` = CPU-only, ``N`` = first N
         detected, ``[i, j, k]`` = exactly those indices. Filter is applied
         in :meth:`setup` after detection; indices in the allowlist that
         aren't actually present are warned-and-dropped.
@@ -123,7 +101,7 @@ class LocalComputeSource(ComputeSource):
         self.sweep_id: str | None = None
         # GPU bookkeeping (populated in setup)
         self._gpu_indices: list[int] = []
-        # Each slot is either a list of GPU indices to expose, or None for CPU.
+        # Each slot: the GPU indices to expose ([] = none), or None (env left as is).
         self._slot_queue: asyncio.Queue | None = None
         self._slot_count: int = max_parallel_jobs
         # Job bookkeeping
@@ -142,10 +120,9 @@ class LocalComputeSource(ComputeSource):
         self.sweep_id = sweep_id
         self._counter_lock = asyncio.Lock()
 
-        detected = await _detect_gpus()
+        plan = await self.plan_layout()
+        detected, busy, slots = plan["detected_gpus"], plan["busy_gpus"], plan["slots"]
         if self._visible_gpus is not None and detected:
-            from ..remote.push_exec import normalize_gpu_allowlist
-
             if isinstance(self._visible_gpus, (list, tuple)) and not isinstance(
                 self._visible_gpus, bool
             ):
@@ -156,40 +133,19 @@ class LocalComputeSource(ComputeSource):
                         f"not present in nvidia-smi -L output: {missing}. "
                         f"Detected: {detected}. Dropping the missing ones."
                     )
-            self._gpu_indices = normalize_gpu_allowlist(self._visible_gpus, detected)
-            if detected != self._gpu_indices:
-                logger.info(
-                    f"LocalComputeSource: GPU allowlist applied "
-                    f"({len(self._gpu_indices)}/{len(detected)} visible: {self._gpu_indices})"
-                )
-        else:
-            self._gpu_indices = detected
-        gpus_per_job = self.default_spec.gpus or 0
-        gpu_slots, self._slot_count, gpu_mode = compute_gpu_slots(
-            self._gpu_indices, gpus_per_job, self.max_parallel_jobs
-        )
-
+        self._gpu_indices, gpus_per_job = plan["visible_gpus"], plan["gpus_per_job"]
+        warn_cpu_fallback("LocalComputeSource", slots, gpus_per_job, self._gpu_indices)
+        # Capacity = slot count, so a distributed dispatcher never queues a task behind a slot.
+        self._slot_count = self.max_parallel_jobs = len(slots)
         self._slot_queue = asyncio.Queue()
-        if gpu_mode:
-            logger.info(
-                f"LocalComputeSource: {self._slot_count} GPU slot(s), "
-                f"{gpus_per_job} GPU(s) each, from {len(self._gpu_indices)} detected"
-            )
-            for slot in gpu_slots:
-                self._slot_queue.put_nowait(slot)
-        else:
-            if self._gpu_indices and gpus_per_job > 0:
-                logger.warning(
-                    f"Detected {len(self._gpu_indices)} GPU(s) but gpus_per_job={gpus_per_job} > "
-                    f"available; falling back to {self._slot_count} CPU worker(s)"
-                )
-            elif self._gpu_indices and gpus_per_job == 0:
-                logger.info(
-                    f"LocalComputeSource: {len(self._gpu_indices)} GPU(s) detected but "
-                    f"gpus_per_job=0 — running CPU-only"
-                )
-            for _ in range(self._slot_count):
-                self._slot_queue.put_nowait(None)
+        for slot in slots:
+            self._slot_queue.put_nowait(slot)
+        kind = f"GPU slot(s) of {gpus_per_job}" if slots[0] else "CPU slot(s)"
+        skipped = f", busy GPU(s) skipped: {busy}" if self._visible_gpus is None and busy else ""
+        logger.info(
+            f"LocalComputeSource: {self._slot_count} {kind}, "
+            f"GPUs {self._gpu_indices} of {detected}{skipped}"
+        )
 
         self.stats.health_status = "healthy"
         self.stats.last_health_check = datetime.now()
@@ -201,24 +157,23 @@ class LocalComputeSource(ComputeSource):
         Mirrors what :meth:`setup` computes — detects GPUs, applies the
         ``visible_gpus`` allowlist, partitions into slots — so a preview
         (``hsm sweep run --dry-run``) can report the real placement and
-        concurrency. Returns ``detected_gpus`` / ``visible_gpus`` /
-        ``gpus_per_job`` / ``gpu_mode`` / ``slot_count``.
+        concurrency. Returns ``detected_gpus`` / ``busy_gpus`` / ``visible_gpus`` /
+        ``gpus_per_job`` / ``slots`` / ``gpu_mode`` / ``slot_count``.
         """
-        detected = await _detect_gpus()
-        if self._visible_gpus is not None and detected:
-            from ..remote.push_exec import normalize_gpu_allowlist
-
-            visible = normalize_gpu_allowlist(self._visible_gpus, detected)
-        else:
-            visible = detected
+        gpus = await _detect_gpus()
+        detected = [g.index for g in gpus]
+        busy = [g.index for g in gpus if not g.is_free]
+        visible = normalize_gpu_allowlist(self._visible_gpus, detected, busy)
         gpus_per_job = self.default_spec.gpus or 0
-        _, slot_count, gpu_mode = compute_gpu_slots(visible, gpus_per_job, self.max_parallel_jobs)
+        slots = partition_gpu_slots(visible, gpus_per_job, self.max_parallel_jobs)
         return {
             "detected_gpus": detected,
+            "busy_gpus": busy,
             "visible_gpus": visible,
             "gpus_per_job": gpus_per_job,
-            "gpu_mode": gpu_mode,
-            "slot_count": slot_count,
+            "slots": slots,
+            "gpu_mode": bool(slots[0]),
+            "slot_count": len(slots),
         }
 
     # ----------------------------------------------------------------- submit
@@ -260,7 +215,7 @@ class LocalComputeSource(ComputeSource):
 
         # Block here when all slots are busy — natural back-pressure.
         slot = await self._slot_queue.get()
-        cuda_visible = ",".join(str(i) for i in slot) if slot else None
+        cuda_visible = None if slot is None else ",".join(str(i) for i in slot)
 
         script_content = render_template(
             "local_compute_source.sh.j2",

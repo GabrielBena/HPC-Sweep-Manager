@@ -73,24 +73,33 @@ Replace `my-box` with whatever your alias is. HSM will:
 Two **different** concepts, both required for real GPU sweeps:
 
 - **`--gpus <spec>`** (CLI flag): which GPUs on the remote are *visible*
-  to the sweep. Allowlist.
-  - `all` (default): use every GPU `nvidia-smi` reports.
-  - `cpu` or `0`: CPU-only, ignore GPUs even if present.
+  to the sweep. Allowlist. Indices are **nvidia-smi's** (PCI bus order); the
+  task script exports `CUDA_DEVICE_ORDER=PCI_BUS_ID` with
+  `CUDA_VISIBLE_DEVICES`, so CUDA numbers them the same way (its default
+  order is fastest-first, which can differ).
+  - not set (default): every GPU `nvidia-smi` reports *free* (under 5%
+    utilisation and 500 MB used); the busy ones are skipped and logged, so a
+    sweep never joins a co-tenant's GPU.
+  - `all`: every GPU `nvidia-smi` reports, busy or not.
+  - `cpu` or `0`: CPU-only; tasks get `CUDA_VISIBLE_DEVICES=` (no GPU).
   - `N` (single int): take the first `N` detected GPUs.
-  - `i,j,k` (comma-list): explicit GPU indices.
+  - `i,j,k` (comma-list): explicit GPU indices, busy or not.
 - **`spec.gpus = N`** (in `--resources "--gpus=N"`): how many GPUs each
   task gets. Set this if you want CUDA_VISIBLE_DEVICES exported per
-  task. Without it the slot queue falls back to CPU slots.
+  task. Without it the slot queue falls back to CPU slots. A task asking
+  for GPUs that finds no full slot of allowed GPUs runs on CPU (no GPU
+  visible), with a warning. The remote runs one task per slot at a time.
 
 Example combos:
 
 | `--gpus` | `--resources "--gpus=N"` | Result |
 |---|---|---|
-| `all` (default) | not set | CPU slots (no GPU isolation) |
+| not set | not set | CPU slots (no GPU isolation) |
+| not set | `--gpus=1` | one slot per free GPU |
 | `1` | `--gpus=1` | 1 slot, GPU `[0]` only |
 | `0,1` | `--gpus=1` | 2 slots, `[0]` and `[1]` |
 | `0,1,2,3` | `--gpus=2` | 2 slots, `[0,1]` and `[2,3]` |
-| `cpu` | (anything) | CPU slots, ignore GPUs |
+| `cpu` | (anything) | CPU slots, `CUDA_VISIBLE_DEVICES=` (no GPU) |
 
 ## Conda env vs explicit Python path
 
@@ -475,6 +484,10 @@ For the SSH-Slurm variant, see
 - **`CUDA_VISIBLE_DEVICES=<unset>` in sentinel:** you ran with `--gpus`
   but no `--resources "--gpus=N"`, so the slot queue picked CPU slots.
   Pass both.
+- **`CUDA_VISIBLE_DEVICES=` (empty) and a "running … on CPU" warning:** no full
+  slot of allowed GPUs: every GPU was busy (see the setup log), or the
+  allowlist is smaller than `--gpus=N`. Name the GPUs with `--gpus` to use a
+  busy one anyway.
 
 ## See also
 

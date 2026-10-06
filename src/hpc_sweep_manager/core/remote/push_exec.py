@@ -66,10 +66,13 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 RSYNC_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30"
 
 
-def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence[int]) -> list[int]:
-    """Resolve the per-remote ``gpus`` config against the box's detected GPUs.
+def normalize_gpu_allowlist(
+    gpus: None | str | int | Sequence[int], detected: Sequence[int], busy: Sequence[int] = ()
+) -> list[int]:
+    """Resolve a ``gpus`` allowlist against the box's GPUs (nvidia-smi indices, i.e. PCI order).
 
-    - ``None`` → use all detected GPUs.
+    - ``None`` (no allowlist) → the detected GPUs not in ``busy``: never join a co-tenant's GPU.
+    - ``"all"`` → every detected GPU, busy or not.
     - ``0`` (int) → empty list (CPU-only).
     - ``N`` (int>0) → the first N detected GPUs.
     - ``[indices]`` → exactly those indices, intersected with detected (so a
@@ -77,9 +80,11 @@ def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence
     """
     detected = list(detected)
     if gpus is None:
+        return [i for i in detected if i not in busy]
+    if gpus == "all":
         return detected
     if isinstance(gpus, bool):  # guard: bool is an int subclass
-        raise TypeError("gpus must be None, an int, or a list of ints")
+        raise TypeError("gpus must be None, 'all', an int, or a list of ints")
     if isinstance(gpus, int):
         if gpus <= 0:
             return []
@@ -94,11 +99,12 @@ def partition_gpu_slots(
 ) -> list[list[int] | None]:
     """Partition the allowed GPUs into execution slots.
 
-    Returns a list where each element is a list of GPU indices to expose for
-    one concurrent worker, or ``None`` for a CPU slot. Mirrors
-    LocalComputeSource: ``gpus_per_job`` GPUs per slot, dropping a trailing
-    remainder that can't fill a slot. Falls back to ``cpu_slots`` CPU slots when
-    there are no GPUs, ``gpus_per_job`` is 0, or the request exceeds supply.
+    Returns one element per concurrent worker: the GPU indices it sees (exported
+    as ``CUDA_VISIBLE_DEVICES``), ``gpus_per_job`` GPUs per slot, dropping a
+    trailing remainder that can't fill a slot. Without a full slot (no allowed
+    GPU, ``gpus_per_job`` 0, or a request above supply) it is ``cpu_slots`` CPU
+    slots: ``[]`` (no GPU visible), or ``None`` (environment left as is) for a
+    task that asked for no GPU while some are allowed.
     """
     allowed = list(allowed)
     if allowed and gpus_per_job and gpus_per_job > 0:
@@ -109,7 +115,17 @@ def partition_gpu_slots(
                 slots.append(chunk)
         if slots:
             return slots
-    return [None] * max(cpu_slots, 1)
+    return [None if allowed and not gpus_per_job else []] * max(cpu_slots, 1)
+
+
+def warn_cpu_fallback(where: str, slots: Sequence, gpus_per_job: int, allowed: Sequence[int]):
+    """Warn when a GPU job is left on CPU slots (no full slot of allowed GPUs): never silent."""
+    if gpus_per_job and not slots[0]:
+        logger.warning(
+            f"{where}: {gpus_per_job} GPU(s) per task, but {len(allowed)} allowed GPU(s) "
+            f"{list(allowed)}: running {len(slots)} task(s) at a time on CPU, with no GPU "
+            "visible (a busy GPU is skipped unless --gpus or visible_gpus names it)"
+        )
 
 
 def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:

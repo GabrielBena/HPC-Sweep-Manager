@@ -190,6 +190,21 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   reservation at setup. It now warns at submission only about a maintenance window
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
+- **GPU indices are nvidia-smi's, and co-tenants' GPUs are avoided (X4).** HSM numbers
+  GPUs as `nvidia-smi` does (PCI bus order), but CUDA's default order is fastest-first,
+  so on anahita `--gpus 1` ran on nvidia-smi #3. The local and SSH task scripts now
+  export `CUDA_DEVICE_ORDER=PCI_BUS_ID` with `CUDA_VISIBLE_DEVICES`. With no allowlist
+  (`--gpus` / `local.visible_gpus` / a remote's `gpus`), HSM now uses only the GPUs
+  `nvidia-smi` shows free (under 5% utilisation and 500 MB used) and logs the busy ones
+  it skipped; it used to take every GPU, a co-tenant's included. `--gpus all` (or a
+  remote's `gpus: all`, which used to mean CPU-only) takes every GPU, busy or not, and
+  an explicit list is used as given. `--gpus cpu` renders `CUDA_VISIBLE_DEVICES=` (no
+  GPU visible; it used to leave the variable unset), and so does a GPU job that finds
+  no full slot of allowed GPUs, which now runs on CPU with a warning instead of
+  silently. A local or SSH source's `max_parallel_jobs` is its slot count after setup,
+  so a distributed sweep hands it as many tasks as it has slots. **Compatibility:** an
+  allowlist written in CUDA's default order must be restated in nvidia-smi order (on
+  anahita, `local.visible_gpus: [2, 3]`, the A6000s, becomes `[1, 2]`).
 
 ### Removed (2026-10 maintenance pass)
 

@@ -47,6 +47,7 @@ from .push_exec import (
     pin_code_refs,
     resolve_run_prefix,
     snapshot_prepare_cmd,
+    warn_cpu_fallback,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,19 +219,22 @@ class SSHComputeSource(ComputeSource):
 
         # GPU probe — best effort. A box with no nvidia-smi just gives []
         # which falls back to CPU slots downstream.
-        gpu_indices: list[int] = []
+        gpus = []
         try:
             result = await self._conn.run(NVIDIA_SMI_QUERY, check=False)
             if (result.returncode or 0) == 0:
-                gpu_indices = [g.index for g in parse_nvidia_smi_csv(result.stdout or "")]
+                gpus = parse_nvidia_smi_csv(result.stdout or "")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"GPU probe on {self.host} failed: {e}")
-        self._gpu_indices = gpu_indices
+        gpu_indices = self._gpu_indices = [g.index for g in gpus]
+        busy = [g.index for g in gpus if not g.is_free]
 
-        allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices)
+        allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices, busy)
         gpus_per_job = self.default_spec.gpus or 0
         slots = partition_gpu_slots(allowed, gpus_per_job, cpu_slots=self.max_parallel_jobs)
-        self._slot_count = len(slots)
+        warn_cpu_fallback(f"{self.name}@{self.host}", slots, gpus_per_job, allowed)
+        # Capacity = slot count, so a distributed dispatcher never queues a task behind a slot.
+        self._slot_count = self.max_parallel_jobs = len(slots)
         self._slot_queue = asyncio.Queue()
         for s in slots:
             self._slot_queue.put_nowait(s)
@@ -239,13 +243,14 @@ class SSHComputeSource(ComputeSource):
 
         slot_desc = (
             f"{self._slot_count} GPU slot(s) ({gpus_per_job}/slot, allowed={allowed})"
-            if slots and slots[0] is not None
+            if slots[0]
             else f"{self._slot_count} CPU slot(s)"
         )
         logger.info(
             f"SSHComputeSource {self.name}@{self.host}: {slot_desc}, "
             f"run_prefix={self._run_prefix!r}, "
             f"detected_gpus={gpu_indices}"
+            + (f", busy GPUs skipped: {busy}" if self._gpus_config is None and busy else "")
         )
 
         self.stats.health_status = "healthy"
@@ -284,7 +289,7 @@ class SSHComputeSource(ComputeSource):
 
         # Block here when all slots are busy — natural back-pressure.
         slot = await self._slot_queue.get()
-        cuda_visible = ",".join(str(i) for i in slot) if slot else None
+        cuda_visible = None if slot is None else ",".join(str(i) for i in slot)
 
         script_content = render_template(
             "ssh_compute_source.sh.j2",
@@ -514,12 +519,13 @@ class SSHComputeSource(ComputeSource):
 # ---------------------------------------------------------- config factory
 
 
-def parse_gpus_arg(arg: str | None) -> None | int | list[int]:
+def parse_gpus_arg(arg: str | None) -> None | str | int | list[int]:
     """Parse a ``--gpus`` CLI value into the shape :func:`normalize_gpu_allowlist` expects.
 
-    Accepts (case-insensitive):
+    Accepts (case-insensitive); indices are nvidia-smi's (PCI order):
 
-    - ``None`` / ``""`` / ``"all"`` → ``None`` (use every detected GPU)
+    - ``None`` / ``""`` → ``None`` (no allowlist: every free GPU)
+    - ``"all"`` → ``"all"`` (every detected GPU, busy or not)
     - ``"cpu"`` → ``0`` (CPU-only)
     - ``"N"`` (single int) → ``N`` (take the first N detected GPUs)
     - ``"i,j,k"`` (any comma) → ``[i, j, k]`` (explicit allowlist)
@@ -530,8 +536,10 @@ def parse_gpus_arg(arg: str | None) -> None | int | list[int]:
     if arg is None:
         return None
     s = arg.strip()
-    if not s or s.lower() == "all":
+    if not s:
         return None
+    if s.lower() == "all":
+        return "all"
     if s.lower() == "cpu":
         return 0
     if "," in s:
