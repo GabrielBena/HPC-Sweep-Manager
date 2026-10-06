@@ -114,10 +114,12 @@ The wrapper script's interpreter comes from the narrowest place that sets one:
 
 A level that sets either key is taken whole, so a remote's `python_path` wins over a
 `paths.conda_env`; a key left empty counts as unset. To run a remote outside the project's
-env, give it `python_path: python` (or a full path). A conda env renders `conda run -n <env> python`, and the script sources
-`conda.sh` from the standard locations (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`,
-`/opt/conda`) first, since non-interactive SSH shells skip `~/.bashrc`. A `python_path`
-renders that path as is. Within one level, `conda_env` wins over `python_path`.
+env, give it `python_path: python` (or a full path). A conda env renders
+`conda run -n <env> python`. Non-interactive SSH shells skip `~/.bashrc`, so unless a conda
+is already on PATH (`module load` in `pre_script`), the script first sources the `conda.sh`
+of the first install that has the env, among `$CONDA_EXE`'s prefix, `~/miniconda3`,
+`~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `~/.miniconda3` and `/opt/conda` (else the
+first one found). A `python_path` renders that path as is. Within one level, `conda_env` wins over `python_path`.
 
 Quick reachability check before your first sweep:
 
@@ -380,8 +382,13 @@ A long sweep where the `hsm sweep run` process exits before every task finishes
 (overnight runs, a task stuck behind a **maintenance reservation**, a dropped
 SSH session) no longer strands results:
 
-- As each task reaches a terminal state mid-flight, HSM pulls its `tasks/<t>/`
-  dir back immediately — a single stuck task can't hold the others hostage.
+- While jobs run, HSM pulls `tasks/` back every 10 minutes (only what changed,
+  and no weight files: `*.ckpt`, `*.pt`, `*.pth` come with the final pull), so a
+  stuck task or a dead launcher strands at most a few minutes of finished work.
+  A file a task is still writing may arrive half-written; the final pull (or
+  `hsm sweep collect`) brings the finished copy. A pull or push cut by a dropped
+  link is tried again (5 s, then 20 s later); rsync deletes a file it was cut off
+  in, so none is left truncated.
 - At submit, HSM warns if the cluster has a Slurm reservation whose window
   could outlast this launcher.
 - Submit writes a `.hsm_manifest.json` (locally + on the remote). Re-attach any
@@ -513,8 +520,8 @@ the launcher:
   record the host key.
 - **`conda: command not found` in task output:** your conda install is
   in a non-standard location. Either set `python_path:
-  /full/path/to/python` per-remote, or symlink your `conda.sh` into one
-  of the standard spots.
+  /full/path/to/python` per-remote, export `CONDA_EXE` (`<prefix>/bin/conda`)
+  in a `pre_script`, or symlink your `conda.sh` into one of the standard spots.
 - **Tasks succeed but `output.dir` is empty locally:** check that your
   `train.py` actually honors the `output.dir` Hydra arg HSM passes in.
   See [`examples/test_train.py`](../../examples/test_train.py) for the

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any
 
 import asyncssh
@@ -22,6 +23,7 @@ import pytest
 from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.common.resumable import ResumableConfig, ResumableContext
+from hpc_sweep_manager.core.remote import ssh_slurm_compute_source
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
     SSHSlurmComputeSource,
     build_ssh_slurm_source,
@@ -858,55 +860,58 @@ class TestManifest:
         assert src._rsync_calls == []
 
 
-class TestContinuousPull:
-    @pytest.mark.asyncio
-    async def test_wait_for_all_pulls_incrementally(self, tmp_path):
-        # T1: a task reaching terminal mid-flight triggers a tasks/ pull, so a
-        # later stuck task / launcher death can't strand it.
-        conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
-        src = _StubSrc(
-            name="uzh",
-            host="uzh",
-            project_dir=str(tmp_path),
-            script_path="t.py",
-            fake_conn=conn,
-        )
-        await src.setup(tmp_path / "sweep", "sweep_1")
-        await src.submit_job({"s": 0}, "task_0", "sweep_1")
-        pulls_before = len(src._rsync_calls)  # 1 (the setup push)
-        # Cycle 1: still RUNNING. Cycle 2: gone from squeue, sacct=COMPLETED.
-        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
-        conn.add("squeue -u", _Result(0, stdout=""))
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
-        final = await src.wait_for_all(poll_interval=0)
-        assert final == {"1": "COMPLETED"}
-        # An incremental pull fired during the wait (before collect_results).
-        assert len(src._rsync_calls) > pulls_before
+class TestPeriodicPull:
+    """R7: while jobs are live, ``tasks/`` is pulled every 10 min. An array is one job, so the
+    old pull per finished job came only at its end; the final pull is collect_results'."""
 
     @pytest.mark.asyncio
-    async def test_wait_for_all_no_pull_while_running(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("outcome", "takes", "times"),
+        [
+            (0, 0, [600, 1200]),
+            (23, 0, [600, 1200]),
+            (OSError("link down"), 0, [600, 1200]),
+            (0, 700, [600, 1900]),  # a pull longer than the interval: next one 10 min after it
+        ],
+    )
+    async def test_every_ten_minutes_while_jobs_run(
+        self, tmp_path, monkeypatch, caplog, outcome, takes, times
+    ):
+        clock = [0.0]  # a fake time.monotonic, a minute on at each poll
+        monkeypatch.setattr(
+            ssh_slurm_compute_source, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh",
-            host="uzh",
-            project_dir=str(tmp_path),
-            script_path="t.py",
-            fake_conn=conn,
+            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py", fake_conn=conn
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         await src.submit_job({"s": 0}, "task_0", "sweep_1")
-        pulls_before = len(src._rsync_calls)
-        # Still running, then done — only ONE incremental pull (on completion).
-        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
-        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
+        for _ in range(25):  # the array runs 25 polls, then is gone and done
+            conn.add("squeue -u", _Result(0, stdout="1_[3-9] PENDING\n1_2 RUNNING\n"))
         conn.add("squeue -u", _Result(0, stdout=""))
         conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
-        await src.wait_for_all(poll_interval=0)
-        assert len(src._rsync_calls) - pulls_before == 1
-        # Settled by sacct on the third poll, not by the no-verdict grace.
-        assert sum(c["cmd"].startswith("squeue") for c in conn.run_calls) == 3
+        pulls = []
+
+        async def refresh():
+            clock[0] += 60
+            await SSHSlurmComputeSource.update_all_job_statuses(src)
+
+        async def rsync(cmd):
+            pulls.append((clock[0], cmd))
+            clock[0] += takes
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        src.update_all_job_statuses, src._run_rsync = refresh, rsync
+        assert await src.wait_for_all(poll_interval=0) == {"1": "COMPLETED"}
+        # Every 10 min, never more often (a failed pull too), none once the job is done.
+        assert [t for t, _ in pulls] == times
+        assert all("--exclude=*.pt" in cmd and cmd[-2].endswith("/tasks/") for _, cmd in pulls)
+        failed = caplog.text.count("periodic tasks/ pull from uzh failed")
+        assert failed == (2 if outcome else 0)  # a failure is a warning; the wait went on
 
 
 # --------------------------------------------------------------------- cancel

@@ -101,7 +101,8 @@ backs `hsm sweep status` / `hsm sweep report`.
 - [`core/remote/push_exec.py`](src/hpc_sweep_manager/core/remote/push_exec.py) —
   pure helpers (`DEFAULT_RSYNC_EXCLUDES`, `normalize_gpu_allowlist`,
   `partition_gpu_slots`, `resolve_run_prefix`, `build_rsync_push_cmd`,
-  `build_rsync_pull_cmd`).
+  `build_rsync_pull_cmd`), plus `run_rsync`, the rsync runner both SSH sources
+  share (it tries a dropped link again: rc 255/10/12/30/35, 5 s then 20 s).
 - [`core/distributed/distributed_compute_source.py`](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py) —
   `_build_ssh_children` dispatches per-remote on `backend:` (`ssh`/`slurm`) so a single distributed run can mix both.
   One worker per child over a shared task queue (a child takes a task when it has room, 50 at
@@ -226,8 +227,9 @@ it's trying to reintroduce them, push back.
    real conda is already present it does NOTHING ELSE (never defines the
    `conda() { micromamba "$@"; }` bridge, which would otherwise shadow the
    module conda and silently train on CPU). Only if no real conda is found does
-   it probe standard paths (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`)
-   then fall back to micromamba (`$MAMBA_EXE` + common locations, including
+   it probe standard paths (`$CONDA_EXE`'s prefix, `~/miniconda3`/`~/anaconda3`/
+   `~/miniforge3`/`~/mambaforge`/`/opt/conda`), sourcing the first that has
+   `envs/<conda_env>` (else the first found; templates get `conda_env`), then fall back to micromamba (`$MAMBA_EXE` + common locations, including
    `~/code/packages/HPC-Sweep-Manager/bin/micromamba`). SSHComputeSource +
    SSHSlurmComputeSource pass `uses_conda` based on `bool(self.conda_env)`;
    native SlurmComputeSource uses `_python_needs_conda_init(python_path)`.

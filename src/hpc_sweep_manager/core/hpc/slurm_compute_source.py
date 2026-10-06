@@ -178,6 +178,7 @@ class SlurmComputeSource(SlurmBase):
             params_yaml=params_to_yaml(params),
             wandb_group=wandb_group,
             uses_conda=_python_needs_conda_init(self.python_path),
+            conda_env=self.conda_env,
         )
         script_path = scripts_dir / f"{job_name}.slurm"
         script_path.write_text(script_content)
@@ -357,6 +358,7 @@ class SlurmComputeSource(SlurmBase):
             script_path=self.script_path,
             wandb_group=wandb_group,
             uses_conda=_python_needs_conda_init(self.python_path),
+            conda_env=self.conda_env,
             gpu_type=sub.gpu_type,
             resumable=resumable is not None,
             resume_from_present=(resumable.resume_from_present if resumable else False),

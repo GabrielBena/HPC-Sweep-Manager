@@ -395,8 +395,8 @@ ssh hq 'cd ~/code/my-project && hsm sweep collect <sweep_id>'
 
 It reads the sweep's `.hsm_manifest.json`, classifies each job via `sacct`,
 pulls terminal task dirs, and runs the `/scratch → /shares` archive once all
-tasks are done. Idempotent — re-run as more finish. HSM also pulls completed
-tasks **incrementally during the run**, so a single stuck task can't strand the
+tasks are done. Idempotent — re-run as more finish. HSM also pulls `tasks/`
+**every 10 minutes during the run**, so a single stuck task can't strand the
 rest, and warns at submit if a reservation window could outlast the launcher.
 To stop such a sweep instead, `hsm sweep cancel <sweep_id>` reads the same manifest
 and cancels all its jobs with one `scancel`.
