@@ -111,6 +111,15 @@ class TestRsyncCommands:
         for opt in ("BatchMode=yes", "ConnectTimeout=30", "ServerAliveInterval=30"):
             assert f"-o {opt}" in RSYNC_SSH
 
+    def test_agentless_skips_the_ssh_agent(self):
+        for build in (
+            lambda **kw: build_rsync_push_cmd("/l", "h", "/r", [], **kw),
+            lambda **kw: build_rsync_pull_cmd("h", "/r", "/l", **kw),
+        ):
+            assert "IdentityAgent" not in " ".join(build())
+            ssh = build(agentless=True)
+            assert ssh[ssh.index("-e") + 1] == RSYNC_SSH + " -o IdentityAgent=none"
+
 
 class TestDefaultExcludes:
     """The push payload should skip common ML artifact dirs/files (#5)."""

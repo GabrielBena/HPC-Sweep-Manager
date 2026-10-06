@@ -429,11 +429,14 @@ For the SSH-Slurm variant, see
 - **`Connection reset by peer` (or a login that hangs) while `ssh my-box`
   works:** usually a stale SSH agent — `SSH_AUTH_SOCK` points at an agent that
   no longer answers, often one forwarded by an old session. HSM ends the login
-  after 30 s, retries once with key files only and logs a warning naming the
-  agent; on success it unsets `SSH_AUTH_SOCK` for the rest of the run, so rsync
-  skips the agent too. Lasting fix: `IdentityAgent none` under the host in
-  `~/.ssh/config` (asyncssh and OpenSSH both honour it) — unless the host's key
-  lives only in the agent; then restart the agent or refresh `SSH_AUTH_SOCK`.
+  after 30 s, retries once without the agent and logs a warning naming it; for
+  the rest of the run it skips the agent for that host, rsync included. Lasting
+  fix: `IdentityAgent none` under the host in `~/.ssh/config` (asyncssh and
+  OpenSSH both honour it) — unless the host's key lives only in the agent; then
+  restart the agent or refresh `SSH_AUTH_SOCK`.
+- **`Could not reach <host> within 60 s`:** the host is down or the network/VPN
+  is off — or a `ProxyJump` hop is stuck. The 60 s bound covers the jump leg, but
+  the agent-less retry doesn't, so give the jump host `IdentityAgent none` too.
 - **`ssh my-box` works but HSM hangs:** check `~/.ssh/known_hosts` —
   HSM honors strict host-key checking. Connect once interactively to
   record the host key.
