@@ -594,7 +594,6 @@ def _run_sweep_via_orchestrator(
     # The account's fair share (S-4): printed on every Slurm launch, a prompt when it's hot.
     spec = fair_share_gate(
         source,
-        effective_spec,
         spec,
         array=sub_mode == "array",
         force=force,

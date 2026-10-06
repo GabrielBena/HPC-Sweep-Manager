@@ -111,7 +111,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   is you: the account's usage against its share, running CPUs by user, co-workers
   waiting and why. It exits 3 when the account is hot. One SSH round trip.
 - **Slurm launches check the account's fair share (S-4).** `hsm sweep run` prints the
-  account's load before every Slurm launch whose spec has an `account`, and when the
+  account's load before every Slurm launch whose spec has an `account` (not a dry run
+  or `--mode distributed`), and when the
   account is hot, or the check can't tell (it failed, or `sshare` gave nothing), it
   asks: throttle to 50 at once and go (the default, also taken with no terminal, so
   an unattended launch on a hot account is throttled), launch as asked (`--force`
