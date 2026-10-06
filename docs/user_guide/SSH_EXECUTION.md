@@ -105,17 +105,21 @@ Example combos:
 
 ## Conda env vs explicit Python path
 
-The wrapper script's interpreter is resolved in this order:
+The wrapper script's interpreter comes from the narrowest place that sets one:
 
-1. `conda_env` (from `--conda-env` CLI flag / `distributed.conda_env` in
-   `.hsm/config.yaml`) → renders `conda run -n <env> python`.
-   The script also sources `conda.sh` from the standard locations
-   (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`, `/opt/conda`)
-   before invoking, since non-interactive SSH shells skip `~/.bashrc`.
-2. `python_path` (per-remote `python_path` in config) → renders that
-   absolute path.
-3. Bare `python` on the remote PATH (whatever the non-interactive shell
-   finds).
+1. the remote's own entry (`distributed.remotes.<alias>`), with `conda_env` or `python_path`;
+2. the `distributed:` block, with `conda_env` or `python_path`;
+3. the project's `paths.conda_env`;
+4. bare `python` on the remote PATH (whatever the non-interactive shell finds).
+
+A level that sets either key is taken whole, so a remote's `python_path` wins over a
+`paths.conda_env`; a key left empty counts as unset. To run a remote outside the project's
+env, give it `python_path: python` (or a full path). A conda env renders
+`conda run -n <env> python`. Non-interactive SSH shells skip `~/.bashrc`, so unless a conda
+is already on PATH (`module load` in `pre_script`), the script first sources the `conda.sh`
+of the first install that has the env, among `$CONDA_EXE`'s prefix, `~/miniconda3`,
+`~/anaconda3`, `~/miniforge3`, `~/mambaforge`, `~/.miniconda3` and `/opt/conda` (else the
+first one found). A `python_path` renders that path as is. Within one level, `conda_env` wins over `python_path`.
 
 Quick reachability check before your first sweep:
 
@@ -194,8 +198,9 @@ distributed:
       conda_env: my-env-cpu
 ```
 
-CLI flags (`--gpus`, `--conda-env`) override per-remote config; per-remote
-config overrides global `distributed.*`; global overrides defaults.
+The CLI flag `--gpus` overrides per-remote config; per-remote config overrides global
+`distributed.*`; global overrides defaults. The interpreter follows the order in
+[Conda env vs explicit Python path](#conda-env-vs-explicit-python-path).
 
 `DEFAULT_RSYNC_EXCLUDES` already skips the usual ML artifacts from the code
 push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.ckpt`,

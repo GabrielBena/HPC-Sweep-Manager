@@ -478,6 +478,31 @@ class TestRemoteMode:
         assert source.remote_root == "/scratch/hsm"
         assert source._gpus_config == [0, 1]
 
+    @pytest.mark.parametrize(
+        ("distributed", "remote", "want"),
+        [
+            ({"python_path": "/opt/py"}, {}, "/opt/py"),
+            ({"python_path": "/opt/py"}, {"conda_env": "box"}, "conda run -n box python"),
+            ({}, {}, "conda run -n proj python"),
+        ],
+    )
+    def test_paths_conda_env_is_the_widest_interpreter(self, distributed, remote, want):
+        from hpc_sweep_manager.core.remote.push_exec import resolve_run_prefix
+
+        class FakeConfig:
+            config_data = {"distributed": {**distributed, "remotes": {"anahita": remote}}}
+
+            def get_max_array_size(self):
+                return None
+
+            def get_conda_env(self):
+                return "proj"
+
+        source, _, _ = build_compute_source(
+            mode="remote", remote_alias="anahita", hsm_config=FakeConfig(), **self.BASE_KWARGS
+        )
+        assert resolve_run_prefix(source.conda_env, source.python_path) == want
+
     def test_cli_overrides_beat_config(self):
         class FakeConfig:
             config_data = {
