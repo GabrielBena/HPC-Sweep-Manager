@@ -6,6 +6,10 @@ even after they've left the queue (that's the whole point: squeue forgets,
 sacct remembers, which is exactly what HSM consults to tell COMPLETED from
 FAILED). Supports the subset HSM uses: ``-j ID[,ID...]`` (repeatable), ``-n``,
 ``-X``, ``-P``, ``-o State`` or ``-o JobID,State`` (pipe-delimited).
+
+The collect-time task-state query (``-o JobID,State,ExitCode,NodeList,ElapsedRaw``) prints
+the rows a test wrote to ``$HSM_FAKE_STATE_DIR/sacct_rows`` for the requested jobs, verbatim.
+``HSM_FAKE_SACCT_RC`` set non-zero makes every call fail (slurmdbd down).
 """
 
 from __future__ import annotations
@@ -48,6 +52,10 @@ def main() -> int:
         print("HSM_FAKE_STATE_DIR not set", file=sys.stderr)
         return 1
 
+    if rc := int(os.environ.get("HSM_FAKE_SACCT_RC", "0")):
+        print("sacct: error: slurmdbd: connection refused", file=sys.stderr)
+        return rc
+
     pending_s = float(os.environ.get("HSM_FAKE_PENDING_S", _DEFAULTS["pending_s"]))
     running_s = float(os.environ.get("HSM_FAKE_RUNNING_S", _DEFAULTS["running_s"]))
 
@@ -65,6 +73,14 @@ def main() -> int:
             piece = piece.strip()
             if piece:
                 requested_ids.add(piece)
+
+    rows_path = os.path.join(state_dir, "sacct_rows")
+    if args.format.count(",") > 1 and os.path.exists(rows_path):
+        with open(rows_path) as f:
+            for row in f.read().splitlines():
+                if row.split("|")[0].split("_")[0] in requested_ids:
+                    print(row)
+        return 0
 
     jobs = _read_jobs(os.path.join(state_dir, "jobs.jsonl"))
     if requested_ids:

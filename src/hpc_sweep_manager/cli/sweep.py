@@ -456,6 +456,27 @@ def _fmt_num(x: float) -> str:
     return f"{x:g}"
 
 
+def _report_slurm_ends(sweep_dir: Path, console: Console) -> list[str]:
+    """Print how Slurm ended the tasks that did not complete (``tasks_state.json``), TIMEOUT and
+    OUT_OF_MEMORY counted apart, and return them. A task that failed within a minute is flagged
+    "infra suspect", with an ``--exclude`` of the nodes it ran on."""
+    from collections import Counter
+
+    from ..core.common.sweep_analysis import load_task_states
+
+    ended = {t: s for t, s in load_task_states(sweep_dir).items() if s.get("state") != "COMPLETED"}
+    if ended:
+        counts = Counter(s.get("state") for s in ended.values()).most_common()
+        console.print("Slurm ended: " + ", ".join(f"{n} {st}" for st, n in counts), style="red")
+    failed = {t: s for t, s in ended.items() if s.get("state") != "CANCELLED"}
+    if quick := sorted(t for t, s in failed.items() if s.get("elapsed_s") in range(60)):
+        nodes = ",".join(sorted({failed[t].get("node", "") for t in quick} - {"", "None assigned"}))
+        hint = f"; if a node is at fault, resubmit with --exclude={nodes} (spec extra_directives)"
+        msg = f"Infra suspect (failed in < 60 s): {', '.join(quick)}{hint if nodes else ''}"
+        console.print(msg, style="yellow", markup=False)
+    return list(ended)
+
+
 def _run_sweep_via_orchestrator(
     *,
     config_path: Path,
@@ -811,7 +832,8 @@ def _run_sweep_via_orchestrator(
         if failed or cancelled:
             # Point the user at the failing task dirs + logs. tasks/ is local
             # after collect_results(), so the wrapper-written task_info.txt
-            # (Status: FAILED) is on disk for every backend.
+            # (Status: FAILED) is on disk for every backend; a task a walltime
+            # or node kill stopped before that line is in tasks_state.json.
             tasks_dir = sweep_dir / "tasks"
             failing = []
             if tasks_dir.exists():
@@ -824,6 +846,8 @@ def _run_sweep_via_orchestrator(
                         continue
                     if status_lines and "FAILED" in status_lines[-1]:
                         failing.append(ti.parent)
+            ended = _report_slurm_ends(sweep_dir, console)
+            failing = sorted({*failing, *(tasks_dir / t for t in ended)})
             console.print("[red]Some jobs did not complete. Inspect:[/red]")
             for d in failing[:10]:
                 console.print(f"  [yellow]{d}[/yellow]")
@@ -1206,6 +1230,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
                 f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal: "
                 f"{len(terminal) - failed} COMPLETED, {failed} FAILED.[/{colour}]"
             )
+            _report_slurm_ends(sweep_dir, console)
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "

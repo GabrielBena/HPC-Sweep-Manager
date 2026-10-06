@@ -364,6 +364,7 @@ class SlurmComputeSource(SlurmBase):
         job_id = parse_sbatch_job_id(result.stdout)
 
         params: dict[str, Any] = {"_array_size": len(sub.entries)}
+        params["_global_indices"] = [e["global_index"] for e in sub.entries]  # row -> task dir
         if sub.gpu_type:
             params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
@@ -405,6 +406,7 @@ class SlurmComputeSource(SlurmBase):
         # Slurm outputs land directly in the shared filesystem under tasks_dir.
         # (defer_cleanup is a resumable-chain no-op: nothing to pull or tear down
         # on the shared FS — checkpoints already persist in place across chunks.)
+        await self.record_task_states()
         return True
 
     async def chunk_progress(

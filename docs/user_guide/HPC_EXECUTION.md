@@ -661,8 +661,26 @@ contract).
 `SlurmComputeSource` inserts one `JobInfo` for the whole array, so the
 `on_progress(done, total)` callback reports `1/1 done` even when N
 tasks succeed. The per-task truth lives in
-`tasks/*/task_info.txt`. This is a known limitation pending a per-task
-polling refactor (`sacct` parsing).
+`tasks/*/task_info.txt` and, once the run ends, `tasks_state.json` (below).
+
+## How each task ended: `tasks_state.json`
+
+At the end of a run, and at `hsm sweep collect`, both Slurm sources ask `sacct` once for
+every job and write `<sweep_dir>/tasks_state.json`:
+
+```json
+{"task_2": {"state": "TIMEOUT", "exit_code": "0:15", "node": "u24-gpu-03", "elapsed_s": 86400}}
+```
+
+A task killed at its walltime (or by a node failure) never writes a `Status:` line in its
+`task_info.txt`; `hsm sweep status`/`report` take its state from this file instead
+(TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, …). The `.hsm_done` sentinel of a resumable
+chain and a `Status:` line the wrapper wrote still win. The run summary counts the tasks
+per state and lists those that failed within 60 s as "infra suspect", with the nodes they
+ran on: if a node is at fault, add `--exclude: <nodes>` to the spec's `extra_directives`.
+No accounting (`sacct` absent, failing, or without rows) means no file, and nothing
+changes. A re-attached sweep with several sub-arrays (a `gpu_type` list) or in
+`--mode individual` records none: the row-to-task-dir map lives in the launcher.
 
 ## See also
 
