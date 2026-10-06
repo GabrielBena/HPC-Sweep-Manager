@@ -204,6 +204,15 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `archive_on: completed` (the default) a FAILED chain is now archived too, with
   `any_failed: True` in `.archived`; only `archive_on: never` skips it. A crashing task now
   costs `max_consecutive_failures` chunks, not one per chunk until the chain stops.
+- **`module load` works in a job submitted from a non-login shell (S10, #15).** Lmod and
+  Environment Modules define `module` from `/etc/profile.d`, which only a login shell
+  sources, so `modules:` and a `pre_script` `module load` failed with `module: command not
+  found` in jobs sbatch'd over SSH (the S3IT `module load miniforge3` recipe was a no-op;
+  conda was found by the fallback probe). When a script loads modules, every template now
+  first sources the first init script that exists (`$LMOD_PKG/init/bash`,
+  `/etc/profile.d/lmod.sh`, `/etc/profile.d/z00_lmod.sh`, `/usr/share/lmod/lmod/init/bash`,
+  `/etc/profile.d/modules.sh`) if `module` is undefined, and warns if none defines it.
+  Scripts that load no modules are unchanged.
 - **A login-node blip no longer ends a Slurm-over-SSH launcher (S11, R9).** A dropped
   connection made the next `squeue` raise and killed a multi-day wait. The connection
   now has a 30 s keepalive and each command a 5 min bound (none for the archive rsync

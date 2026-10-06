@@ -356,3 +356,43 @@ def test_every_render_with_the_conda_init_names_the_env():
                 sites.append((path.name, node.lineno, "conda_env" in keys))
     assert len(sites) >= 6
     assert all(named for *_, named in sites), [s for s in sites if not s[2]]
+
+
+class TestModuleInit:
+    """Issue #15: `module` is undefined in a job submitted from a non-login shell, so every
+    template that loads modules first sources a module-system init script."""
+
+    GUARD = "if ! command -v module >/dev/null 2>&1; then"
+    TEMPLATES = [
+        "slurm_array.sh.j2",
+        "slurm_single.sh.j2",
+        "ssh_compute_source.sh.j2",
+        "local_compute_source.sh.j2",
+    ]
+
+    def _render(self, template, modules, pre_script):
+        kw = {**TestCondaInitPartialRenders._BASE_KWARGS, "modules": modules}
+        kw |= {"pre_script": pre_script, "job_id": "1", "cuda_visible_devices": None}
+        return render_template(template, uses_conda=False, **kw)
+
+    @pytest.mark.parametrize("template", TEMPLATES)
+    def test_init_precedes_modules_and_only_when_used(self, template):
+        r = self._render(template, ["cuda"], [])
+        assert r.index(self.GUARD) < r.index("module load cuda")
+        r = self._render(template, [], ["module load miniforge3/25.3.0-3"])
+        assert r.index(self.GUARD) < r.index("module load miniforge3")
+        assert self.GUARD not in self._render(template, [], ["export X=1"])
+
+    def test_sources_an_init_script_that_defines_module(self, tmp_path):
+        import subprocess
+
+        # A fake Lmod whose init also runs a failing command: under `set -e` it must not
+        # end the task (profile scripts are not written for it).
+        (tmp_path / "init").mkdir()
+        (tmp_path / "init" / "bash").write_text('false\nmodule() { echo "loaded $*"; }\n')
+        init = render_template("_module_init.sh.j2", modules=["cuda"], pre_script=[])
+        script = tmp_path / "job.sh"
+        script.write_text(f"set -e\n{init}module load cuda\n")
+        env = {"PATH": "/usr/bin:/bin", "LMOD_PKG": str(tmp_path)}  # no exported `module`
+        r = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
+        assert (r.returncode, r.stdout) == (0, "loaded load cuda\n"), r.stderr

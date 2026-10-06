@@ -122,6 +122,9 @@ slurm:
     - openmpi                #    (h100/l4/multigpu) should be loaded on the command line
                              #    BEFORE `hsm sweep run`, not in the script — they set Slurm
                              #    constraints that can conflict with the directives above.
+                             #    When modules are loaded (here or in pre_script), HSM
+                             #    first sources the module system's init if `module` is
+                             #    undefined (a non-login shell).
   pre_script:                # arbitrary shell commands before the training script
     - "source ~/.bashrc"
     - "conda activate my-env"
