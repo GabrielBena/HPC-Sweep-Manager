@@ -264,10 +264,9 @@ def build_compute_source(
                 default_spec=default_spec,
                 conda_env_override=conda_env_override,
             )
-            # `--mode array` over SSH-Slurm packs one `sbatch --array`; default
-            # is one sbatch per combo (individual). SSHSlurmComputeSource
-            # already implements both via submit_batch(mode=...).
-            return source, "remote", (remote_submission or "individual")
+            # One `sbatch --array` per sweep unless `--mode individual`, which costs two SSH
+            # channels and one slurmctld RPC per task (tracker S3).
+            return source, "remote", (remote_submission or "array")
         elif backend == "ssh":
             from ..remote.ssh_compute_source import build_ssh_source
 

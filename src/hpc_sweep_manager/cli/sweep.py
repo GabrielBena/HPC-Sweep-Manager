@@ -558,6 +558,17 @@ def _run_sweep_via_orchestrator(
     )
     if resolved_mode != mode:
         console.print(f"[cyan](mode auto-resolved from {mode!r} → {resolved_mode!r})[/cyan]")
+    if source.source_type == "ssh_slurm_remote":
+        if effective_remote_submission is None:
+            console.print(
+                "[cyan]One Slurm job array (the default for slurm remotes since 0.2; "
+                "`--mode individual` submits one sbatch per task).[/cyan]"
+            )
+        elif sub_mode == "individual" and len(combinations) > 50:
+            console.print(
+                f"[yellow]{len(combinations)} individual sbatch calls: each costs SSH channels "
+                "and a scheduler RPC on the login node; `--mode array` submits one.[/yellow]"
+            )
     # Echo the chosen entrypoint on every run — auto-detection can pick the
     # wrong train*.py silently (see PathDetector.detect_train_script_candidates).
     console.print(f"[green]Training script: {getattr(source, 'script_path', script_path)}[/green]")

@@ -18,6 +18,7 @@ import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+from hpc_sweep_manager.core.common.resumable import ResumableConfig, ResumableContext
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
     SSHSlurmComputeSource,
     build_ssh_slurm_source,
@@ -237,9 +238,9 @@ class TestSubmit:
         assert "#SBATCH --gres=gpu:H100:1" in body
         # Template cd's into the REMOTE code dir, not local project_dir.
         assert src._remote_code_dir in body
-        # sbatch was invoked with the remote script path.
-        sbatch_calls = [c for c in conn.run_calls if c["cmd"].startswith("sbatch ")]
-        assert len(sbatch_calls) == 1
+        # Written and submitted over ONE channel (tracker S3: two per task flooded login nodes).
+        assert cat_calls[0]["cmd"].endswith(f"&& sbatch {src._remote_scripts_dir}/task_0.slurm")
+        assert not any(c["cmd"].startswith("sbatch ") for c in conn.run_calls)
 
     @pytest.mark.asyncio
     async def test_submit_job_raises_on_sbatch_failure(self, tmp_path):
@@ -256,7 +257,7 @@ class TestSubmit:
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
-        with pytest.raises(RuntimeError, match="sbatch failed"):
+        with pytest.raises(RuntimeError, match="failed on uzh: error: invalid partition"):
             await src.submit_job(params={"seed": 0}, job_name="task_0", sweep_id="sweep_1")
 
     @pytest.mark.asyncio
@@ -390,6 +391,69 @@ class TestSubmit:
         manifest = json.loads((sweep_dir / ".hsm_manifest.json").read_text())
         assert manifest["job_ids"] == ["111"]
         assert manifest["jobs"][0]["job_id"] == "111"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("interrupt", [None, asyncio.CancelledError, KeyboardInterrupt])
+    async def test_individual_submission_stopped_partway_writes_manifest(self, tmp_path, interrupt):
+        """Tracker S3: a loop of individual sbatch calls that fails, or is Ctrl-C'd, partway
+        used to leave its live jobs untracked (the manifest came only after the loop)."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", _Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
+        src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_1"
+        await src.setup(sweep_dir, "sweep_1")
+        if interrupt is not None:
+            real_sbatch = src._sbatch
+
+            async def sbatch_then_interrupt(path, script):
+                if src.active_jobs:
+                    raise interrupt()
+                return await real_sbatch(path, script)
+
+            src._sbatch = sbatch_then_interrupt
+        with pytest.raises(interrupt or RuntimeError):
+            await src.submit_batch([{"seed": i} for i in range(3)], "sweep_1", mode="individual")
+        manifest = json.loads((sweep_dir / ".hsm_manifest.json").read_text())
+        assert manifest["job_ids"] == ["111"]
+
+    @pytest.mark.asyncio
+    async def test_a_partial_chunk_keeps_the_chain_manifest(self, tmp_path):
+        """Review of #26: a partial submission inside a resumable chain must not overwrite the
+        driver's chain manifest (advance would stop recognising the chain; collect would then
+        archive and clean it)."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", _Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            default_spec=ResourceSpec(walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")),
+            speed_factors={"a100": 1.0, "h200": 0.5},
+            fake_conn=conn,
+        )
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_1"
+        await src.setup(sweep_dir, "sweep_1")
+        chain_manifest = '{"resumable": {"enabled": true}, "chain": {}, "job_ids": ["99"]}'
+        (sweep_dir / ".hsm_manifest.json").write_text(chain_manifest)
+        ctx = ResumableContext(
+            chunk_index=1, config=ResumableConfig(enabled=True, chunk_walltime="04:00:00")
+        )
+        with pytest.raises(RuntimeError, match="QOSMaxSubmitJobPerUserLimit"):
+            await src.submit_batch(
+                [{"seed": i} for i in range(4)], "sweep_1", mode="array", resumable=ctx
+            )
+        assert (sweep_dir / ".hsm_manifest.json").read_text() == chain_manifest
+
+    @pytest.mark.asyncio
+    async def test_an_array_rejection_suggests_individual_mode(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(1, "", "sbatch: error: Invalid job array specification"))
+        src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
+        await src.setup(tmp_path / "sw", "sw")
+        with pytest.raises(RuntimeError, match="try --mode individual"):
+            await src.submit_batch([{"seed": 0}], "sw", mode="array")
 
     @pytest.mark.asyncio
     async def test_multi_gpu_type_individual_mode_rejected(self, tmp_path):
