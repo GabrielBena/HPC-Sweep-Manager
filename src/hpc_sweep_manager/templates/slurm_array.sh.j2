@@ -5,6 +5,8 @@
 #SBATCH --error={{ logs_dir }}/{{ job_name }}_%A_%a.err
 {{ sbatch_directives }}
 
+# The code this task runs (its sweep's snapshot on a remote); pre_script may use it.
+export HSM_CODE_DIR={{ project_dir }}
 {% for mod in modules %}
 module load {{ mod }}
 {% endfor %}

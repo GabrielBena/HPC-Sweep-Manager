@@ -77,7 +77,10 @@ from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
+    own_snapshot,
+    pin_code_refs,
     resolve_run_prefix,
+    snapshot_prepare_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -315,31 +318,31 @@ class SSHSlurmComputeSource(SlurmBase):
         self._resolved_archive_dir = (
             await self._resolve_remote_path(self.archive_dir) if self.archive_dir else None
         )
-        self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
+        project_root = f"{resolved_root}/{self._project_name}"
+        self._remote_code_dir = f"{project_root}/snapshots/{sweep_id}"
+        self._remote_sweep_dir = f"{project_root}/sweeps/{sweep_id}"
         self._remote_tasks_dir = f"{self._remote_sweep_dir}/tasks"
         self._remote_logs_dir = f"{self._remote_sweep_dir}/logs"
         self._remote_scripts_dir = f"{self._remote_sweep_dir}/scripts"
 
-        await self._ssh_run(
-            f"mkdir -p {self._remote_code_dir} "
-            f"{self._remote_tasks_dir} {self._remote_logs_dir} "
-            f"{self._remote_scripts_dir}",
-            check=False,
-        )
-
+        # This sweep's code snapshot and dirs, hard-linked against the newest snapshot (S4).
+        sweep_dirs = [self._remote_tasks_dir, self._remote_logs_dir, self._remote_scripts_dir]
+        prep = await self._ssh_run(snapshot_prepare_cmd(project_root, sweep_id, sweep_dirs))
         push_cmd = build_rsync_push_cmd(
             local_dir=self.project_dir,
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
             agentless=agent_stalled(self.host),
+            link_dest=(prep.stdout or "").strip().rstrip("/") or None,
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
         if rc != 0:
             self.stats.health_status = "unhealthy"
             return False
+        pre_script = pin_code_refs(self.default_spec.pre_script, self._project_name)
+        self.default_spec = replace(self.default_spec, pre_script=pre_script)
 
         self._run_prefix = resolve_run_prefix(self.conda_env, self.python_path)
         self.stats.health_status = "healthy"
@@ -535,8 +538,7 @@ class SSHSlurmComputeSource(SlurmBase):
         ``hsm sweep collect <id>`` works with no dependence on the original
         process's in-memory state (or even the current ``.hsm/config.yaml``).
         ``resumable_manifest``/``chain`` are the resumable-chain additions
-        (issue #12) — omitted for ordinary sweeps so their manifest stays
-        byte-identical.
+        (issue #12), omitted for ordinary sweeps.
         """
         manifest = {
             "sweep_id": self.sweep_id,
@@ -556,6 +558,7 @@ class SSHSlurmComputeSource(SlurmBase):
             "keep_remote_on_success": self.keep_remote_on_success,
             "remote_sweep_dir": self._remote_sweep_dir,
             "remote_tasks_dir": self._remote_tasks_dir,
+            "remote_code_dir": self._remote_code_dir,  # this sweep's snapshot (advance re-uses it)
             "submission_mode": submission_mode,
             "job_ids": list(job_ids),
             "num_tasks": num_tasks,
@@ -573,11 +576,10 @@ class SSHSlurmComputeSource(SlurmBase):
             # Store everything `hsm sweep advance` needs to re-submit the next
             # chunk without re-reading a possibly-changed .hsm/config.yaml: the
             # effective spec (the per-chunk walltime cap is reapplied at submit,
-            # so the FULL walltime here is correct), the train script, and the
-            # remote code dir (the rsynced mirror persists between chunks).
+            # so the FULL walltime here is correct) and the train script; the
+            # sweep's code snapshot (``remote_code_dir``) persists between chunks.
             manifest["spec"] = self.default_spec.to_dict()
             manifest["script_path"] = self.script_path
-            manifest["remote_code_dir"] = self._remote_code_dir
         if chain is not None:
             manifest["chain"] = chain
         content = json.dumps(manifest, indent=2, default=str)
@@ -614,6 +616,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self._remote_sweep_dir = manifest["remote_sweep_dir"]
         self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
+        self._remote_code_dir = manifest.get("remote_code_dir")
         self.slurm_user = await self._resolve_remote_path("$USER")
         return True
 
@@ -895,10 +898,8 @@ class SSHSlurmComputeSource(SlurmBase):
 
         if not any_failed and not self.keep_remote_on_success:
             try:
-                await self._ssh_run(
-                    f"rm -rf {shlex.quote(self._remote_sweep_dir)}",
-                    check=False,
-                )
+                dirs = (self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id))
+                await self._ssh_run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
@@ -944,6 +945,15 @@ class SSHSlurmComputeSource(SlurmBase):
             f"rsync -a {shlex.quote(self._remote_sweep_dir + '/')} "
             f"{shlex.quote(archive_target + '/')}"
         )
+        if snapshot := own_snapshot(self._remote_code_dir, self.sweep_id):
+            # The code the sweep ran goes with its results (a reproducibility record).
+            # --link-dest against the newest archived code: unchanged files cost nothing.
+            prev = f"$(ls -1d {shlex.quote(archive_base)}/*/code/ 2>/dev/null | tail -1)"
+            code_target = shlex.quote(f"{archive_target}/code/")
+            cmd += (
+                f' && p="{prev}" && rsync -a ${{p:+--link-dest="$p"}} '
+                f"{shlex.quote(snapshot + '/')} {code_target}"
+            )
         logger.info(f"Archiving sweep on {self.host}: {self._remote_sweep_dir} -> {archive_target}")
         result = await self._ssh_run(cmd, check=False)
         if (result.returncode or 0) != 0:
@@ -1074,6 +1084,10 @@ def build_ssh_slurm_source(
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
     # The remote's max_parallel_jobs caps its arrays (S5); before, Slurm never saw it.
     if max_parallel_jobs and (default_spec is None or default_spec.array_throttle is None):
+        if isinstance(max_parallel_jobs, bool) or not isinstance(max_parallel_jobs, int):
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be an integer")
+        if max_parallel_jobs < 1:
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be >= 1")
         default_spec = replace(default_spec or ResourceSpec(), array_throttle=max_parallel_jobs)
 
     conda_env = (

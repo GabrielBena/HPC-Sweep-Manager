@@ -190,28 +190,3 @@ class ParameterGenerator:
             "grid_combinations": self._count_grid_combinations(),
             "paired_combinations": self._count_paired_combinations(),
         }
-
-    def preview_combinations(self, max_preview: int = 5) -> list[dict[str, Any]]:
-        """Generate a preview of parameter combinations."""
-        all_combinations = self.generate_combinations()
-        return all_combinations[:max_preview]
-
-    def create_command_line_args(self, params: dict[str, Any]) -> list[str]:
-        """Convert parameter dictionary to command line arguments for Hydra."""
-        args = []
-        for key, value in params.items():
-            if isinstance(value, (list, tuple)):
-                # Convert list/tuple to Hydra format: [item1,item2,...]
-                value_str = str(list(value))  # Ensure it's in list format
-                args.append(f"{key}={value_str}")
-            elif value is None:
-                args.append(f"{key}=null")
-            elif isinstance(value, bool):
-                args.append(f"{key}={str(value).lower()}")
-            elif isinstance(value, str) and (" " in value or "," in value):
-                # Quote strings that contain spaces or commas
-                args.append(f'"{key}={value}"')
-            else:
-                args.append(f"{key}={value}")
-
-        return args

@@ -927,11 +927,12 @@ def _spec_field(remote_alias: str | None, key: str) -> str | None:
 def queue_share(ctx, remote_alias: str, account: str | None, verbose: bool, quiet: bool):
     """How loaded the shared account is, and how much of it is you (exit 3 when hot)."""
     console = ctx.obj["console"]
-    account = account or _spec_field(remote_alias, "account")
+    target = _resolve_queue_target(remote_alias, console)  # may pick the sole slurm remote
+    alias = target["alias"] if target else None
+    account = account or _spec_field(alias, "account")
     if not account:
         raise click.UsageError("no Slurm account: pass --account or set spec.account")
-    partition = _spec_field(remote_alias, "partition") or ""
-    target = _resolve_queue_target(remote_alias, console)
+    partition = _spec_field(alias, "partition") or ""
     seen: list[Share] = []
 
     async def gather(q):
@@ -949,6 +950,8 @@ def queue_share(ctx, remote_alias: str, account: str | None, verbose: bool, quie
             )
 
     _run_queue_command(console, target, gather, render)
+    if seen and not seen[-1].known:
+        raise click.ClickException(f"could not read account {account!r}'s fair share (sshare)")
     if seen and seen[-1].hot:
         ctx.exit(3)
 

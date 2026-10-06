@@ -282,7 +282,8 @@ def _render_placement(
             if is_slurm:
                 # Slurm remotes schedule GPUs via --gres, not a visible-GPU
                 # allowlist, so a "GPU allowlist" line would be meaningless here.
-                bound = f" (client cap {cap})" if cap and cap < 10_000 else " (no client-side cap)"
+                n = spec.array_throttle
+                bound = f" (array throttle: {n} at once)" if n else " (no array throttle)"
                 console.print(f"  Concurrency: bounded by the remote Slurm scheduler{bound}")
                 if gpus_per_task:
                     console.print(f"  GPUs/task: {_describe_gres(spec, gpus_per_task)}")
@@ -570,6 +571,11 @@ def _run_sweep_via_orchestrator(
             console.print(
                 f"[yellow]{len(combinations)} individual sbatch calls: each costs SSH channels "
                 "and a scheduler RPC on the login node; `--mode array` submits one.[/yellow]"
+            )
+        if sub_mode == "individual" and effective_spec.array_throttle:
+            console.print(
+                "[yellow]array_throttle caps job arrays only: individual submissions run "
+                "uncapped (use --mode array).[/yellow]"
             )
     # Echo the chosen entrypoint on every run — auto-detection can pick the
     # wrong train*.py silently (see PathDetector.detect_train_script_candidates).

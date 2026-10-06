@@ -69,11 +69,44 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+- **Each sweep runs its own code (S4).** Every launch re-synced one shared remote
+  `code/` dir with `--delete`, so tasks of an earlier sweep still queued on a
+  cluster ran the newest code, and files tasks wrote in their working dir were
+  deleted by the next push. Each sweep now pushes to `snapshots/<sweep_id>/`
+  (hard-linked against the previous one, so it is cheap), its tasks run there, and
+  every wrapper exports `$HSM_CODE_DIR`. A snapshot lives as long as its sweep dir,
+  and with an `archive_dir` it is archived with the results. A `code/` dir from an
+  older HSM is left untouched (remove it once nothing runs from it), and a
+  `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
+  every HSM that launches on a remote together:** an older one keeps pushing to the
+  shared `code/` dir.
+- **`hsm remote add/remove` rewrote the project file from the merged config
+  (C3).** They stripped every comment, copied machine keys
+  (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and
+  `add` replaced an existing entry, so re-adding `uzh` erased `backend: slurm`,
+  `workdir` and `spec`. They now edit the project file only (never the machine
+  config, even from `$HOME`), `add` updates just the fields you pass, and a
+  file with comments is left untouched: the YAML to paste is printed and the
+  command exits 1.
+- **`hsm remote clean` could delete the wrong directory, or `~` (C8).** It ran
+  an unquoted `rm -rf`, named the project after the cwd, ignored a slurm
+  remote's `workdir`, and with `remote_root: ~` plus `--all-projects` removed
+  the home directory. It now targets the same dir the sweep sources use
+  (`workdir` or `remote_root`, plus the project root's name). Before any
+  prompt, one remote command canonicalises the target with `realpath` and
+  lists it; the target is refused if it is `/` or `$HOME` (or above it) under
+  any spelling or symlink, or if it holds anything but HSM's own
+  `<project>/{code,sweeps,snapshots}`. The prompt shows the canonical path,
+  `-y` skips only the prompt, and the `rm` is quoted. A root with shell
+  metacharacters, or a default-mode run outside a project, is refused first.
 - **Arrays can be throttled (S5).** `spec.array_throttle: N` renders
   `--array=1-K%N`; before, HSM had no throttle and the consumer ran
   `scontrol update ArrayTaskThrottle=N` after every submission. On a `backend:
   slurm` remote, `max_parallel_jobs` now becomes that throttle when the spec sets
-  none: it used to be a client-side count that Slurm arrays never saw.
+  none: it used to be a client-side count that Slurm arrays never saw. A multi-GPU-type
+  sweep shares the throttle across its per-type arrays, so `N` caps the whole sweep. An
+  older HSM running `hsm sweep advance` on a newer chain drops the throttle: upgrade
+  together.
 - **`hsm queue share` (FR#10).** How loaded the shared account is, and how much of it
   is you: the account's usage against its share, running CPUs by user, co-workers
   waiting and why. It exits 3 when the account is hot. One SSH round trip.
@@ -82,6 +115,19 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   account is hot it asks: throttle to 50 at once and go (the default, also taken
   with no terminal), launch as asked (`--force` skips the question), wait for the
   account to cool (re-checked every 30 min, at most 12 h), or cancel.
+
+### Removed (2026-10 maintenance pass)
+
+- **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,
+  `hydra-core` or `omegaconf`; none is imported by HSM (an install drops from about
+  215 MB to 56 MB). Training environments that relied on HSM to pull them in must
+  list them themselves. `requirements.txt` (a stale copy of `pyproject.toml`) and the
+  empty `docs` extra are gone.
+- **Dead code (no caller anywhere):** ten helpers in `cli/common.py`,
+  `HydraConfigParser` and `SweepConfig.from_hydra_config`, six `utils` helpers
+  (`ProgressTracker`, `format_duration`, …), `PathDetector.suggest_setup`, two
+  `ParameterGenerator` helpers, `get_sweep_completion_summary`, and the unused
+  `templates/sweep.yaml.j2`.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
