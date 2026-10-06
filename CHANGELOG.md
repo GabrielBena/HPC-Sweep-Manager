@@ -25,8 +25,7 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **Slurm remotes submit one job array by default (S3).** `--remote <slurm>` used to
   submit one `sbatch` per task (about 1,500 SSH sessions locked a user out of a
   login node); it now submits one `sbatch --array` and says so. `--mode individual`
-  keeps the old style and warns above 50 tasks. Each job script is written and
-  submitted over one SSH channel, not two.
+  keeps the old style and warns above 50 tasks.
 - **A submission stopped partway is still tracked (S3).** An error or a Ctrl-C in the
   middle of a loop of `sbatch` calls used to leave the live jobs out of the
   manifest; it is now written before the error propagates, so `hsm sweep collect`
@@ -198,13 +197,16 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   the launcher gives up, and the jobs stay in Slurm (`hsm queue mine --remote <name>`
   lists them; `hsm sweep collect <id>`, or `advance` for a chain, re-attaches). A command
   cut off mid-run (no exit status) no longer counts as a success: a server-side archive
-  cut short keeps the remote dir (no pull, no `rm -rf`) and `collect` says so, `scancel`
-  marks nothing CANCELLED, an unexpanded `$USER` is an error, a failed chain-progress
-  probe is asked again instead of counting as a chunk without progress, and a failed
-  `sinfo` is no longer cached (CPU-only jobs kept off GPU nodes on the next try).
-  `sbatch` is never resent after a lost reply (the job may be queued): HSM looks the job
-  up by its name and goes on if exactly one untracked job has it, else says to check
-  `squeue`; a submission whose channel never opened is sent again. A remote file write
+  cut short keeps the remote dir (no pull, no `rm -rf`) and `collect` says so (also for
+  a finished chain, which `collect` now takes), `scancel` marks nothing CANCELLED, an
+  unexpanded `$USER` is an error, a failed chain-progress probe is asked again (a few
+  polls, then the launcher stops; a detached `advance` leaves it to its next run)
+  instead of counting as a chunk without progress, and a failed `sinfo` is no longer
+  cached. A job script is written first, then submitted by a `sbatch` with no time
+  bound, and `sbatch` is never resent after a lost reply (the job may be queued): HSM
+  looks for the one live job with its name and script, else names the `squeue`,
+  `sacct` and `scancel` commands to check by hand; a submission whose channel never
+  opened is sent again. A remote file write
   (params file, manifest, `.archived`) that fails now raises instead of passing
   silently. Slurm sources poll every 60 s instead of 10 s; local and ssh sources stay at
   10 s (a distributed sweep still polls its Slurm children every 10 s).

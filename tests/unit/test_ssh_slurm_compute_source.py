@@ -181,12 +181,9 @@ class TestSetup:
         assert any(arg.startswith(f"{src.host}:") for arg in push_cmd)
 
     @pytest.mark.asyncio
-    async def test_fails_when_sbatch_not_on_remote(self, tmp_path):
-        conn = FakeConn(
-            responder=[
-                ("command -v sbatch", _Result(127, stdout="", stderr="not found")),
-            ]
-        )
+    @pytest.mark.parametrize("rc", [127, None])  # None: unknown, never a success
+    async def test_fails_when_sbatch_not_on_remote(self, tmp_path, rc):
+        conn = FakeConn(responder=[("command -v sbatch", _Result(rc, stderr="not found"))])
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -245,9 +242,11 @@ class TestSubmit:
         assert "#SBATCH --gres=gpu:H100:1" in body
         # Template cd's into the REMOTE code dir, not local project_dir.
         assert src._remote_code_dir in body
-        # Written and submitted over ONE channel (tracker S3: two per task flooded login nodes).
-        assert cat_calls[0]["cmd"].endswith(f"&& sbatch {src._remote_scripts_dir}/task_0.slurm")
-        assert not any(c["cmd"].startswith("sbatch ") for c in conn.run_calls)
+        # A confirmed write, then sbatch with no time bound: sbatch never waits on stdin (#38).
+        script = f"{src._remote_scripts_dir}/task_0.slurm"
+        assert cat_calls[0]["cmd"] == f"cat > {script}"
+        sbatch = [(c["cmd"], c["timeout"]) for c in conn.run_calls if c["cmd"].startswith("sbatch")]
+        assert sbatch == [(f"sbatch {script}", None)]
 
     @pytest.mark.asyncio
     async def test_submit_job_raises_on_sbatch_failure(self, tmp_path):
@@ -679,35 +678,43 @@ class TestReconnect:
         ids=["lost", "exec-unanswered", "no-exit-status"],
     )
     @pytest.mark.parametrize(
-        "queued, found",
-        [("", None), ("444\n555_[2-3]\n555_1\n", "555"), ("555\n556\n", None)],
-        ids=["not-queued", "queued", "ambiguous"],
+        "rc, queued, found",
+        [
+            (0, "", None),
+            # 444 is the chain's finished chunk (same name and script); 556 another sweep's job.
+            (
+                0,
+                "444 COMPLETED {s}\n555_[2-3] PENDING {s}\n555_1 RUNNING {s}\n556 PENDING /x",
+                "555",
+            ),
+            (0, "555 PENDING {s}\n556 RUNNING {s}\n", None),
+            (1, "555 PENDING {s}\n", None),
+        ],
+        ids=["not-queued", "queued", "ambiguous", "squeue-failed"],
     )
     async def test_a_lost_sbatch_reply_is_looked_up_never_resent(
-        self, tmp_path, reply, queued, found
+        self, tmp_path, reply, rc, queued, found
     ):
-        # A second sbatch could queue the job twice. 444 is the chain's previous chunk.
+        # A second sbatch could queue the job twice.
         conn = FakeConn(responder=_setup_ok_responder())
-        replies = [
-            ("&& sbatch", reply),
-            ("squeue -h -u gbena -n sweep_1_array", _Result(0, queued)),
-        ]
-        src = await TestStatus._tracking(tmp_path, conn, replies=replies)
-        src.completed_jobs["444"] = JobInfo("444", "sweep_1_array", {}, "uzh", "COMPLETED")
-        with nullcontext() if found else pytest.raises(RuntimeError, match="may be queued"):
+        src = await TestStatus._tracking(tmp_path, conn, replies=[("sbatch /", reply)])
+        script = f"{src._remote_scripts_dir}/sweep_1_array.slurm"
+        lookup = "squeue -h -u gbena -n sweep_1_array -o '%i %T %o'"
+        conn.add(lookup, _Result(rc, queued.format(s=script)))
+        with nullcontext() if found else pytest.raises(RuntimeError, match="scancel -n sweep_1"):
             assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == [found]
-        assert sum("&& sbatch" in c["cmd"] for c in conn.run_calls) == 1
+        assert sum(c["cmd"].startswith("sbatch") for c in conn.run_calls) == 1
+        assert any(c["cmd"] == lookup for c in conn.run_calls)
 
     @pytest.mark.asyncio
     async def test_an_sbatch_that_never_started_is_sent_again(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         unsent = asyncssh.ChannelOpenError(asyncssh.OPEN_CONNECT_FAILED, "SSH connection closed")
         ok = _Result(0, stdout="Submitted batch job 7\n")
-        src = await TestStatus._tracking(
-            tmp_path, conn, replies=[("&& sbatch", unsent), ("&& sbatch", ok)]
-        )
+        replies = [("sbatch /", unsent), ("sbatch /", ok)]
+        src = await TestStatus._tracking(tmp_path, conn, replies=replies)
         assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == ["7"]
-        assert sum("&& sbatch" in c["cmd"] for c in conn.run_calls) == 2
+        assert sum(c["cmd"].startswith("sbatch") for c in conn.run_calls) == 2
 
     @pytest.mark.asyncio
     async def test_no_exit_status_is_never_a_success(self, tmp_path):
@@ -719,6 +726,8 @@ class TestReconnect:
             await src._resolve_remote_path("$USER")
         conn.add("find", _Result(None))  # an empty probe would count as a chunk without progress
         assert await src.chunk_progress(1, done_sentinel=".d", checkpoint_subdir="r") is None
+        conn.add("sinfo -h", _Result(None))
+        assert (await src.health_check())["connection"] == "ok_but_no_sinfo"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rc", [1, None])
@@ -970,6 +979,7 @@ class TestCollectResults:
         assert len(rm_calls) == 1
         assert src._remote_sweep_dir in rm_calls[0]["cmd"]
         assert rm_calls[0]["cmd"].endswith("/snapshots/sweep_1")
+        assert rm_calls[0]["timeout"] is None  # a big tree may take longer than the 300 s bound
 
     @pytest.mark.asyncio
     async def test_no_cleanup_on_failure(self, tmp_path):

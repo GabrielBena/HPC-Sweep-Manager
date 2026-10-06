@@ -1241,12 +1241,14 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
-    if (manifest.get("resumable") or {}).get("enabled"):
+    done = ((manifest.get("chain") or {}).get("state") or {}).get("done")
+    if (manifest.get("resumable") or {}).get("enabled") and not done:
         # collect would archive + rm -rf the remote dir on "all terminal" — but a
         # chain's chunk is terminal between chunks, and deleting it loses the
-        # resume checkpoints. Refuse; point at advance (which is chain-aware).
+        # resume checkpoints. Refuse; point at advance (which is chain-aware). A
+        # done chain is collected (e.g. after its final archive was cut short).
         console.print(
-            f"[red]{sweep_id} is a resumable chain — `hsm sweep collect` could "
+            f"[red]{sweep_id} is a resumable chain not done — `hsm sweep collect` could "
             f"delete the remote checkpoints between chunks.[/red]"
         )
         console.print(
@@ -1360,7 +1362,7 @@ async def _advance_via_manifest(
             poll_interval=source.poll_interval,
             block=block,
         )
-        decision = (result.chain_decision or "").upper()
+        decision = result.chain_decision.upper() or "no decision (the progress probe failed)"
         console.print(f"[bold]Chain {sweep_id}: {decision}[/bold]")
         if result.chain_decision == "advance":
             console.print(

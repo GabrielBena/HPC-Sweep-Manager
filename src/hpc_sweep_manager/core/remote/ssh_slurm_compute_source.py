@@ -59,6 +59,7 @@ import asyncssh
 
 from ..common.chain import ChainState
 from ..common.compute_source import (
+    TERMINAL_STATES,
     JobInfo,
     SubmissionMode,
 )
@@ -75,6 +76,7 @@ from ..hpc.gpu_planner import (
 from ..hpc.scheduler_queue import strip_array_suffix
 from ..hpc.slurm_base import SlurmBase
 from ..hpc.slurm_protocol import (
+    SLURM_STATE_MAP,
     format_signal,
     parse_sbatch_job_id,
     render_sbatch_directives,
@@ -265,23 +267,27 @@ class SSHSlurmComputeSource(SlurmBase):
             return await self._conn.run(cmd, input=input, check=False, timeout=timeout)
 
     async def _sbatch(self, job_name: str, script: str) -> str:
-        """Write ``scripts/<job_name>.slurm`` and submit it over one channel; return the job id.
+        """Write ``scripts/<job_name>.slurm``, then submit it; return the job id.
 
-        A lost reply is never answered with a second sbatch, which could queue the job twice:
-        the job is looked up by its name instead (:meth:`_queued_id`)."""
+        The write is confirmed first, so sbatch never waits on stdin. sbatch has no time bound
+        (a busy controller can take minutes and still queue the job; the keepalive ends a dead
+        link), and a lost reply is never answered with a second sbatch, which could queue the
+        job twice: the job is looked up instead (:meth:`_queued_id`)."""
         path = f"{self._remote_scripts_dir}/{job_name}.slurm"
-        cmd, lost = f"cat > {shlex.quote(path)} && sbatch {shlex.quote(path)}", "no exit status"
+        await self._write_remote_file(path, script)
+        lost = "no exit status"
         try:
-            result = await self._ssh_run(cmd, input=script, resend=False)
+            result = await self._ssh_run(f"sbatch {shlex.quote(path)}", resend=False, timeout=None)
         except (OSError, asyncssh.Error) as e:
             result, lost = None, repr(e)
         if result is None or result.returncode is None:
-            if job_id := await self._queued_id(job_name):
+            if job_id := await self._queued_id(job_name, path):
                 logger.warning(f"sbatch {path}: the reply was lost ({lost}); queued as {job_id}")
                 return job_id
             raise RuntimeError(
                 f"sbatch {path}: the reply from {self.host} was lost ({lost}); the job may be "
-                f"queued, check squeue before submitting again"
+                f"queued. Check `squeue -n {job_name}` (`sacct -X --name {job_name}` once it "
+                f"left the queue) and `scancel -n {job_name}` before submitting again"
             )
         if result.returncode != 0:
             stderr = (result.stderr or "").strip() or "no stderr"
@@ -290,14 +296,19 @@ class SSHSlurmComputeSource(SlurmBase):
             raise RuntimeError(f"sbatch {path} failed on {self.host}: {stderr}")
         return parse_sbatch_job_id(result.stdout or "")
 
-    async def _queued_id(self, job_name: str) -> str | None:
-        """The one queued job named ``job_name`` that is not tracked yet (a chain's chunks
-        share their name), or None."""
+    async def _queued_id(self, job_name: str, script: str) -> str | None:
+        """The one live job named ``job_name`` that runs ``script`` (a path unique to the
+        sweep; a chain's finished chunks share both, hence live only), or None."""
         user = self.slurm_user or getpass.getuser()
-        rc, out, _ = await self._sh(["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i"])
-        tracked = {*self.active_jobs, *self.completed_jobs}
-        ids = {strip_array_suffix(i) for i in out.split()} - tracked
-        return ids.pop() if rc == 0 and len(ids) == 1 else None
+        argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
+        rc, out, _ = await self._sh(argv)
+        rows = [line.split() for line in out.splitlines()] if rc == 0 else []
+        ids = {
+            strip_array_suffix(row[0])
+            for row in rows
+            if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
+        }
+        return ids.pop() if len(ids) == 1 else None
 
     async def _resolve_remote_path(self, path: str) -> str:
         """Expand ``~`` / ``$USER`` / ``$HOME`` / ``$SCRATCH`` etc. on the remote.
@@ -683,6 +694,8 @@ class SSHSlurmComputeSource(SlurmBase):
         if rblock:
             inst._resumable_config = ResumableConfig.from_manifest(rblock)
             inst._chain_state = ChainState.from_dict((manifest.get("chain") or {}).get("state"))
+            if inst._should_archive(False):  # the checkpoints ride the archive, not the WAN
+                inst._pull_excludes = (f"*/{inst._resumable_config.checkpoint_subdir}/",)
         return inst
 
     async def _submit_array(
