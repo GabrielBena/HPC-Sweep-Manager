@@ -231,13 +231,25 @@ class TestCodeSnapshots:
             "export PYTHONPATH=/scratch/u/runs/proj/code:$PYTHONPATH",  # uzh's form
             'export PYTHONPATH="$HOME/.hsm/runs/proj/code/sub"',  # athena's form, nested
             "export DATA=/scratch/u/proj/codes:/data/other/code",  # neither is the old dir
+            "export BIND=/data,/scratch/u/runs/proj/code; cd /x/proj/code&&ls",  # , ; && end paths
         )
         assert pin_code_refs(lines, "proj") == (
             "export PYTHONPATH=$HSM_CODE_DIR:$PYTHONPATH",
             'export PYTHONPATH="$HSM_CODE_DIR/sub"',
             "export DATA=/scratch/u/proj/codes:/data/other/code",
+            "export BIND=/data,$HSM_CODE_DIR; cd $HSM_CODE_DIR&&ls",
         )
         assert "$HSM_CODE_DIR" in caplog.text
+        assert "can't rewrite" not in caplog.text
+
+    def test_command_substitutions_are_pinned_and_assembled_paths_left_alone(self, caplog):
+        assert pin_code_refs(["export P=$(realpath /r/proj/code)"], "proj") == (
+            "export P=$(realpath $HSM_CODE_DIR)",
+        )
+        # A path assembled from a variable is invisible to HSM: left as written.
+        assert pin_code_refs(['R=/r/proj; export P="$R/code"'], "proj") == (
+            'R=/r/proj; export P="$R/code"',
+        )
 
     def test_a_cleanup_may_only_delete_the_sweep_s_own_snapshot(self):
         assert own_snapshot("/r/p/snapshots/sw1", "sw1") == "/r/p/snapshots/sw1"

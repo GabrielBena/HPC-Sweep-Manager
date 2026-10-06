@@ -200,11 +200,16 @@ def snapshot_prepare_cmd(project_root: str, sweep_id: str, sweep_dirs: Sequence[
 def pin_code_refs(pre_script: Sequence[str], project: str) -> tuple[str, ...]:
     """Point ``pre_script``'s references to the old shared ``.../<project>/code`` dir at
     ``$HSM_CODE_DIR``, the task's own snapshot, so a task never mixes two sweeps' code."""
-    old = re.compile(rf"[^\s:=\"']*/{re.escape(project)}/code(?=$|[\s:/\"'])")
+    old = re.compile(rf"[^\s:=\"',;&|<>()]*/{re.escape(project)}/code(?![\w.-])")
     pinned = tuple(old.sub("$HSM_CODE_DIR", line) for line in pre_script)
     if pinned != tuple(pre_script):
         logger.warning(
             f"pre_script names the old shared .../{project}/code dir, which no longer receives "
             "pushes; using $HSM_CODE_DIR (this sweep's code) instead. Write $HSM_CODE_DIR there."
+        )
+    if any(re.search(rf"/{re.escape(project)}/code\b", line) for line in pinned):
+        logger.warning(
+            f"pre_script still mentions .../{project}/code in a form HSM can't rewrite; that dir "
+            "no longer receives pushes: use $HSM_CODE_DIR."
         )
     return pinned

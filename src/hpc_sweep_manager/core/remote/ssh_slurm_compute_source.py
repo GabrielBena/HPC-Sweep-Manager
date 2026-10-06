@@ -946,8 +946,13 @@ class SSHSlurmComputeSource(SlurmBase):
         )
         if snapshot := own_snapshot(self._remote_code_dir, self.sweep_id):
             # The code the sweep ran goes with its results (a reproducibility record).
+            # --link-dest against the newest archived code: unchanged files cost nothing.
+            prev = f"$(ls -1d {shlex.quote(archive_base)}/*/code/ 2>/dev/null | tail -1)"
             code_target = shlex.quote(f"{archive_target}/code/")
-            cmd += f" && rsync -a {shlex.quote(snapshot + '/')} {code_target}"
+            cmd += (
+                f' && p="{prev}" && rsync -a ${{p:+--link-dest="$p"}} '
+                f"{shlex.quote(snapshot + '/')} {code_target}"
+            )
         logger.info(f"Archiving sweep on {self.host}: {self._remote_sweep_dir} -> {archive_target}")
         result = await self._ssh_run(cmd, check=False)
         if (result.returncode or 0) != 0:
