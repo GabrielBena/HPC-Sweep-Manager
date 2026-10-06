@@ -227,6 +227,23 @@ class TestCleanRefusals:
         self._assert_refused(_clean("box", "-y"), remote)
         assert (runs / "proj" / "code").exists()
 
+    def test_a_running_ssh_task_refuses_the_clean(self, tmp_path, monkeypatch, remote):
+        # ssh tasks are detached and outlive their launcher: never rm -rf one under its feet.
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        task = runs / "proj" / "sweeps" / "s1" / "tasks" / "task_001"
+        task.mkdir(parents=True)
+        proc = subprocess.Popen(["sleep", "30"], start_new_session=True)  # its own group
+        try:
+            (task / ".hsm_pid").write_text(f"{proc.pid}\n")
+            _project(tmp_path, monkeypatch, _root_cfg(runs))
+            result = _clean("box", "-y")
+            assert "still run there" in result.output and not _rm_calls(remote)
+        finally:
+            proc.kill()
+            proc.wait()
+        assert _clean("box", "-y").exit_code == 0  # a dead task's pid file doesn't block
+
     @pytest.mark.parametrize("root", ["/tmp/x; rm -rf ~", "$(id)/x", "/tmp/`id`", "/a b"])
     def test_unsafe_root_characters_refused_before_connecting(
         self, tmp_path, monkeypatch, remote, root

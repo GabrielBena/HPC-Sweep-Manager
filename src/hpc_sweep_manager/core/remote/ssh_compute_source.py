@@ -32,10 +32,12 @@ import json
 import logging
 import re
 import shlex
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import asyncssh
@@ -43,7 +45,7 @@ import asyncssh
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
-from .discovery import agent_stalled
+from .discovery import LINK_GIVE_UP_S, agent_stalled
 from .gpu_probe import NVIDIA_SMI_QUERY, parse_nvidia_smi_csv
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
@@ -60,15 +62,23 @@ from .push_exec import (
 logger = logging.getLogger(__name__)
 
 LAUNCH_TRIES = 3  # a task whose launch fails this often is FAILED
+RUN_TIMEOUT_S = 300  # a remote command that takes longer counts as a dropped link
 
 # One poll for every running task: `p <task dir> <pid> <job id>` prints "<job> rc <code>",
-# "<job> run" or "<job> gone" (dead without an exit code: killed hard, or the host rebooted).
-# The second rc check closes the race with a task that ends between the first and `kill -0`.
+# "<job> run" (its process group is alive) or "<job> gone" (dead without an exit code: killed
+# hard, or the host rebooted). The second rc check closes the race with a task that ends
+# between the first and `kill -0`; `-s` reads a half-written rc file as still running.
 _POLL_FN = (
-    'p() { if [ -f "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
-    'elif kill -0 "$2" 2>/dev/null; then echo "$3 run"; '
-    'elif [ -f "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
+    'p() { if [ -s "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
+    'elif kill -0 -- -"$2" 2>/dev/null; then echo "$3 run"; '
+    'elif [ -s "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
     'else echo "$3 gone"; fi; }'
+)
+
+
+_KILL_USER_PROCESSES = (
+    "busctl get-property org.freedesktop.login1 /org/freedesktop/login1 "
+    "org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null"
 )
 
 
@@ -150,6 +160,9 @@ class SSHComputeSource(ComputeSource):
         self._slots: dict[str, Any] = {}
         self.slot_poll_s = 10.0  # how often a submit waiting for a slot polls
         self._manifest = False  # keep .hsm_manifest.json current (only as the sweep's own source)
+        self._cancelled: set[str] = set()  # TERM sent, not yet ended
+        self._down_since: float | None = None  # when the link went down (None: up)
+        self._warned = False
         self._job_counter: int = 0
         self._counter_lock: asyncio.Lock | None = None
 
@@ -188,15 +201,18 @@ class SSHComputeSource(ComputeSource):
         literal ``$USER`` dir. A remote-shell ``echo`` (unquoted) expands both
         ``~`` and ``$VAR`` in one shot.
         """
-        # Only round-trip when there's something a shell would expand.
-        if "~" not in path and "$" not in path:
-            return path
-        result = await self._conn.run(f"echo {path}", check=False)
-        lines = (result.stdout or "").strip().splitlines()
-        resolved = lines[-1].strip() if lines else ""  # the last line: rc-file noise comes first
-        if not resolved.startswith("/"):
-            raise RuntimeError(f"could not resolve {path!r} on {self.host} (got {resolved!r})")
-        return resolved
+        if not path.startswith(("/", "~", "$")):
+            path = f"~/{path}"  # relative to the login dir, as ssh reads it
+        if "~" in path or "$" in path:
+            result = await self._conn.run(f"echo {path}", check=False)
+            lines = (result.stdout or "").strip().splitlines()
+            path = lines[-1].strip() if lines else ""  # the last line: rc-file noise comes first
+        if not path.startswith("/") or any(c.isspace() for c in path):
+            raise RuntimeError(
+                f"{self.host}: the remote root must resolve to an absolute path without "
+                f"spaces, got {path!r}"
+            )
+        return path
 
     # ------------------------------------------------------------------ setup
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
@@ -260,6 +276,14 @@ class SSHComputeSource(ComputeSource):
         except Exception as e:  # noqa: BLE001
             logger.debug(f"GPU probe on {self.host} failed: {e}")
         self._gpu_indices = gpu_indices
+        # A host whose logind kills a user's processes at logout ends detached tasks with the
+        # launcher's session.
+        logind = await self._conn.run(_KILL_USER_PROCESSES, check=False)
+        if "true" in (logind.stdout or ""):
+            logger.warning(
+                f"{self.host} kills a user's processes at logout (logind KillUserProcesses): "
+                f"tasks end with this launcher's ssh session; ask its admin to exempt you"
+            )
 
         allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices)
         gpus_per_job = self.default_spec.gpus or 0
@@ -337,13 +361,13 @@ class SSHComputeSource(ComputeSource):
         )
         script = shlex.quote(f"{self._remote_sweep_dir}/scripts/{job_name}.sh")
         task = shlex.quote(remote_task_dir)
-        # Idempotent: a retry after a lost reply finds the task already running by its pid file
-        # (and never rewrites a script bash is reading).
+        # Idempotent: the pid file is written before the reply, so a retry after a lost reply
+        # finds the task (running or done) and never starts it twice.
         launch = (
-            f'if [ -f {task}/.hsm_pid ] && kill -0 "$(cat {task}/.hsm_pid)" 2>/dev/null; '
-            f"then cat {task}/.hsm_pid; else mkdir -p {task} && rm -f {task}/.hsm_rc && "
-            f"cat > {script} && {{ setsid nohup bash {script} > {task}/hsm.log 2>&1 "
-            f"< /dev/null & echo $!; }}; fi"
+            f"if [ -f {task}/.hsm_pid ]; then cat {task}/.hsm_pid; "
+            f"else mkdir -p {task} && cat > {script} && "
+            f"{{ setsid nohup bash {script} > {task}/hsm.log 2>&1 < /dev/null & "
+            f"echo $! > {task}/.hsm_pid; }} && cat {task}/.hsm_pid; fi"
         )
         now = datetime.now()
         self.active_jobs[job_id] = JobInfo(
@@ -361,6 +385,7 @@ class SSHComputeSource(ComputeSource):
         for attempt in range(1, LAUNCH_TRIES + 1):
             try:
                 out = ((await self._run(launch, input=script_content)).stdout or "").strip()
+                out = out.splitlines()[-1] if out else out  # rc-file noise comes first
             except (OSError, asyncssh.Error) as e:
                 out = repr(e)
             if out.isdigit():
@@ -372,7 +397,7 @@ class SSHComputeSource(ComputeSource):
                 return job_id
             logger.warning(f"{job_name}: launch {attempt}/{LAUNCH_TRIES} on {self.host}: {out!r}")
         self._finish(job_id, "FAILED")
-        return job_id
+        raise ConnectionError(f"could not start {job_name} on {self.host}: {out}")
 
     async def submit_batch(self, *args: Any, **kwargs: Any) -> list[str]:
         """The base batch, with ``.hsm_manifest.json`` rewritten as each task starts, so that
@@ -380,6 +405,9 @@ class SSHComputeSource(ComputeSource):
         self._manifest = True
         try:
             return await super().submit_batch(*args, **kwargs)
+        except BaseException:  # Ctrl-C, or a launch that kept failing
+            self._warn_running()
+            raise
         finally:
             self._write_manifest()
 
@@ -447,13 +475,16 @@ class SSHComputeSource(ComputeSource):
             self._slot_queue.put_nowait(self._slots.pop(job_id))
 
     async def _run(self, cmd: str, input: str | None = None) -> Any:
-        """One remote command; a dropped connection is reopened once (and changes no status)."""
+        """One remote command, in bash whatever the login shell (dash's ``kill`` has no ``--``;
+        fish can't parse ``if``). A dropped connection is reopened once; no status changes."""
+        cmd, kw = f"bash -c {shlex.quote(cmd)}", {"check": False, "timeout": RUN_TIMEOUT_S}
         try:
-            return await self._conn.run(cmd, input=input, check=False)
+            return await self._conn.run(cmd, input=input, **kw)
         except (OSError, asyncssh.Error) as e:
             logger.warning(f"{self.host}: connection lost ({e!r}); reconnecting")
+            self._conn.close()
             self._conn = await self._open_connection()
-            return await self._conn.run(cmd, input=input, check=False)
+            return await self._conn.run(cmd, input=input, **kw)
 
     # ----------------------------------------------------------------- status
     async def update_all_job_statuses(self) -> None:
@@ -465,16 +496,29 @@ class SSHComputeSource(ComputeSource):
             f"p {shlex.quote(self._task_dirs[j])} {self._pids[j]} {shlex.quote(j)}" for j in live
         )
         try:
-            out = (await self._run(f"{_POLL_FN}; {calls}")).stdout or ""
+            result = await self._run(f"{_POLL_FN}; {calls}")
+            if result.returncode != 0:  # None: the link died mid-command (asyncssh doesn't raise)
+                raise ConnectionError(f"the poll ended with rc {result.returncode}")
         except (OSError, asyncssh.Error) as e:
+            self._down_since = self._down_since or time.monotonic()
+            if time.monotonic() - self._down_since > LINK_GIVE_UP_S:
+                self._warn_running()
+                raise ConnectionError(
+                    f"{self.host} unreachable for {LINK_GIVE_UP_S // 60} min; its tasks keep "
+                    f"running (`hsm sweep collect {self.sweep_id}` re-attaches)"
+                ) from e
             logger.warning(f"{self.host}: status poll failed ({e!r}); job states kept")
             return
-        for job, state, *rc in (line.split() for line in out.splitlines() if " " in line):
+        self._down_since, out = None, result.stdout or ""
+        for job, state, *rc in (
+            fields for line in out.splitlines() if len(fields := line.split()) >= 2
+        ):
             if job not in self.active_jobs or state == "run":
                 continue
             if state == "gone":
                 logger.warning(f"{job}: its process is gone without an exit code (killed?)")
-            self._finish(job, "COMPLETED" if rc == ["0"] else "FAILED")
+            ok = "COMPLETED" if rc == ["0"] else "FAILED"
+            self._finish(job, "CANCELLED" if job in self._cancelled else ok)
 
     async def get_job_status(self, job_id: str) -> str:
         """The state the last poll saw."""
@@ -482,17 +526,20 @@ class SSHComputeSource(ComputeSource):
         return info.status if info else "UNKNOWN"
 
     async def cancel_job(self, job_id: str) -> bool:
-        """TERM the task's whole process group (the wrapper and the training process)."""
+        """TERM the task's whole process group; it is CANCELLED (and frees its slot) once the
+        poll sees it end, as it may checkpoint on TERM first."""
         pid = self._pids.get(job_id)
-        if pid is None or job_id not in self.active_jobs:
+        if pid is None or job_id not in self.active_jobs or job_id in self._cancelled:
             return False
         try:
             # The group exists once the task has called setsid; just after launch, the pid does.
-            await self._run(f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid}")
+            sent = await self._run(f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid}")
         except (OSError, asyncssh.Error) as e:
-            logger.warning(f"Cancelling {job_id} on {self.host} failed: {e!r}")
+            sent = SimpleNamespace(returncode=repr(e))
+        if sent.returncode != 0:  # already ended, or the link dropped
+            logger.warning(f"Cancelling {job_id} on {self.host} failed ({sent.returncode})")
             return False
-        self._finish(job_id, "CANCELLED")
+        self._cancelled.add(job_id)
         return True
 
     # ----------------------------------------------------------- collection
@@ -518,7 +565,9 @@ class SSHComputeSource(ComputeSource):
         if not any_failed and not self.keep_remote_on_success and not self.active_jobs:
             try:
                 dirs = [self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id)]
-                await self._run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
+                rm = await self._run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
+                if rm.returncode != 0:
+                    raise OSError(f"rm ended with rc {rm.returncode}")
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
@@ -559,16 +608,30 @@ class SSHComputeSource(ComputeSource):
         return info
 
     # --------------------------------------------------------------- cleanup
+    async def wait_for_all(self, *args: Any, **kwargs: Any) -> dict[str, str]:
+        try:
+            return await super().wait_for_all(*args, **kwargs)
+        except BaseException:
+            self._warn_running()
+            raise
+
+    def _warn_running(self) -> None:
+        """Say once which tasks keep running (they are detached) and how to stop them."""
+        if self._warned or not (
+            running := [self._pids[j] for j in self.active_jobs if j in self._pids]
+        ):
+            return
+        self._warned = True
+        groups = " ".join(f"-{pid}" for pid in running)
+        later = f"`hsm sweep collect {self.sweep_id}` pulls them later; "
+        logger.warning(
+            f"{len(running)} task(s) keep running on {self.host}, detached; "
+            f"{later if self._manifest else ''}to stop them: ssh {self.host} kill -TERM {groups}"
+        )
+
     async def cleanup(self) -> None:
         """Close the connection. Tasks still running keep running (as Slurm jobs do)."""
-        if running := [self._pids[j] for j in self.active_jobs if j in self._pids]:
-            groups = " ".join(f"-{pid}" for pid in running)
-            later = f"`hsm sweep collect {self.sweep_id}` pulls them later; "
-            logger.warning(
-                f"{len(running)} task(s) keep running on {self.host}, detached; "
-                f"{later if self._manifest else ''}"
-                f"to stop them: ssh {self.host} kill -TERM -- {groups}"
-            )
+        self._warn_running()
         if self._conn is not None:
             try:
                 self._conn.close()

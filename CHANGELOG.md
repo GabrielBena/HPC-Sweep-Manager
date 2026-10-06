@@ -197,11 +197,15 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   output was buffered in the launcher and lost. Now each task starts detached (`setsid
   nohup`) in one short command and holds no channel. Its output goes to
   `tasks/<task>/hsm.log` and its exit code to `.hsm_rc`, which one command per poll reads
-  for every running task. A dropped connection reconnects once (with a 30 s keepalive) and
-  changes no status. A launch that fails three times is FAILED and the sweep carries on.
+  for every running task (alive means its process group is). A dropped connection
+  reconnects once (with a 30 s keepalive) and changes no status; a host unreachable for
+  30 min ends the launcher, its tasks still running. A task that can't be started in
+  three tries ends the sweep, naming it (a distributed sweep hands it to another remote).
   **Ctrl-C now leaves started tasks running**, as Slurm jobs do, and logs the command that
-  stops them; a cancel TERMs the task's process group. The remote root must resolve to an
-  absolute path at setup, and the remote sweep dir is never removed while a task runs.
+  stops them; a cancel TERMs the task's process group, which keeps its slot until it has
+  exited. Commands run in `bash` whatever the login shell. The remote root must resolve
+  to an absolute path without spaces (a relative one is under `~`), and the remote sweep
+  dir is never removed while a task runs, by a collect or by `hsm remote clean`.
 - **`hsm sweep collect` re-attaches ssh sweeps (X-2).** An ssh sweep keeps a
   `.hsm_manifest.json` (each task's host, pid and dir) as its tasks start. After a
   Ctrl-C or a dead launcher, `hsm sweep collect <id>` reads every task's exit code in

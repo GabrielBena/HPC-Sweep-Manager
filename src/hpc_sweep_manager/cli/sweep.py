@@ -1220,9 +1220,12 @@ async def _collect_ssh(sweep_dir: Path, manifest: dict, console: Console) -> Non
         console.print(f"[red]Could not connect to {source.host} to collect: {e}[/red]")
         return
     try:
-        gone = await source._run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
-        if gone.returncode != 0:  # a collect already pulled and cleaned it
+        found = await source._run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
+        if found.returncode == 1:  # a collect already pulled and cleaned it
             console.print(f"[green]Nothing left to collect on {source.host}.[/green]")
+            return
+        if found.returncode != 0:  # None: the link dropped mid-command
+            console.print(f"[red]Could not check {source.host}; try again.[/red]")
             return
         await source.update_all_job_statuses()
         ok = await source.collect_results()

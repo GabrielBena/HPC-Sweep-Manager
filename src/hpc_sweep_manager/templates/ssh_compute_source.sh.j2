@@ -1,10 +1,9 @@
 #!/bin/bash
 # Push-model SSHComputeSource wrapper for {{ job_name }} (job_id={{ job_id }}).
-# Runs on the remote host inside the rsync'd code dir, detached (setsid nohup): it outlives the
-# launcher's connection. Its exit code lands in .hsm_rc, which one poll per cycle reads; a cancel
-# sends TERM to its whole process group, which ends it with 143.
+# Runs on the remote host inside the rsync'd code dir, detached (setsid nohup; the launch writes
+# its pid to .hsm_pid): it outlives the launcher's connection. Its exit code lands in .hsm_rc,
+# which one poll per cycle reads; a cancel TERMs its whole process group, which ends it with 143.
 set -e
-echo $$ > {{ remote_task_dir }}/.hsm_pid
 trap 'echo $? > {{ remote_task_dir }}/.hsm_rc' EXIT
 trap 'exit 143' TERM
 
