@@ -253,25 +253,3 @@ class PathDetector:
             issues.append(f"Python interpreter not found at: {python_path}")
 
         return issues
-
-    def suggest_setup(self) -> dict[str, str]:
-        """Suggest setup commands based on detected environment."""
-        suggestions = {}
-
-        info = self.get_project_info()
-
-        if not info["has_requirements"] and not info["has_pyproject"] and not info["has_conda_env"]:
-            suggestions["dependencies"] = "Consider creating requirements.txt or environment.yml"
-
-        if not info["config_dir"]:
-            suggestions["configs"] = "Create a 'configs' directory with Hydra configuration files"
-
-        if not info["train_script"]:
-            suggestions["training"] = (
-                "Create a training script (e.g., scripts/train.py or train.py)"
-            )
-
-        if info["hpc_system"] == "unknown":
-            suggestions["hpc"] = "HPC system not detected - manual configuration may be needed"
-
-        return suggestions

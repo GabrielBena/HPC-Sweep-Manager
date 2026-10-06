@@ -220,7 +220,7 @@ class TestSetup:
         assert push[0] == "rsync"
         # Destination is host:remote_code_dir/
         assert push[-1].startswith("anahita:")
-        assert push[-1].endswith("/code/")
+        assert push[-1].endswith("/snapshots/test_sweep/")
 
     async def test_rsync_skips_an_agent_that_stalled(self, tmp_path, monkeypatch):
         from hpc_sweep_manager.core.remote import discovery
@@ -236,11 +236,11 @@ class TestSetup:
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
-        # First conn.run should be the mkdir -p for code/tasks/logs/scripts.
+        # One mkdir -p for this sweep's code snapshot and its tasks/logs/scripts.
         mkdirs = [c for c in fake_conn.run_calls if "mkdir -p" in c["cmd"]]
         assert mkdirs, "expected at least one mkdir -p"
         layout = mkdirs[0]["cmd"]
-        assert "/code" in layout
+        assert "/snapshots/test_sweep" in layout
         assert "/sweeps/test_sweep/tasks" in layout
         assert "/sweeps/test_sweep/logs" in layout
         assert "/sweeps/test_sweep/scripts" in layout

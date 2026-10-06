@@ -6,6 +6,8 @@ set -e
 {% if cuda_visible_devices is not none %}
 export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
 {% endif %}
+# The code this task runs (its sweep's snapshot on a remote); pre_script may use it.
+export HSM_CODE_DIR={{ remote_code_dir }}
 {% for mod in modules %}
 module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed" >&2
 {% endfor %}
