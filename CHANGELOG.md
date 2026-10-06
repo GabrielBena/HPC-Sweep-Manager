@@ -80,6 +80,23 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
   every HSM that launches on a remote together:** an older one keeps pushing to the
   shared `code/` dir.
+- **YAML 1.1 numbers changed sweep values and walltimes (C4).** `1e-1`
+  loaded as a string, `[007, 010]` as `[7, 8]` (octal), and an unquoted
+  `walltime: 12:00:00` as the int 43200, which rendered `--time=43200`
+  (30 days); an unquoted `chunk_walltime` crashed the resumable check. Sweep
+  files and `.hsm/config.yaml` now load with YAML 1.2 numbers (decimal ints,
+  `1e-1` floats; `yes`/`no` unchanged), and HSM writes them back quoting every
+  string either grammar would read as a number. A `walltime` must be a Slurm
+  time: `H:M:S`, `D-H[:M[:S]]`, an int of minutes, or `UNLIMITED` (`0` still
+  writes no limit, as before). **A two-part `walltime: 23:00` is now an error:**
+  unquoted it used to mean 23 hours (YAML 1.1's 1380 minutes), while Slurm
+  reads `"23:00"` as 23 minutes, so write `"23:00:00"`. `chunk_walltime` must
+  be a quoted `HH:MM:SS`, and an unquoted `signal_grace: 5:00` is an error
+  asking for seconds. Two things a job sees differently: a sweep value written
+  `2e-4` reaches it as `0.0002` (the same float), and a list value such as
+  `[1e-3, 1e-4]` now arrives as floats where it used to arrive as strings.
+  `hsm sweep advance` re-reads the sweep file with the new loader, so finish a
+  chain started before this change with the HSM that started it.
 - **`hsm remote add/remove` rewrote the project file from the merged config
   (C3).** They stripped every comment, copied machine keys
   (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and

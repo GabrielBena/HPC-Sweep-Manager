@@ -5,13 +5,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ..core.common.path_detector import PathDetector
+from ..core.common.yaml_loader import dump_yaml, load_yaml
 
 
 def configure_sweep(
@@ -87,7 +87,7 @@ def _scan_config_directory(config_dir: Path, console: Console) -> dict[str, Any]
     for yaml_file in yaml_files:
         try:
             with open(yaml_file) as f:
-                config = yaml.safe_load(f)
+                config = load_yaml(f)
 
             if config:
                 relative_path = yaml_file.relative_to(config_dir)
@@ -104,7 +104,7 @@ def _extract_parameters_from_file(config_file: Path, console: Console) -> dict[s
     """Extract parameters from a specific config file."""
     try:
         with open(config_file) as f:
-            config = yaml.safe_load(f)
+            config = load_yaml(f)
 
         if config:
             return _extract_parameters_from_config(config, config_file.name)
@@ -468,7 +468,7 @@ def _save_sweep_config(
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_file, "w") as f:
-            yaml.dump(sweep_config, f, default_flow_style=False, indent=2)
+            f.write(dump_yaml(sweep_config))
 
         console.print(f"\n[green]✅ Sweep configuration saved to: {output_file}[/green]")
         logger.info(f"Sweep configuration saved to {output_file}")

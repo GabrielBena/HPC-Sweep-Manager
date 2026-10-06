@@ -8,12 +8,12 @@ import shlex
 from pathlib import Path, PurePosixPath
 
 import click
-import yaml
 from rich.console import Console
 from rich.table import Table
 from rich.tree import Tree
 
 from ..core.common.config import HSMConfig
+from ..core.common.yaml_loader import dump_yaml, load_yaml
 from ..core.remote.discovery import create_ssh_connection
 from ..core.remote.gpu_probe import probe_gpus
 
@@ -52,7 +52,7 @@ def _read_project_config() -> tuple[Path, str, dict]:
     """The PROJECT config file's path, text and data — never the machine-merged view."""
     path = _config_write_path()
     text = path.read_text() if path.exists() else ""
-    data = yaml.safe_load(text) or {}
+    data = load_yaml(text) or {}
     if not isinstance(data, dict):
         raise click.ClickException(f"{path} is not a YAML mapping")
     return path, text, data
@@ -61,10 +61,10 @@ def _read_project_config() -> tuple[Path, str, dict]:
 def _write_project_config(path: Path, text: str, data: dict, hint: str, entry: dict) -> None:
     """Rewrite the project config — or, if it has comments, print ``entry`` and exit 1."""
     if re.search(r"(^|\s)#", text, re.MULTILINE):  # a rewrite would strip them
-        click.echo(yaml.safe_dump({"distributed": {"remotes": entry}}, sort_keys=False))
+        click.echo(dump_yaml({"distributed": {"remotes": entry}}))
         raise click.ClickException(f"{path} has comments, so it is unchanged. {hint} by hand.")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.dump(data, default_flow_style=False, indent=2, sort_keys=False))
+    path.write_text(dump_yaml(data))
 
 
 def _remotes_block(data: dict, path: Path) -> dict:

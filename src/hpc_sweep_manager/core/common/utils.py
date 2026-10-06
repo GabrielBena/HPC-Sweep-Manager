@@ -51,18 +51,22 @@ def create_sweep_id(prefix: str = "sweep") -> str:
 
 
 def parse_walltime(walltime: str) -> int:
-    """Parse walltime string to seconds."""
-    # Handle formats like "04:00:00", "2:30:00", "30:00"
-    parts = walltime.split(":")
-
-    if len(parts) == 3:
-        hours, minutes, seconds = map(int, parts)
-        return hours * 3600 + minutes * 60 + seconds
-    elif len(parts) == 2:
-        minutes, seconds = map(int, parts)
-        return minutes * 60 + seconds
-    else:
+    """Seconds in a Slurm time: ``M``, ``M:S``, ``H:M:S``, ``D-H``, ``D-H:M`` or ``D-H:M:S``."""
+    days, _, rest = walltime.rpartition("-")
+    try:
+        parts = [int(p) for p in rest.split(":")]
+        days_s = int(days or 0) * 86400
+    except ValueError:
+        raise ValueError(f"Invalid walltime format: {walltime}") from None
+    if len(parts) > 3:
         raise ValueError(f"Invalid walltime format: {walltime}")
+    if days:  # D-H, D-H:M, D-H:M:S
+        h, m, s = (parts + [0, 0])[:3]
+    elif len(parts) == 1:  # M
+        h, m, s = 0, parts[0], 0
+    else:  # M:S, H:M:S
+        h, m, s = ([0] + parts)[-3:]
+    return days_s + h * 3600 + m * 60 + s
 
 
 def format_walltime(seconds: int) -> str:

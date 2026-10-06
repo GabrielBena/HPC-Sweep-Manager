@@ -48,7 +48,7 @@ def is_hms(walltime: str) -> bool:
     two-part ``MM:SS`` form — a chunk cap written ``23:00`` would silently mean
     23 *minutes*, the exact gpu_planner trap. Slurm ``--time`` wants HH:MM:SS.
     """
-    parts = (walltime or "").split(":")
+    parts = walltime.split(":") if isinstance(walltime, str) else []
     return len(parts) == 3 and all(p.isdigit() for p in parts)
 
 
@@ -86,7 +86,13 @@ class ResumableConfig:
         # light coercion for the int knobs (YAML may hand us strings)
         for int_key in ("signal_grace", "max_chunks", "max_consecutive_failures"):
             if int_key in clean:
-                clean[int_key] = int(clean[int_key])
+                try:
+                    clean[int_key] = int(clean[int_key])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"resumable.{int_key} must be a whole number (signal_grace in "
+                        f"seconds), got {clean[int_key]!r}"
+                    ) from None
         if "enabled" in clean:
             clean["enabled"] = bool(clean["enabled"])
         return cls(**clean)
@@ -101,8 +107,8 @@ class ResumableConfig:
             )
         if self.chunk_walltime is not None and not is_hms(self.chunk_walltime):
             errors.append(
-                f"resumable.chunk_walltime {self.chunk_walltime!r} is not HH:MM:SS "
-                f"(a two-part value like '23:00' would mean 23 MINUTES)"
+                f"resumable.chunk_walltime {self.chunk_walltime!r} is not an HH:MM:SS "
+                f"string; quote it in YAML (a two-part '23:00' would mean 23 MINUTES)"
             )
         if self.signal_grace < 0:
             errors.append("resumable.signal_grace must be >= 0")
