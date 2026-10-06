@@ -17,7 +17,9 @@ chunk exits non-zero yet is the *normal* mid-budget outcome, so exit code is
 ambiguous (see issue #12). The machine resumes on ANY terminal state but caps
 two ways so a deterministically-crashing job can't resubmit forever:
 ``max_chunks`` (chain length) and ``max_consecutive_failures`` (no-progress
-strikes).
+strikes). A task that crashed (the template's verdict: a non-zero exit it did
+not cause by forwarding SIGTERM) in ``max_consecutive_failures`` chunks in a
+row is out of retries; the chain ends FAILED once only such tasks remain.
 
 Pure and no-I/O by design — mirrors the ``gpu_planner`` / ``slurm_protocol``
 idiom so the transition logic is unit-testable without a cluster, and the
@@ -49,6 +51,7 @@ class ChunkOutcome:
     done_count: int  # tasks with a .hsm_done sentinel (0..num_tasks)
     num_tasks: int
     progressed: bool  # done_count rose OR a checkpoint mtime advanced this chunk
+    failed: tuple[int, ...] = ()  # tasks that crashed in max_consecutive_failures chunks in a row
     terminal_states: tuple[str, ...] = ()  # chunk's job terminal states (messaging only)
 
 
@@ -103,6 +106,8 @@ def decide_next(
     1. DONE wins unconditionally when every task signalled ``.hsm_done``
        (a chunk can both finish the last task AND be a "failed" Slurm state —
        the sentinel is the truth).
+    1b. FAILED when every task not done is out of retries (``failed``):
+       nothing is left to run.
     2. else recompute ``consecutive_no_progress`` (reset to 0 on progress,
        else +1).
     3. FAILED if ``consecutive_no_progress >= max_consecutive_failures`` — a
@@ -122,6 +127,19 @@ def decide_next(
             reason=(
                 f"all {n} task(s) signalled {'.hsm_done' if n else 'done'} "
                 f"after {outcome.chunk_index + 1} chunk(s)"
+            ),
+        )
+
+    # 1b. the rest crashed out of their retries
+    if outcome.done_count + len(outcome.failed) >= n:
+        return ChainStep(
+            decision=ChainDecision.FAILED,
+            next_state=replace(state, failed=True),
+            reason=(
+                f"{outcome.done_count}/{n} task(s) done; task(s) "
+                f"{', '.join(map(str, outcome.failed))} crashed in "
+                f"{config.max_consecutive_failures} chunk(s) in a row — their exit codes are "
+                f"in tasks/task_<i>/.hsm_failed, the tracebacks in the chunk logs."
             ),
         )
 

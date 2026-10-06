@@ -620,11 +620,15 @@ async def run_resumable_sweep_async(
                 if obs_mtime is None
                 else max(obs_mtime, progress.checkpoint_mtime)
             )
+        # Tasks out of retries: crashed in max_consecutive_failures chunks in a row.
+        cap = chain_cfg.max_consecutive_failures
+        crashed_out = {i for i, n in progress.crashes.items() if n >= cap}
         outcome = ChunkOutcome(
             chunk_index=state.chunk_index,
             done_count=done_count,
             num_tasks=num_tasks,
             progressed=progressed,
+            failed=tuple(sorted(crashed_out - progress.done_indices)),
             terminal_states=tuple(last_statuses.values()),
         )
         step = decide_next(outcome, state, chain_cfg)
@@ -640,6 +644,7 @@ async def run_resumable_sweep_async(
         if progress.checkpoint_mtime is not None:
             prev_mtime = progress.checkpoint_mtime
 
+        should_archive = getattr(source, "_should_archive", None)
         if decision is ChainDecision.DONE:
             # DATA-LOSS GUARD: the intermediate pulls exclude the heavy
             # checkpoint dir on the assumption it rides the server-side archive.
@@ -648,7 +653,6 @@ async def run_resumable_sweep_async(
             # include it in the FINAL pull before collect_results rm -rf's the
             # remote. (Native/shared-FS sources have no _should_archive and keep
             # the checkpoint in place, so this is a no-op there.)
-            should_archive = getattr(source, "_should_archive", None)
             if (
                 callable(should_archive)
                 and not should_archive(False)
@@ -662,7 +666,14 @@ async def run_resumable_sweep_async(
             await _safe_collect(source, defer_cleanup=False)
             break
         if decision is ChainDecision.FAILED:
-            # Keep the remote for inspection (don't archive/clean a failed chain).
+            # Keep the remote for inspection (no rm -rf), but archive it first, as
+            # for DONE (gotcha 4b): the finished tasks' checkpoints must outlive the
+            # /scratch purge. Only archive_on: never opts out (issue #15).
+            if callable(should_archive) and should_archive(False):
+                try:
+                    await source._archive_remote(True)
+                except Exception as e:  # noqa: BLE001 — the remote dir is kept either way
+                    logger.warning(f"chain {sweep_id}: archive failed ({e}); the remote is kept")
             await _safe_collect(source, defer_cleanup=True)
             break
 

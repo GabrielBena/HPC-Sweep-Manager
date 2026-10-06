@@ -91,6 +91,24 @@ class TestFailed:
         assert step.decision is ChainDecision.DONE
 
 
+class TestOutOfRetries:
+    """Issues #15/#16: tasks whose crash record reached max_consecutive_failures are settled."""
+
+    def test_the_rest_out_of_retries_fails_at_once(self):
+        outcome = ChunkOutcome(
+            chunk_index=1, done_count=2, num_tasks=3, progressed=True, failed=(3,)
+        )
+        step = decide_next(outcome, ChainState(chunk_index=1), CFG)
+        assert step.decision is ChainDecision.FAILED and step.next_state.failed
+        assert "2/3 task(s) done; task(s) 3 crashed in 2 chunk(s) in a row" in step.reason
+
+    def test_others_still_running_advance(self):
+        outcome = ChunkOutcome(
+            chunk_index=0, done_count=1, num_tasks=3, progressed=True, failed=(3,)
+        )
+        assert decide_next(outcome, ChainState(), CFG).decision is ChainDecision.ADVANCE
+
+
 class TestStateRoundTrip:
     def test_chain_state_dict_round_trip(self):
         s = ChainState(chunk_index=2, consecutive_no_progress=1, done=False, failed=False)

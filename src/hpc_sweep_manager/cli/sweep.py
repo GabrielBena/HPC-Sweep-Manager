@@ -650,7 +650,7 @@ def _run_sweep_via_orchestrator(
             console.print(f"  done sentinel   = $HSM_WORKDIR/{rconf.done_sentinel}")
             console.print(
                 f"  guards          = up to {rconf.max_chunks} chunks, "
-                f"{rconf.max_consecutive_failures} no-progress strikes → FAILED"
+                f"{rconf.max_consecutive_failures} no-progress chunks or crashes in a row → FAILED"
             )
 
         if isinstance(effective_spec.gpu_type, tuple):

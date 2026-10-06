@@ -271,10 +271,20 @@ the previous, so the seam is serialized) or stops:
 
 - **done** — every task wrote `.hsm_done`.
 - **failed** — `max_chunks` reached without finishing, OR
-  `max_consecutive_failures` chunks made no progress (a deterministic crash).
+  `max_consecutive_failures` chunks made no progress (a deterministic crash), OR
+  every task not done is out of retries (below).
 
 Done-detection is the **sentinel, never the exit code**: a timed-out chunk
-exits non-zero yet is the *normal* mid-budget outcome. The launcher drives the
+exits non-zero yet is the *normal* mid-budget outcome. A chunk exits 0 when
+the run exited 0 or its batch shell caught a SIGTERM (the pre-walltime
+signal, a preemption). Any other non-zero exit is a **crash**: the chunk exits with
+that code (Slurm shows FAILED) and appends `exit=<code> job=<id> <date>` to
+`tasks/task_<i>/.hsm_failed`; a chunk that ends any other way removes it. A
+task with `max_consecutive_failures` crashes in a row is out of retries: later
+chunks skip it, and the chain ends FAILED once the other tasks are done.
+Deleting its `.hsm_failed` while the chain runs gives it its retries back. A
+FAILED chain is archived to `archive_dir` like a DONE one (unless
+`archive_on: never`) and its remote dir is kept for inspection. The launcher drives the
 chain while alive — run it under `tmux`/`nohup` (an always-on workstation is
 ideal). If it dies, resume with `hsm sweep advance <sweep_id>` (re-attaches via
 the manifest; submits the next chunk if the current one is terminal). A cron
@@ -320,7 +330,7 @@ resumable:
   done_sentinel: ".hsm_done"     # script writes this under $HSM_WORKDIR when complete
   checkpoint_subdir: "resume"    # per-task persistent ckpt dir; HSM passes HSM_RESUME_{FROM,TO}
   max_chunks: 10                 # runaway guard (chain length cap)
-  max_consecutive_failures: 2    # no-progress strikes -> mark the chain FAILED
+  max_consecutive_failures: 2    # no-progress chunks (chain) / crashes in a row (task) -> FAILED
 ```
 
 `hsm queue mine` annotates the chain's array row `(chunk k/max)`. `--dry-run`

@@ -12,13 +12,16 @@ runaway guards live in :mod:`.chain`; this module is purely the configuration.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .chain import ChainConfig
 from .utils import parse_walltime
 
 logger = logging.getLogger(__name__)
+
+# The per-task crash record the array template keeps (one line per crashed chunk in a row).
+FAILED_MARKER = ".hsm_failed"
 
 # Keys ResumableConfig understands; anything else in a config block is dropped
 # with a warning (tolerant, like ResourceSpec.from_dict).
@@ -68,7 +71,7 @@ class ResumableConfig:
     done_sentinel: str = ".hsm_done"  # script writes this under HSM_WORKDIR when complete
     checkpoint_subdir: str = "resume"  # per-task persistent ckpt dir under the workdir
     max_chunks: int = 10  # runaway guard: chain length cap
-    max_consecutive_failures: int = 2  # no-progress strikes -> mark the chain FAILED
+    max_consecutive_failures: int = 2  # no-progress chunks (chain) / crashes in a row (task)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ResumableConfig:
@@ -165,10 +168,13 @@ class ChunkProgress:
     * ``done_indices`` — global task indices whose ``.hsm_done`` sentinel exists.
     * ``checkpoint_mtime`` — newest mtime (epoch seconds) of any file under any
       task's checkpoint subdir, or ``None`` if nothing has been written yet.
+    * ``crashes`` — global task index → chunks in a row it crashed in (lines of its
+      :data:`FAILED_MARKER`).
     """
 
     done_indices: frozenset[int]
     checkpoint_mtime: float | None
+    crashes: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
