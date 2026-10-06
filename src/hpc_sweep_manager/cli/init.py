@@ -340,8 +340,9 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 
     return f"""
 # --- Defaults for `--mode local` (LocalComputeSource) -------------------------
-# Read ONLY when --mode is local. Slurm-only fields (gpu_type / modules /
-# qos / account / extra_directives) belong in `slurm:` below, not here.
+# Read by --mode local and by the local child of --mode distributed. Slurm-only
+# fields (gpu_type / modules / qos / account / extra_directives) belong in
+# `slurm:` below, not here.
 {local_block}
 
 # --- Optional: defaults for `--mode array|individual` (Slurm) -----------------
@@ -368,8 +369,8 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 
 # --- Optional: SSH remotes (populated by `hsm remote add <alias>`) ------------
 # Per-remote `spec:` sub-block is the no-bleed home for that remote's
-# default ResourceSpec — the `local:` / `slurm:` blocks above are deliberately
-# NOT read for --mode remote or --mode distributed.
+# default ResourceSpec — no remote reads the `local:` / `slurm:` blocks above
+# (only distributed's local child reads `local:`).
 #
 # `backend:` selects how this remote is driven:
 #   - "ssh"   (default) — push code via rsync, run wrapped bash directly

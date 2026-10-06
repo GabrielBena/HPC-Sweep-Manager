@@ -88,20 +88,42 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `DistributedComputeSource` now hands out the tasks itself: one worker per child
   takes the next task whenever the child has room, then every child waits on its
   own jobs and collects its own results, only once no task of the sweep is active.
+  Two remotes with the same host and root (`uzh` + `uzh-v100`) share one remote
+  sweep dir, so one's cleanup could delete the other's tasks: now every remote
+  keeps its dir when a task did not complete or when two remotes share one, and
+  the log says so (`hsm remote clean` removes them).
 - **A failed submit hung a distributed sweep (X3).** A task whose submit failed
   three times was never counted, so the launcher waited forever, and a Ctrl-C was
-  swallowed. Now that task is reported FAILED and the child takes no more tasks;
-  the sweep carries on with the others and exits non-zero. Tasks no child could
-  take are FAILED too. A child that loses its connection mid-run has its jobs
-  reported FAILED (its remote dir is kept), and the other children are still
-  collected.
+  swallowed. Now a failed submit retires that child and hands the task to
+  another, up to 3 tries; then the task is FAILED. Tasks no child could take are
+  FAILED too, and the sweep exits non-zero. A child also retires when its status
+  check fails (a dead connection is no longer polled forever) or once 40% of its
+  finished jobs (from 5 on) FAILED, the old failsafe as a fixed rule. A child that
+  loses its connection mid-run has its jobs reported FAILED, and the other
+  children are still collected.
+- **A distributed Slurm child no longer sbatches the whole queue (X3).** Without
+  `max_parallel_jobs` it is capped at 50 jobs queued or running, the fair-share
+  default; `--dry-run` shows each Slurm child's cap. A `max_parallel_jobs` that is
+  not an integer ≥ 1 is an error even when the spec sets `array_throttle` (`0`,
+  which meant no cap, included).
+- **`source_mapping.yaml` records the submitted jobs (X3).** Each task has its
+  host and job id, a Slurm child's task is keyed by its real dir
+  (`<sweep_id>_task_003`, which `hsm sweep status` reads), and the file is
+  written while tasks are handed out and on Ctrl-C, not only at the end. It lost
+  `sweep_metadata.strategy` and the per-task `start_time`. A distributed run's
+  job ids are `<child>:<job id>`: two clusters' ids could collide and hide a
+  FAILED.
 - **The local child of a distributed sweep ignored the `local:` block (X3).** It
   ran without `local.visible_gpus` and the per-task spec, so its tasks could land
-  on a reserved GPU (anahita's GPU 0). It now uses both, like `--mode local`.
+  on a reserved GPU (anahita's GPU 0). It now uses both, like `--mode local`, and
+  an invalid `local:` block fails the run, as in `--mode local`.
 - **Distributed no longer installs process-wide signal handlers (X3).** Ctrl-C
   stops the driver and leaves started tasks running and Slurm jobs queued, as in
-  the other modes. The `strategy`, `collect_interval` and failsafe keys of the
-  `distributed:` block no longer change anything, and HSM warns when it sees them.
+  the other modes; a Ctrl-C during dispatch logs the `ssh <host> scancel <ids>`
+  line. Ctrl-C now exits 1 (`Aborted!`) and SIGTERM 143; both used to exit 0
+  after the handler's cleanup. The `strategy`, `collect_interval` and failsafe
+  keys of the `distributed:` block change nothing (the failsafe keys never did),
+  and HSM warns when it sees them.
 - **Arrays can be throttled (S5).** `spec.array_throttle: N` renders
   `--array=1-K%N`; before, HSM had no throttle and the consumer ran
   `scontrol update ArrayTaskThrottle=N` after every submission. On a `backend:

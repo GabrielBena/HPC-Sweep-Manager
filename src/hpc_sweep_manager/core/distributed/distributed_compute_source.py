@@ -5,13 +5,19 @@ full :class:`ComputeSource`. This class only hands out the tasks and then defers
 
 - :meth:`submit_batch` runs one worker per child over a shared task queue. A worker takes
   the next task whenever its child has room, so faster children take more tasks. Room means
-  fewer active jobs than the child's ``max_parallel_jobs``; for a Slurm child, queued jobs
-  count. A local or ssh child also waits for a free slot of its own inside ``submit_job``.
-- A failed submit records that task as FAILED, and the child takes no more tasks. Tasks
-  that no child could take are FAILED as well. Nothing hangs, and cancellation propagates.
+  fewer active jobs than the child's ``max_parallel_jobs`` (50 for a Slurm child that sets
+  none); for a Slurm child, queued jobs count. A local or ssh child also waits for a free
+  slot of its own inside ``submit_job``.
+- A child retires (takes no more tasks) when a submit or a status refresh fails, or when
+  40% of its finished jobs FAILED (from 5 on). A task whose submit failed goes back to the
+  queue, up to 3 tries; tasks no child could take end FAILED. Nothing hangs, and
+  cancellation propagates.
 - :meth:`wait_for_all` waits on every child; :meth:`collect_results` then has each child
   pull (and clean up) its own results. Collection starts only once every task of the sweep
-  is terminal, so no child deletes a remote dir under a running task.
+  is terminal, and every remote dir is kept when a task did not complete or two children
+  share one, so no child deletes another's tasks.
+- ``source_mapping.yaml`` names each task's child, host and job id. It is written while
+  tasks are handed out and when the waiting ends, Ctrl-C included.
 """
 
 from __future__ import annotations
@@ -29,8 +35,13 @@ import yaml
 
 from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
+from ..hpc.fair_share import DEFAULT_THROTTLE
+from ..hpc.slurm_base import SlurmBase
 
 logger = logging.getLogger(__name__)
+
+SUBMIT_TRIES = 3  # a task whose submit fails is handed to another child, up to this many tries
+FAILSAFE_MIN_JOBS, FAILSAFE_RATIO = 5, 0.4  # retire a child once 40% of its 5+ finished jobs FAILED
 
 # `distributed:` keys of the old dispatcher. They no longer change anything.
 _RETIRED_KEYS = (
@@ -119,6 +130,8 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
                     project_dir=project_dir,
                     script_path=script_path,
                 )
+                if not remote_config.get("max_parallel_jobs"):  # the fair-share rule: <= 50 at once
+                    source.max_parallel_jobs = DEFAULT_THROTTLE
                 logger.info(f"Remote source ready: {remote_name} (backend=slurm)")
             elif backend == "ssh":
                 source = build_ssh_source(
@@ -164,7 +177,7 @@ class DistributedComputeSource(ComputeSource):
         )
         self._hsm_config = hsm_config
         self.poll_interval = poll_interval
-        self._owner: dict[str, ComputeSource] = {}  # job id -> the child running it
+        self._owner: dict[str, tuple[ComputeSource, str]] = {}  # "child:job id" -> (child, job id)
         self._unplaced: dict[str, JobInfo] = {}  # FAILED records of tasks never submitted
         self.sweep_dir: Path | None = None
         self.sweep_id: str | None = None
@@ -236,36 +249,60 @@ class DistributedComputeSource(ComputeSource):
                 f"DistributedComputeSource {self.name!r} not set up; call setup() first"
             )
         prefix = job_name_prefix or sweep_id
-        queue = deque((f"{prefix}_task_{i:03d}", p) for i, p in enumerate(params_list, 1))
+        queue = deque((f"{prefix}_task_{i:03d}", p, 1) for i, p in enumerate(params_list, 1))
+        retired: set[str] = set()
+
+        def retire(child: ComputeSource, why: str) -> None:
+            retired.add(child.name)
+            logger.error(f"{child.name}: {why}; it takes no more tasks")
 
         async def feed(child: ComputeSource) -> None:
             while queue:
+                n = len(child.completed_jobs)
+                failed = sum(j.status == "FAILED" for j in child.completed_jobs.values())
+                if n >= FAILSAFE_MIN_JOBS and failed >= FAILSAFE_RATIO * n:
+                    return retire(child, f"{failed} of its {n} finished jobs FAILED")
                 if len(child.active_jobs) >= max(child.max_parallel_jobs, 1):
                     await asyncio.sleep(self.poll_interval)
                     try:
-                        await child.update_all_job_statuses()
-                    except Exception as e:  # noqa: BLE001 — still full as far as we know
-                        logger.warning(f"{child.name}: status refresh failed: {e}")
+                        await child.poll()
+                    except Exception as e:  # noqa: BLE001 — e.g. its ssh connection died
+                        return retire(child, f"its status refresh failed ({e!r})")
+                    self._write_mapping()
                     continue
-                name, params = queue.popleft()
+                name, params, tries = queue.popleft()
                 try:
                     job_id = await child.submit_job(
                         params=params, job_name=name, sweep_id=sweep_id, wandb_group=wandb_group
                     )
-                except Exception as e:  # noqa: BLE001 — the sweep goes on without this child
-                    logger.error(
-                        f"{child.name}: submitting {name} failed ({e!r}); it takes no more tasks"
-                    )
-                    self._fail(name, params, child.name)
-                    return
-                self._owner[job_id] = child
+                except Exception as e:  # noqa: BLE001 — another child may take the task
+                    if tries < SUBMIT_TRIES:
+                        queue.appendleft((name, params, tries + 1))
+                    else:
+                        self._fail(name, params, child.name)
+                    return retire(child, f"submitting {name} failed ({e!r}; try {tries})")
+                self._owner[f"{child.name}:{job_id}"] = (child, job_id)
 
-        await asyncio.gather(*(feed(c) for c in self._child_sources))
-        if queue:
-            logger.error(f"{len(queue)} task(s) never submitted: no child could take them")
-        for name, params in queue:
-            self._fail(name, params, "")
-        self._write_mapping()
+        try:
+            # A retiring child may hand its task back after the others ran dry: go round again.
+            while queue and (live := [c for c in self._child_sources if c.name not in retired]):
+                async with asyncio.TaskGroup() as tg:
+                    for child in live:
+                        tg.create_task(feed(child))
+            if queue:
+                logger.error(f"{len(queue)} task(s) never submitted: no child could take them")
+            for name, params, _ in queue:
+                self._fail(name, params, "")
+        except BaseException:
+            for c in self._child_sources:  # like SSHSlurmComputeSource.submit_batch; no scancel
+                if isinstance(c, SlurmBase) and c.active_jobs:
+                    host, ids = getattr(c, "host", "localhost"), " ".join(c.active_jobs)
+                    logger.error(
+                        f"{c.name}: submission stopped; to cancel: ssh {host} scancel {ids}"
+                    )
+            raise
+        finally:
+            self._write_mapping()
         return list(self._owner)
 
     def _fail(self, job_name: str, params: dict[str, Any], source_name: str) -> None:
@@ -278,9 +315,9 @@ class DistributedComputeSource(ComputeSource):
     def _jobs(self) -> dict[str, JobInfo]:
         """Every task of the sweep: its job on the owning child, or its FAILED record."""
         placed = {
-            j: c.active_jobs.get(j) or c.completed_jobs.get(j) for j, c in self._owner.items()
+            k: c.active_jobs.get(j) or c.completed_jobs.get(j) for k, (c, j) in self._owner.items()
         }
-        return {**self._unplaced, **{j: info for j, info in placed.items() if info}}
+        return {**self._unplaced, **{k: info for k, info in placed.items() if info}}
 
     async def submit_job(
         self,
@@ -302,38 +339,38 @@ class DistributedComputeSource(ComputeSource):
         A child whose wait raises (a lost connection) can't be followed any more: its active
         jobs are reported FAILED, which also makes its collect keep the remote dir.
         """
-        counts: dict[int, tuple[int, int]] = {}
+        dones: dict[int, int] = {}
 
         def progress(i: int):
             if (callback := on_progress) is None:
                 return None
 
-            def report(done: int, total: int) -> None:
-                counts[i] = (done, total)
+            def report(done: int, _total: int) -> None:  # the sweep's total is known here
+                dones[i] = done
                 n = len(self._unplaced)
-                callback(
-                    n + sum(d for d, _ in counts.values()), n + sum(t for _, t in counts.values())
-                )
+                callback(n + sum(dones.values()), n + len(self._owner))
 
             return report
 
         children = self._child_sources
-        results = await asyncio.gather(
-            *(
-                c.wait_for_all(poll_interval=poll_interval, on_progress=progress(i))
-                for i, c in enumerate(children)
-            ),
-            return_exceptions=True,
-        )
-        for child, result in zip(children, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error(
-                    f"{child.name}: lost track of {len(child.active_jobs)} job(s) ({result!r})"
-                )
-                for job_id in list(child.active_jobs):
-                    child.update_job_status(job_id, "FAILED")
-        self.completed_jobs = self._jobs()
-        self._write_mapping()
+        try:
+            results = await asyncio.gather(
+                *(
+                    c.wait_for_all(poll_interval=poll_interval, on_progress=progress(i))
+                    for i, c in enumerate(children)
+                ),
+                return_exceptions=True,
+            )
+            for child, result in zip(children, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        f"{child.name}: lost track of {len(child.active_jobs)} job(s) ({result!r})"
+                    )
+                    for job_id in list(child.active_jobs):
+                        child.update_job_status(job_id, "FAILED")
+            self.completed_jobs = self._jobs()
+        finally:
+            self._write_mapping()
         return {job_id: info.status for job_id, info in self.completed_jobs.items()}
 
     async def collect_results(
@@ -341,11 +378,26 @@ class DistributedComputeSource(ComputeSource):
     ) -> bool:
         """Have each child pull (and clean up) its results, never while a task is active.
 
-        One child at a time: two remote entries may share a host and its sweep dir.
+        Whether the remote dirs go is decided once for the sweep: every child keeps its dir
+        when a task did not complete (a lost child's jobs are FAILED, and may still run) or
+        when two children share a (host, sweep dir), whose ``rm -rf`` would take the other's
+        tasks. One child at a time, as two may share that dir.
         """
         if busy := [c.name for c in self._child_sources if c.active_jobs]:
             logger.warning(f"Not collecting yet: {', '.join(busy)} still have active jobs")
             return False
+        remotes = [c for c in self._child_sources if hasattr(c, "keep_remote_on_success")]
+        why = []
+        if any(info.status != "COMPLETED" for info in self._jobs().values()):
+            why.append("a task did not complete")
+        if len({(c.host, c._remote_sweep_dir) for c in remotes}) < len(remotes):
+            why.append("two remotes share a sweep dir")
+        if why and remotes:
+            for c in remotes:
+                c.keep_remote_on_success = True
+            logger.warning(
+                f"Keeping the remote sweep dirs ({'; '.join(why)}); `hsm remote clean` removes them"
+            )
         ok = True
         for child in self._child_sources:
             try:
@@ -356,35 +408,43 @@ class DistributedComputeSource(ComputeSource):
         return ok
 
     def _write_mapping(self) -> None:
-        """``source_mapping.yaml``: which child ran each task (read by ``hsm sweep status``)."""
-        assert self.sweep_dir is not None
+        """``source_mapping.yaml``: where each task ran (read by ``hsm sweep status``).
+
+        Keyed by the task's dir under ``tasks/`` (``task_003``; ``<sweep_id>_task_003`` on a
+        Slurm child); a task never submitted has no job id.
+        """
+        if self.sweep_dir is None:
+            return
+        hosts = {c.name: getattr(c, "host", "localhost") for c in self._child_sources}
         tasks = {
-            "task_" + info.job_name.rsplit("_task_", 1)[-1]: {
+            Path(info.task_dir or "task_" + info.job_name.rsplit("_task_", 1)[-1]).name: {
                 "compute_source": info.source_name,
+                "host": hosts.get(info.source_name),
+                "job_id": None if key in self._unplaced else info.job_id,
                 "status": info.status,
                 "complete_time": info.complete_time.isoformat() if info.complete_time else None,
             }
-            for info in self._jobs().values()
+            for key, info in sorted(self._jobs().items(), key=lambda kv: kv[1].job_name)
         }
         meta = {
             "total_tasks": len(tasks),
             "compute_sources": [c.name for c in self._child_sources],
             "timestamp": datetime.now().isoformat(),
         }
-        mapping = {"sweep_metadata": meta, "task_assignments": dict(sorted(tasks.items()))}
+        mapping = {"sweep_metadata": meta, "task_assignments": tasks}
         (self.sweep_dir / "source_mapping.yaml").write_text(
             yaml.safe_dump(mapping, sort_keys=False)
         )
 
     async def get_job_status(self, job_id: str) -> str:
-        if child := self._owner.get(job_id):
-            return await child.get_job_status(job_id)
+        if owned := self._owner.get(job_id):
+            return await owned[0].get_job_status(owned[1])
         info = self.completed_jobs.get(job_id) or self._unplaced.get(job_id)
         return info.status if info else "UNKNOWN"
 
     async def cancel_job(self, job_id: str) -> bool:
-        child = self._owner.get(job_id)
-        return bool(child) and await child.cancel_job(job_id)
+        owned = self._owner.get(job_id)
+        return bool(owned) and await owned[0].cancel_job(owned[1])
 
     async def health_check(self) -> dict[str, Any]:
         child_health: dict[str, Any] = {}

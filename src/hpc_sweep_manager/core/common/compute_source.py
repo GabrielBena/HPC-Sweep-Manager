@@ -236,7 +236,13 @@ class ComputeSource(ABC):
                 logger.warning(f"Failed to update status for {job_id}: {e}")
 
     async def _after_poll(self, newly_done: int) -> None:  # noqa: B027 — optional hook
-        """Hook run after each poll of :meth:`wait_for_all` (SSH-Slurm pulls finished tasks)."""
+        """Hook run after each :meth:`poll` (SSH-Slurm pulls finished tasks)."""
+
+    async def poll(self) -> None:
+        """One status refresh, then the :meth:`_after_poll` hook."""
+        done_before = len(self.completed_jobs)
+        await self.update_all_job_statuses()
+        await self._after_poll(len(self.completed_jobs) - done_before)
 
     async def wait_for_all(
         self,
@@ -252,9 +258,7 @@ class ComputeSource(ABC):
 
         report()
         while self.active_jobs:
-            done_before = len(self.completed_jobs)
-            await self.update_all_job_statuses()
-            await self._after_poll(len(self.completed_jobs) - done_before)
+            await self.poll()
             report()
             if self.active_jobs:
                 await asyncio.sleep(poll_interval)

@@ -88,9 +88,9 @@ is no cross-pollination:
 
 | Block | Read by | Use for |
 |---|---|---|
-| `local:` | `--mode local` | local GPU/CPU/walltime defaults (no Slurm-only fields) |
+| `local:` | `--mode local`, and the local child of `--mode distributed` | local GPU/CPU/walltime defaults (no Slurm-only fields) |
 | `slurm:` | `--mode array` / `--mode individual` | full Slurm spec including `gpu_type` / `modules` / `qos` / `account` |
-| `distributed.remotes.<alias>.spec:` | `--remote <alias>` / `--mode distributed` | per-remote defaults; `local:` and `slurm:` are NOT read for these modes |
+| `distributed.remotes.<alias>.spec:` | `--remote <alias>` / `--mode distributed` | per-remote defaults; no remote reads `local:` or `slurm:` |
 
 This means a `slurm:` block with `gpus: 4` will **not** apply to
 `--mode local` (or vice versa). If you want the same defaults across
@@ -537,9 +537,11 @@ every detected GPU.
 
 ## Per-remote `spec:` — defaults for `--remote` and `--mode distributed`
 
-`--mode remote` / `--mode distributed` deliberately read **neither**
-the `local:` nor the `slurm:` block — remote boxes are heterogeneous,
-so their defaults live per-remote under `distributed.remotes.<alias>`:
+A remote (`--mode remote`, or a remote child of `--mode distributed`) reads
+**neither** the `local:` nor the `slurm:` block — remote boxes are
+heterogeneous, so their defaults live per-remote under
+`distributed.remotes.<alias>` (distributed's local child reads `local:`, as
+`--mode local` does):
 
 ```yaml
 # .hsm/config.yaml

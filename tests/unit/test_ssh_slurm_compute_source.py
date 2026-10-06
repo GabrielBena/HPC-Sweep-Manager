@@ -514,6 +514,14 @@ class TestArrayThrottle:
                 script_path="t.py",
             )
 
+    @pytest.mark.parametrize(("value", "error"), [("350", "an integer"), (0, ">= 1")])
+    def test_a_bad_max_parallel_jobs_is_named_beside_a_throttle(self, tmp_path, value, error):
+        cfg = {"max_parallel_jobs": value, "spec": {"array_throttle": 50}}
+        with pytest.raises(ValueError, match=f"max_parallel_jobs must be {error}"):
+            build_ssh_slurm_source(
+                name="uzh", remote_cfg=cfg, project_dir=str(tmp_path), script_path="t.py"
+            )
+
     def test_an_explicit_throttle_wins(self, tmp_path):
         cfg = {"max_parallel_jobs": 350, "spec": {"array_throttle": 50}}
         src = build_ssh_slurm_source(

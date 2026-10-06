@@ -193,10 +193,11 @@ from `hsm_config.yaml`'s `distributed:` block: one local child (with the
 (`build_ssh_source` or `build_ssh_slurm_source`, by `backend:`). It only
 hands out the work: `submit_batch` runs one worker per child over a shared
 task queue (a child takes the next task when it has fewer active jobs than
-its `max_parallel_jobs`; a failed submit marks that task FAILED and retires
-the child), `wait_for_all` waits on every child, and `collect_results` has
-each child pull and clean its own results once no task is active. It writes
-`source_mapping.yaml` for `hsm sweep status`.
+its `max_parallel_jobs`; a failed submit retires the child and hands the
+task to another, up to 3 tries), `wait_for_all` waits on every child, and
+`collect_results` has each child pull and clean its own results once no task
+is active. It writes `source_mapping.yaml` (child, host, job id per task) for
+`hsm sweep status`.
 
 ## Sweep completion (status today)
 

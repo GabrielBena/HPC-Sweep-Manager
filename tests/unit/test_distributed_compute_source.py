@@ -259,6 +259,8 @@ class TestBuildSshChildren:
         assert uzh.archive_dir == "/shares/payvand.ini.uzh/hsm-archive"
         assert uzh.default_spec.walltime == "06:00:00"
         assert uzh.default_spec.gpu_type == "H100"
+        # No max_parallel_jobs: the fair-share cap, never the whole queue at once.
+        assert uzh.max_parallel_jobs == 50
 
     async def test_bad_spec_value_fails_instead_of_dropping_remote(self, tmp_path):
         """A config error must fail the run — dropping the remote would shift its
@@ -288,6 +290,25 @@ class TestBuildSshChildren:
         with pytest.raises(ValueError, match="remote 'uzh' spec"):
             await src.setup(tmp_path / "sweep", "sweep_x")
         assert src._child_sources == []
+
+    async def test_a_slurm_child_keeps_its_own_cap(self, tmp_path):
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+
+        class FakeConfig:
+            config_data = {"distributed": {}}
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        [uzh] = await _build_ssh_children(
+            FakeConfig(), {"uzh": {"backend": "slurm", "max_parallel_jobs": 8}}
+        )
+        assert uzh.max_parallel_jobs == 8
 
     async def test_unknown_backend_skipped(self, tmp_path, caplog):
         """Misconfigured `backend:` doesn't kill the whole sweep — just skips."""
@@ -367,3 +388,35 @@ class TestConfig:
             "strategy, collect_interval no longer change anything" in r.message
             for r in caplog.records
         )
+
+
+def test_the_dry_run_shows_each_slurm_child_s_cap():
+    from rich.console import Console
+
+    from hpc_sweep_manager.cli.sweep import _render_placement
+    from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+
+    class FakeConfig:
+        config_data = {
+            "distributed": {
+                "local_max_jobs": 0,
+                "remotes": {
+                    "uzh": {"backend": "slurm"},
+                    "uzh-v100": {"backend": "slurm", "max_parallel_jobs": 8},
+                },
+            }
+        }
+
+    console = Console(record=True, width=200)
+    _render_placement(
+        source=None,
+        resolved_mode="distributed",
+        spec=ResourceSpec(),
+        num_tasks=4,
+        remote_alias=None,
+        hsm_config=FakeConfig(),
+        console=console,
+    )
+    out = console.export_text()
+    assert "uzh (uzh, backend=slurm): scheduler-bound, up to 50 job(s)" in out
+    assert "uzh-v100 (uzh-v100, backend=slurm): scheduler-bound, up to 8 job(s)" in out

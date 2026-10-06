@@ -170,17 +170,20 @@ HSM:
 3. Verifies `sbatch`/`squeue` on the Slurm remote.
 4. Hands out the tasks: each child takes the next one whenever it has
    room (fewer active jobs than its `max_parallel_jobs`), so faster
-   children take more. A child whose submit fails takes no more tasks;
-   that task is reported FAILED and the others carry on.
+   children take more. A child takes no more tasks once a submit or a
+   status check fails (its task goes back to the queue for another child,
+   up to 3 tries), or once 40% of its finished jobs (from 5 on) FAILED.
 5. Polls each remote's status (squeue over SSH for `backend: slurm`;
    process exit codes for `backend: ssh`).
 6. Once **every** task of the sweep is done, each child collects its own
    results: the cluster archives `/scratch → /shares` server-side (with a
    `.archived` sentinel), every remote's `tasks/` is pulled back to HQ's
-   sweep dir, and each remote's per-sweep dir is cleaned up (a child with a
-   failed task keeps its dir for inspection). Nothing is pulled or deleted
-   while any task still runs.
-7. Writes `source_mapping.yaml` (which child ran each task).
+   sweep dir, and each remote's per-sweep dir is cleaned up. Every remote
+   keeps its dir when a task did not complete, or when two remotes share
+   one (same host and root, e.g. `uzh` + `uzh-v100`); `hsm remote clean`
+   removes them. Nothing is pulled or deleted while any task still runs.
+7. Writes `source_mapping.yaml`: each task's child, host, job id and
+   status. It is rewritten while tasks are handed out, and on Ctrl-C.
 
 Final state on HQ:
 
@@ -190,7 +193,7 @@ Final state on HQ:
 ├── tasks/                    # union of all backends' outputs
 │   ├── task_001/             # ran on local
 │   ├── task_002/             # ran on ssh-box
-│   ├── task_003/             # ran on cluster (via sbatch)
+│   ├── <sweep_id>_task_003/  # ran on cluster (via sbatch; named after the job)
 │   └── ...
 ├── logs/
 └── scripts/
@@ -228,9 +231,9 @@ practical rate limiter, not a parallelism cap**. If you set it to 32,
 HSM submits up to 32 jobs and then waits for completions to free slots.
 
 **Watch the default.** When `max_parallel_jobs` is unset on an
-SSH-Slurm child, HSM falls back to an effectively-unlimited
-`max_parallel_jobs=10_000`. For S3IT and most fair-share-priced
-clusters, set this explicitly:
+SSH-Slurm child, a distributed sweep caps it at 50 jobs queued or
+running (the fair-share default; `--dry-run` shows each child's cap).
+Set it explicitly to fit your sweep:
 
 ```yaml
 distributed:
@@ -273,7 +276,10 @@ blocks for five hours. Two practical implications:
   doesn't kill the driver.
 - **Ctrl-C stops the driver, not the jobs.** Tasks already started keep
   running and Slurm jobs stay queued; nothing is pulled. Cancel the
-  cluster's with `scancel` (`hsm queue mine --remote uzh` lists them).
+  cluster's with `scancel` (`hsm queue mine --remote uzh` lists them; a
+  Ctrl-C while tasks are still being handed out logs the
+  `ssh <host> scancel <ids>` line, and `source_mapping.yaml` has every
+  task's host and job id).
 
 There's no "submit-and-detach" mode yet. If you need one, run the
 driver under a long-lived `tmux` session.
@@ -285,8 +291,8 @@ soon as it has room. A `backend: slurm` child counts its PENDING jobs as
 active, so with a large `max_parallel_jobs` it can take tasks that would
 have started sooner on anahita. Cap it (see above) to keep small sweeps
 local. The old `strategy`, `collect_interval` and failsafe keys of the
-`distributed:` block no longer change anything; HSM warns when it sees
-them.
+`distributed:` block no longer change anything (the failsafe is the fixed
+rule in step 4 above); HSM warns when it sees them.
 
 ### When to skip distributed entirely
 
