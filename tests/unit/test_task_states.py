@@ -176,7 +176,8 @@ class TestRecordMapping:
         await a.record_task_states()
         await b.record_task_states()
         got = json.loads((tmp_path / "tasks_state.json").read_text())
-        assert {t: s["state"] for t, s in got.items()} == {"task_1": "TIMEOUT", "task_2": "COMPLETED"}
+        want = {"task_1": "TIMEOUT", "task_2": "COMPLETED"}
+        assert {t: s["state"] for t, s in got.items()} == want
 
     @pytest.mark.parametrize(
         "reply",

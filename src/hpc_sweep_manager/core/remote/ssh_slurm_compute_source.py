@@ -542,20 +542,6 @@ class SSHSlurmComputeSource(SlurmBase):
             await self._write_manifest(job_ids, mode, len(params_list))
         return job_ids
 
-    async def persist_chain_manifest(
-        self,
-        *,
-        resumable: dict[str, Any],
-        chain: dict[str, Any],
-        job_ids: list[str],
-        num_tasks: int,
-    ) -> None:
-        """Re-write the manifest with the resumable config + chain state so a
-        detached ``hsm sweep advance`` can reconstruct and keep driving."""
-        await self._write_manifest(
-            job_ids, "array", num_tasks, resumable_manifest=resumable, chain=chain
-        )
-
     async def _write_manifest(
         self,
         job_ids: list[str],
@@ -946,7 +932,9 @@ class SSHSlurmComputeSource(SlurmBase):
             rc = await self._pull_tasks()
             return rc == 0
 
-        any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
+        # Anything short of COMPLETED (FAILED, CANCELLED) keeps the remote dir and isn't archived
+        # as a success.
+        any_failed = any(j.status != "COMPLETED" for j in self.completed_jobs.values())
 
         # Archive FIRST (server-side rsync /scratch → /shares — the durable
         # safety net) then pull tasks/ back to anahita. The archive uses
@@ -970,7 +958,7 @@ class SSHSlurmComputeSource(SlurmBase):
         elif any_failed:
             logger.info(
                 f"Keeping {self._remote_sweep_dir} on {self.host} for "
-                f"inspection (at least one FAILED job)"
+                f"inspection (a job not COMPLETED)"
             )
         return True
 

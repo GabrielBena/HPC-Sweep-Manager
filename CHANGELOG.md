@@ -286,6 +286,23 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   micromamba's root), and also tries
   `$CONDA_EXE`'s prefix and `~/mambaforge`. A conda already on PATH (`module load
   miniforge3`) still wins.
+- **`hsm sweep cancel` cancels a live Slurm sweep (S9).** It took the job ids from
+  `submission_summary.txt`, which is written only once the sweep's wait ends, so a running
+  sweep had none; an SSH-Slurm sweep fell through to "unknown backend", and native Slurm
+  wrote no manifest. Native Slurm now writes `.hsm_manifest.json` as it submits (also when
+  submission stops partway, and a native chain keeps its chunks there), as SSH-Slurm does.
+  `cancel` reads it and runs one `scancel` naming every job, over ssh for a `backend:
+  slurm` remote and on this machine for native Slurm, and reports the ids; a `scancel` that
+  fails or gets no answer exits 1. For a resumable chain it cancels the running chunk and
+  any chunk queued after it, then marks the chain stopped: `hsm sweep advance` won't
+  resubmit it, a launcher still driving it stops when the chunk ends, and `hsm sweep
+  collect` pulls its results and keeps its remote dir. A sweep without a manifest is
+  cancelled as before. A CANCELLED job now counts as not completed when a sweep is
+  collected, as FAILED does: the remote dir is kept, and `archive_on: completed` doesn't
+  archive it (before, a cancelled sweep was archived as a success and its remote dir
+  deleted). **For consumers:** native Slurm sweep dirs now hold a
+  `.hsm_manifest.json`, so `hsm queue mine` links a live native sweep's jobs to it;
+  `hsm sweep advance` refuses a native chain (it re-attaches over SSH only).
 - **How Slurm ended each task is recorded; a walltime kill no longer reads as RUNNING
   (S8, FR#11, #13).** TIMEOUT, OUT_OF_MEMORY, NODE_FAIL and PREEMPTED all became FAILED, and
   a task killed at its walltime wrote no `Status:` line, so `hsm sweep status`/`report`

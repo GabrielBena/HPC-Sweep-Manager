@@ -1018,7 +1018,8 @@ class TestCollectResults:
         assert sacct < next(i for i, c in enumerate(cmds) if "rsync -a" in c)
 
     @pytest.mark.asyncio
-    async def test_no_cleanup_on_failure(self, tmp_path):
+    @pytest.mark.parametrize("status", ["FAILED", "CANCELLED"])  # `hsm sweep cancel`, then collect
+    async def test_no_cleanup_on_failure(self, tmp_path, status):
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
@@ -1030,7 +1031,7 @@ class TestCollectResults:
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         jid = await src.submit_job({"s": 0}, "task_0", "sweep_1")
-        src.update_job_status(jid, "FAILED")
+        src.update_job_status(jid, status)
         ok = await src.collect_results()
         assert ok is True
         rm_calls = [c for c in conn.run_calls if c["cmd"].startswith("rm -rf")]

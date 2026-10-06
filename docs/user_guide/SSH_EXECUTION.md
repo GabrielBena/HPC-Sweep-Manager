@@ -403,6 +403,9 @@ SSH session) no longer strands results:
   It classifies each job via `sacct`, pulls everything terminal, and runs the
   `/scratch → /shares` archive once all tasks are done. Idempotent — re-run as
   more tasks finish. No dependence on the original process.
+- `hsm sweep cancel <sweep_id>` reads the same manifest to stop the sweep: one
+  `scancel` over ssh names all its jobs; a `scancel` that fails or gets no answer
+  exits 1.
 
 Every task dir also carries a `params.yaml` with that task's exact overrides,
 so a synced checkpoint is self-describing (pair it with the project code to
