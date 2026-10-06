@@ -150,21 +150,16 @@ class SlurmBase(ComputeSource):
         return {job: tracked[job].status for job in job_ids}
 
     async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
-        """A CPU-only job excludes its partition's GPU nodes (24 of ~300 CPU tasks once sat on
-        GPU nodes, taking their CPUs and memory); an ``--exclude`` already given is kept.
-
-        Only with an explicit partition (the default one isn't known here) that has CPU nodes
-        too: excluding every node would leave the job nowhere to run.
-        """
+        """A CPU-only job (:func:`cpu_only`) excludes its partition's GPU nodes, unless that is
+        every node; an ``--exclude`` given is kept. 24 of ~300 CPU tasks once sat on GPU nodes."""
         if not cpu_only(spec):
             return spec
         part = spec.partition
         if part not in self._gpu_nodes:
             rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
-            rows = [line.split()[:2] for line in out.splitlines() if len(line.split()) > 1]
-            nodes = {node for node, _ in rows} if rc == 0 else set()
-            gpu = {node for node, gres in rows if "gpu" in gres} if rc == 0 else set()
-            self._gpu_nodes[part] = sorted(gpu) if gpu < nodes else []
+            rows = [ln.split()[:2] for ln in out.splitlines() if rc == 0 and len(ln.split()) > 1]
+            gpu = {node for node, gres in rows if "gpu" in gres}
+            self._gpu_nodes[part] = sorted(gpu) if gpu < {node for node, _ in rows} else []
             if self._gpu_nodes[part]:
                 logger.info(
                     f"CPU-only jobs exclude {len(gpu)} GPU node(s) of {part} "
