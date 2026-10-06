@@ -176,11 +176,8 @@ def build_rsync_pull_cmd(
     return cmd
 
 
-# Per-sweep code snapshots (tracker S4). Each sweep pushes its code to
-# ``<project_root>/snapshots/<sweep_id>/`` and its tasks run from there, so a later push never
-# changes the code of tasks still queued. A snapshot lives exactly as long as its sweep dir. A
-# ``code/`` dir left by an older HSM is never written to or deleted (tasks it launched may still use
-# it); it only serves as the first snapshot's ``--link-dest`` base.
+# Per-sweep code snapshots (tracker S4): a sweep's tasks run from ``snapshots/<sweep_id>/``, which
+# lives as long as its sweep dir. An older HSM's shared ``code/`` is never written or deleted.
 
 
 def own_snapshot(code_dir: str | None, sweep_id: str | None) -> str | None:
