@@ -463,6 +463,10 @@ the launcher:
 - **Ctrl-C stops the launcher, not the tasks** (as with Slurm). HSM logs the
   command that stops them: `ssh <host> kill -TERM -- -<pid> …`. A cancel TERMs
   the task's whole process group.
+- **`hsm sweep collect <sweep_id>` re-attaches** after a Ctrl-C or a dead
+  launcher: from the sweep's `.hsm_manifest.json` it reads every task's exit
+  code in one command, pulls `tasks/` back, and removes the remote sweep dir once
+  every task COMPLETED. Re-run it as more tasks finish; once cleaned, it's a no-op.
 
 ## Troubleshooting
 

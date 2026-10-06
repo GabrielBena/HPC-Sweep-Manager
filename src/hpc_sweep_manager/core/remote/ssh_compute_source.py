@@ -28,6 +28,7 @@ unit-testable by overriding the two narrow I/O seams
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shlex
@@ -148,6 +149,7 @@ class SSHComputeSource(ComputeSource):
         self._task_dirs: dict[str, str] = {}
         self._slots: dict[str, Any] = {}
         self.slot_poll_s = 10.0  # how often a submit waiting for a slot polls
+        self._manifest = False  # keep .hsm_manifest.json current (only as the sweep's own source)
         self._job_counter: int = 0
         self._counter_lock: asyncio.Lock | None = None
 
@@ -365,10 +367,69 @@ class SSHComputeSource(ComputeSource):
                 self._pids[job_id] = int(out)
                 gpu_msg = f" on GPU(s) {cuda_visible}" if cuda_visible else ""
                 logger.info(f"Started {job_name} ({job_id}) on {self.host}{gpu_msg}, pid {out}")
+                if self._manifest:
+                    self._write_manifest()
                 return job_id
             logger.warning(f"{job_name}: launch {attempt}/{LAUNCH_TRIES} on {self.host}: {out!r}")
         self._finish(job_id, "FAILED")
         return job_id
+
+    async def submit_batch(self, *args: Any, **kwargs: Any) -> list[str]:
+        """The base batch, with ``.hsm_manifest.json`` rewritten as each task starts, so that
+        ``hsm sweep collect`` can re-attach (not as a distributed child: siblings share the dir)."""
+        self._manifest = True
+        try:
+            return await super().submit_batch(*args, **kwargs)
+        finally:
+            self._write_manifest()
+
+    def _write_manifest(self) -> None:
+        """Where each task runs: enough to re-attach (statuses come from the remote)."""
+        if self.sweep_dir is None:
+            return
+        jobs = {**self.completed_jobs, **self.active_jobs}
+        manifest = {
+            "sweep_id": self.sweep_id,
+            "backend": "ssh",
+            "name": self.name,
+            "host": self.host,
+            "ssh_key": self.ssh_key,
+            "ssh_port": self.ssh_port,
+            "project_dir": self.project_dir,
+            "keep_remote_on_success": self.keep_remote_on_success,
+            "remote_sweep_dir": self._remote_sweep_dir,
+            "remote_code_dir": self._remote_code_dir,
+            "tasks": {
+                j: {"name": info.job_name, "pid": self._pids.get(j), "dir": self._task_dirs.get(j)}
+                for j, info in jobs.items()
+            },
+        }
+        path = self.sweep_dir / ".hsm_manifest.json"
+        path.with_suffix(".tmp").write_text(json.dumps(manifest, indent=2))
+        path.with_suffix(".tmp").replace(path)  # never a half-written manifest
+
+    @classmethod
+    def from_manifest(cls, manifest: dict[str, Any], sweep_dir: Path) -> SSHComputeSource:
+        """A source re-attached to a launched sweep (``hsm sweep collect``): no push, no setup.
+        A task with no pid never started: FAILED. The others are polled for their state."""
+        src = cls(
+            name=manifest["name"],
+            host=manifest["host"],
+            ssh_key=manifest.get("ssh_key"),
+            ssh_port=manifest.get("ssh_port"),
+            project_dir=manifest.get("project_dir", "."),
+            keep_remote_on_success=manifest.get("keep_remote_on_success", False),
+        )
+        src.sweep_dir, src.sweep_id = sweep_dir, manifest["sweep_id"]
+        src._remote_sweep_dir = manifest["remote_sweep_dir"]
+        src._remote_code_dir = manifest.get("remote_code_dir")
+        for job, task in manifest["tasks"].items():
+            src.active_jobs[job] = JobInfo(job, task["name"], {}, src.name, "RUNNING")
+            if task.get("pid"):
+                src._pids[job], src._task_dirs[job] = task["pid"], task["dir"]
+            else:
+                src.update_job_status(job, "FAILED")
+        return src
 
     async def _acquire_slot(self) -> Any:
         """A free slot; while none is, poll, so that finished tasks free theirs."""
@@ -502,9 +563,11 @@ class SSHComputeSource(ComputeSource):
         """Close the connection. Tasks still running keep running (as Slurm jobs do)."""
         if running := [self._pids[j] for j in self.active_jobs if j in self._pids]:
             groups = " ".join(f"-{pid}" for pid in running)
+            later = f"`hsm sweep collect {self.sweep_id}` pulls them later; "
             logger.warning(
-                f"{len(running)} task(s) keep running on {self.host}, detached; to stop them: "
-                f"ssh {self.host} kill -TERM -- {groups}"
+                f"{len(running)} task(s) keep running on {self.host}, detached; "
+                f"{later if self._manifest else ''}"
+                f"to stop them: ssh {self.host} kill -TERM -- {groups}"
             )
         if self._conn is not None:
             try:

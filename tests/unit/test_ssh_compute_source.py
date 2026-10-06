@@ -9,6 +9,7 @@ helpers (rsync arg shape, GPU partitioning) have their own coverage in
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -428,6 +429,29 @@ class TestSubmit:
         content = fake_conn.launches()[0]["input"]
         assert "conda.sh" not in content
         assert "/usr/bin/python3 train.py" in content
+
+
+class TestManifest:
+    """X-2: an ssh sweep can be re-attached by `hsm sweep collect`."""
+
+    pytestmark = pytest.mark.asyncio
+
+    async def test_the_batch_keeps_a_manifest_of_its_started_tasks(self, tmp_path):
+        src = _make_src(tmp_path)
+        await src.setup(tmp_path / "sweep", "s1")
+        await src.submit_batch([{"i": 1}, {"i": 2}], "s1")
+        manifest = json.loads((tmp_path / "sweep" / ".hsm_manifest.json").read_text())
+        assert manifest["backend"] == "ssh" and manifest["host"] == "anahita"
+        assert [t["pid"] for t in manifest["tasks"].values()] == [4242, 4243]
+        back = SSHComputeSource.from_manifest(manifest, tmp_path / "sweep")
+        assert back._pids == src._pids and back._task_dirs == src._task_dirs
+
+    async def test_a_distributed_child_writes_none(self, tmp_path):
+        # Children share the sweep dir; distributed calls submit_job, never submit_batch.
+        src = _make_src(tmp_path)
+        await src.setup(tmp_path / "sweep", "s1")
+        await src.submit_job({"i": 1}, "s1_task_001", "s1")
+        assert not (tmp_path / "sweep" / ".hsm_manifest.json").exists()
 
 
 class FlakyConn(FakeConn):

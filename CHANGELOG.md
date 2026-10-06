@@ -202,6 +202,12 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   **Ctrl-C now leaves started tasks running**, as Slurm jobs do, and logs the command that
   stops them; a cancel TERMs the task's process group. The remote root must resolve to an
   absolute path at setup, and the remote sweep dir is never removed while a task runs.
+- **`hsm sweep collect` re-attaches ssh sweeps (X-2).** An ssh sweep keeps a
+  `.hsm_manifest.json` (each task's host, pid and dir) as its tasks start. After a
+  Ctrl-C or a dead launcher, `hsm sweep collect <id>` reads every task's exit code in
+  one command, pulls `tasks/` back, and removes the remote sweep dir once every task
+  COMPLETED; re-run it as more tasks finish. (A distributed sweep's ssh children write
+  none: they share the sweep dir.)
 
 ### Removed (2026-10 maintenance pass)
 

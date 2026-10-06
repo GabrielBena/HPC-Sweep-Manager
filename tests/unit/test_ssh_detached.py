@@ -8,6 +8,8 @@ a remote, with a stub training script that sleeps, prints and exits with a chose
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import os
 import shutil
 import signal
@@ -16,7 +18,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 
+from hpc_sweep_manager.cli.sweep import _collect_ssh
 from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
 
 pytestmark = pytest.mark.asyncio
@@ -157,3 +161,41 @@ async def test_a_repeated_launch_finds_the_running_task(box, tmp_path):
     launch, script = next(c for c in box._conn.calls if "setsid nohup" in c[0])
     again = await box._conn.run(launch, input=script)
     assert again.stdout.strip() == str(box._pids[job])
+
+
+async def _collect(box, tmp_path, monkeypatch) -> str:
+    """Run `hsm sweep collect`'s ssh path from the manifest, against the same local box."""
+
+    async def open_local(self):
+        return BashConn(box.home)
+
+    monkeypatch.setattr(SSHComputeSource, "_open_connection", open_local)
+    monkeypatch.setattr(SSHComputeSource, "_run_rsync", LocalBox._run_rsync)
+    manifest = json.loads((tmp_path / "sweep" / ".hsm_manifest.json").read_text())
+    out = io.StringIO()
+    await _collect_ssh(tmp_path / "sweep", manifest, Console(file=out, width=300))
+    return out.getvalue()
+
+
+async def test_collect_re_attaches_after_the_launcher_is_gone(box, tmp_path, monkeypatch):
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}, {"code": 5}, {"sleep": 30}], "s1")
+    rcs = [_remote_task(box, f"task_00{i}") / ".hsm_rc" for i in (1, 2)]
+    await box.cleanup()  # the launcher dies; its tasks don't
+    await _until(lambda: all(rc.exists() for rc in rcs))
+    out = await _collect(box, tmp_path, monkeypatch)
+    assert "2 task(s) ended (1 FAILED), 1 still running" in out
+    assert "trained 5" in (tmp_path / "sweep" / "tasks" / "task_002" / "hsm.log").read_text()
+    assert Path(box._remote_sweep_dir).is_dir()  # kept: a task still runs there
+
+
+async def test_a_finished_sweep_is_collected_and_cleaned_once(box, tmp_path, monkeypatch):
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}, {"code": 0}], "s1")
+    await box.cleanup()
+    await _until(lambda: (_remote_task(box, "task_002") / ".hsm_rc").exists())
+    assert "2 task(s) ended (0 FAILED), 0 still running" in await _collect(
+        box, tmp_path, monkeypatch
+    )
+    assert not Path(box._remote_sweep_dir).exists()
+    assert "Nothing left to collect" in await _collect(box, tmp_path, monkeypatch)
