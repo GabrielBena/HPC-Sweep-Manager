@@ -428,6 +428,17 @@ it's trying to reintroduce them, push back.
       `QueueCommandError` on failure instead of returning `[]` — over SSH
       an empty table must mean "no jobs", never "squeue quietly broke".
 
+14. **Each sweep runs from its own code snapshot (tracker S4).** Both SSH
+   sources push to `<root>/<project>/snapshots/<sweep_id>/` (`--link-dest` the
+   newest snapshot, or the legacy `code/`) and `cd` there; every wrapper exports
+   `HSM_CODE_DIR`. A snapshot lives exactly as long as its sweep dir (the success
+   cleanup removes both; `own_snapshot` guards it, so a manifest naming another
+   dir can never get it deleted). The legacy shared `code/` is never written,
+   symlinked or deleted: tasks an older HSM launched still use it. `pre_script`
+   references to it are pinned to `$HSM_CODE_DIR` (`pin_code_refs`), so a task
+   never mixes two sweeps' code. Don't reintroduce a `code` symlink: a task that
+   entered a snapshot through it outlives that snapshot's sweep.
+
 ## Known limitations
 
 - **No `hsm sweep complete` command in this build.** The bloated v0.1

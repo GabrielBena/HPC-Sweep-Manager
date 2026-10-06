@@ -69,6 +69,17 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+- **Each sweep runs its own code (S4).** Every launch re-synced one shared remote
+  `code/` dir with `--delete`, so tasks of an earlier sweep still queued on a
+  cluster ran the newest code, and files tasks wrote in their working dir were
+  deleted by the next push. Each sweep now pushes to `snapshots/<sweep_id>/`
+  (hard-linked against the previous one, so it is cheap), its tasks run there, and
+  every wrapper exports `$HSM_CODE_DIR`. A snapshot lives as long as its sweep dir,
+  and with an `archive_dir` it is archived with the results. A `code/` dir from an
+  older HSM is left untouched (remove it once nothing runs from it), and a
+  `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
+  every HSM that launches on a remote together:** an older one keeps pushing to the
+  shared `code/` dir.
 
 ### Removed (2026-10 maintenance pass)
 
