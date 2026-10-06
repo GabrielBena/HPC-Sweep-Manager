@@ -233,6 +233,12 @@ class TestCpuOnlyJobsKeepOffGpuNodes:
         spec = ResourceSpec(partition="gpu")
         assert await ScriptedSlurm([sinfo])._off_gpu_nodes(spec) == spec
 
+    async def test_a_failed_sinfo_is_asked_again(self):
+        # Cached, it sent every later CPU-only job out without the --exclude (rc 255: a blip).
+        src, spec = ScriptedSlurm([(255, "", "link down"), self.SINFO]), ResourceSpec(partition="p")
+        assert await src._off_gpu_nodes(spec) == spec
+        assert dict((await src._off_gpu_nodes(spec)).extra_directives)["--exclude"] == "gpu-1,gpu-2"
+
 
 def test_a_directive_key_without_dashes_still_renders():
     spec = ResourceSpec(extra_directives=(("exclude", "n1"), ("--nice", "100")))
