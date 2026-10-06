@@ -5,11 +5,13 @@ from __future__ import annotations
 import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+from hpc_sweep_manager.core.remote.push_exec import resolve_run_prefix
 from hpc_sweep_manager.core.remote.ssh_compute_source import (
     SSHComputeSource,
     build_ssh_source,
     parse_gpus_arg,
 )
+from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import build_ssh_slurm_source
 
 
 class TestParseGpusArg:
@@ -54,6 +56,32 @@ class TestParseGpusArg:
     def test_invalid_list_raises(self):
         with pytest.raises(ValueError, match="list"):
             parse_gpus_arg("0,foo,2")
+
+
+@pytest.mark.parametrize("factory", [build_ssh_source, build_ssh_slurm_source])
+@pytest.mark.parametrize(
+    ("remote", "distributed", "override", "prefix"),
+    [
+        ({"python_path": "/opt/py/bin/python"}, {}, None, "/opt/py/bin/python"),  # FR#15b
+        ({"conda_env": "box"}, {"python_path": "/opt/py"}, None, "conda run -n box python"),
+        ({}, {"python_path": "/opt/py"}, None, "/opt/py"),
+        ({}, {}, None, "conda run -n proj python"),  # paths.conda_env, the widest
+        ({"python_path": None}, {"conda_env": None}, None, "conda run -n proj python"),  # empty
+        ({"python_path": "python"}, {}, None, "python"),  # the way out of the project's env
+        ({"python_path": "/opt/py"}, {}, "cli", "conda run -n cli python"),
+    ],
+)
+def test_the_narrowest_interpreter_wins(factory, remote, distributed, override, prefix):
+    src = factory(
+        name="box",
+        remote_cfg={**remote, "backend": "slurm"} if factory is build_ssh_slurm_source else remote,
+        distributed_cfg=distributed,
+        conda_env_override=override,
+        project_conda_env="proj",
+        project_dir="/local/proj",
+        script_path="train.py",
+    )
+    assert resolve_run_prefix(src.conda_env, src.python_path) == prefix
 
 
 class TestBuildSshSource:

@@ -58,6 +58,7 @@ from .push_exec import (
     own_snapshot,
     partition_gpu_slots,
     pin_code_refs,
+    remote_interpreter,
     resolve_run_prefix,
     snapshot_prepare_cmd,
 )
@@ -761,6 +762,7 @@ def build_ssh_source(
     default_spec: ResourceSpec | None = None,
     gpus_override: None | int | Sequence[int] = None,
     conda_env_override: str | None = None,
+    project_conda_env: str | None = None,
 ) -> SSHComputeSource:
     """Build a push-model :class:`SSHComputeSource` from local hsm_config.
 
@@ -802,12 +804,9 @@ def build_ssh_source(
         per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
-    conda_env = (
-        conda_env_override
-        if conda_env_override is not None
-        else remote_cfg.get("conda_env", distributed_cfg.get("conda_env"))
+    conda_env, python_path = remote_interpreter(
+        remote_cfg, distributed_cfg, project_conda_env, conda_env_override
     )
-    python_path = remote_cfg.get("python_path", distributed_cfg.get("python_path"))
 
     if gpus_override is not None:
         gpus_value: None | int | Sequence[int] = gpus_override
