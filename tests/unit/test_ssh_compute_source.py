@@ -679,7 +679,9 @@ class TestCancel:
         job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
 
         assert await src.cancel_job(job_id) is True
-        assert fake_conn.run_calls[-1]["cmd"].startswith("kill -TERM -- -4242")
+        assert (
+            "kill -TERM -- -4242 2>/dev/null || kill -TERM 4242" in fake_conn.run_calls[-1]["cmd"]
+        )
         assert await src.cancel_job(job_id) is False  # TERM already sent
         await src.update_all_job_statuses()  # still checkpointing on TERM: keeps its slot
         assert job_id in src.active_jobs and src._slot_queue.qsize() == 0
