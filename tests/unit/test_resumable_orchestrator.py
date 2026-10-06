@@ -7,10 +7,10 @@ are tested without any cluster.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
-import json
 import pytest
 
 from hpc_sweep_manager.core.common.resumable import ChunkProgress, ResumableConfig

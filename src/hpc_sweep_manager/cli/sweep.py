@@ -1,6 +1,5 @@
 """Sweep execution CLI commands."""
 
-import json
 import logging
 import os
 from collections import Counter
