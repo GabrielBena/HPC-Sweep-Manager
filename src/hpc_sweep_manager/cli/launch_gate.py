@@ -1,9 +1,9 @@
 """The fair-share check before a Slurm launch (tracker S-4; Gabriel's rule, 2026-10-06).
 
 The account's load is printed on every Slurm launch. When it is hot (over 2x its share, or a
-co-worker waiting on priority) HSM asks: throttle the array and go (the default, also taken with no
-terminal), launch as asked (``--force`` skips the question), wait for the account to cool down
-(re-checked every 30 min, at most 12 h), or cancel.
+co-worker waiting on priority), or the probe can't tell, HSM asks: throttle the array and go
+(the default, also taken with no terminal), launch as asked (``--force`` skips the question),
+wait for the account to cool down (re-checked every 30 min, at most 12 h), or cancel.
 """
 
 from __future__ import annotations
@@ -34,6 +34,19 @@ async def _probe(source: Any, spec: ResourceSpec) -> Share:
         conn.close()
 
 
+def _ask_why(source: Any, spec: ResourceSpec, console: Console) -> str | None:
+    """Probe and print the account's load: ``None`` when it is known and cool, else why to ask."""
+    try:
+        share = asyncio.run(_probe(source, spec))
+    except Exception as e:  # noqa: BLE001 — a failed probe asks, it never blocks a launch
+        console.print(f"[yellow]Fair-share check failed: {e}[/yellow]")
+        return "the account's load is unknown"
+    console.print(f"[cyan]{share.summary()}[/cyan]")
+    if share.hot:
+        return "the account is hot: co-workers lose priority to every task we run"
+    return None if share.known else "the account's load is unknown"
+
+
 def fair_share_gate(
     source: Any,
     effective: ResourceSpec,
@@ -47,18 +60,11 @@ def fair_share_gate(
     """The spec to launch with (throttled if the user chose so), or ``None`` to cancel."""
     if source.source_type not in ("slurm", "ssh_slurm_remote") or not effective.account:
         return spec
-    try:
-        share = asyncio.run(_probe(source, effective))
-    except Exception as e:  # noqa: BLE001 — a failed probe never blocks a launch
-        console.print(f"[yellow]Fair-share check failed ({e}); launching as asked.[/yellow]")
-        return spec
-    console.print(f"[cyan]{share.summary()}[/cyan]")
-    if not share.hot or force or dry_run:
+    why = _ask_why(source, effective, console)
+    if why is None or force or dry_run:
         return spec
     n = min(effective.array_throttle or DEFAULT_THROTTLE, DEFAULT_THROTTLE)
-    console.print(
-        "[yellow]The account is hot: co-workers lose priority to every task we run.[/yellow]"
-    )
+    console.print(f"[yellow]Asking first: {why}.[/yellow]")
     choice = "t"
     if sys.stdin.isatty():
         choice = click.prompt(
@@ -69,11 +75,10 @@ def fair_share_gate(
     if choice == "w":
         for waited in range(WAIT_EVERY_S, WAIT_AT_MOST_S + 1, WAIT_EVERY_S):
             time.sleep(WAIT_EVERY_S)
-            share = asyncio.run(_probe(source, effective))
-            console.print(f"[dim]after {waited // 60} min: {share.summary()}[/dim]")
-            if not share.hot:
+            console.print(f"[dim]after {waited // 60} min:[/dim]")
+            if _ask_why(source, effective, console) is None:
                 return spec
-        choice = "t"  # still hot after the longest wait: go, throttled
+        choice = "t"  # still hot (or unknown) after the longest wait: go, throttled
     if choice == "c":
         return None
     if choice == "a":

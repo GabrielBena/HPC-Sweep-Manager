@@ -81,6 +81,21 @@ def test_individual_submissions_are_not_throttled(monkeypatch):
     assert got == ResourceSpec() and "can't be throttled" in out
 
 
-def test_a_failed_probe_never_blocks_a_launch(monkeypatch):
-    got, out = gate(monkeypatch, [OSError("ssh: connect timed out")])
-    assert got == ResourceSpec() and "launching as asked" in out
+UNKNOWN = Share("lab", "me", ratio=float("nan"), my_usage=0.0)
+
+
+@pytest.mark.parametrize("probe", [UNKNOWN, OSError("ssh: connect timed out")])
+def test_an_unknown_load_asks_and_never_blocks(monkeypatch, probe):
+    got, out = gate(monkeypatch, [probe])
+    assert got.array_throttle == 50 and "load is unknown" in out
+
+
+def test_wait_survives_a_failed_probe_and_needs_a_known_cool_account(monkeypatch):
+    shares = [HOT, OSError("ssh: reset"), UNKNOWN, COOL]
+    got, out = gate(monkeypatch, shares, tty=True, answer="w")
+    assert got == ResourceSpec() and "after 90 min" in out
+
+
+def test_still_hot_after_the_longest_wait_goes_throttled(monkeypatch):
+    got, _ = gate(monkeypatch, [HOT] * 25, tty=True, answer="w")
+    assert got.array_throttle == 50
