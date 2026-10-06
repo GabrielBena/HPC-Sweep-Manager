@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 
 import pytest
@@ -18,6 +19,7 @@ from hpc_sweep_manager.core.remote.push_exec import (
     partition_gpu_slots,
     pin_code_refs,
     resolve_run_prefix,
+    run_rsync,
     snapshot_prepare_cmd,
 )
 
@@ -142,6 +144,7 @@ class TestRsyncCommands:
     def test_pull_has_no_delete(self):
         cmd = build_rsync_pull_cmd("anahita", "/remote/tasks", "/local/tasks")
         assert "--delete" not in cmd
+        assert "--partial" in cmd  # a file cut off by a dropped link resumes on the next try
         assert cmd[-2] == "anahita:/remote/tasks/"
         assert cmd[-1] == "/local/tasks/"
 
@@ -163,6 +166,57 @@ class TestRsyncCommands:
             assert "IdentityAgent" not in " ".join(build())
             ssh = build(agentless=True)
             assert ssh[ssh.index("-e") + 1] == RSYNC_SSH + " -o IdentityAgent=none"
+
+
+class TestRunRsync:
+    """R7: a dropped link (ssh's 255, rsync's socket, stream and timeout codes) is tried again,
+    5 s then 20 s later; any other failure is final at once."""
+
+    @pytest.fixture
+    def rsync(self, monkeypatch):
+        """Script the exit codes of successive rsync runs; record the runs and the pauses."""
+        rcs, runs, pauses = [], [], []
+
+        class Proc:
+            def __init__(self):
+                self.returncode = rcs.pop(0)
+
+            async def communicate(self):
+                return b"", b"Connection reset by peer"
+
+        async def spawn(*cmd, **_):
+            runs.append(cmd)
+            return Proc()
+
+        async def pause(s):
+            pauses.append(s)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(asyncio, "sleep", pause)
+        return rcs, runs, pauses
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_link_is_tried_again(self, rsync):
+        rcs, runs, pauses = rsync
+        rcs += [255, 12, 0]
+        assert await run_rsync(["rsync", "a", "b"], "uzh") == 0
+        assert runs == [("rsync", "a", "b")] * 3 and pauses == [5, 20]
+
+    @pytest.mark.asyncio
+    async def test_three_tries_at_most(self, rsync, caplog):
+        rcs, runs, pauses = rsync
+        rcs += [30, 10, 35]
+        assert await run_rsync(["rsync"], "uzh") == 35
+        assert len(runs) == 3 and pauses == [5, 20]
+        assert "rc=35\nConnection reset by peer" in caplog.text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rc", [1, 23, 24])  # syntax, partial transfer, vanished files
+    async def test_other_failures_are_final(self, rsync, rc):
+        rcs, runs, pauses = rsync
+        rcs += [rc, 0]
+        assert await run_rsync(["rsync"], "uzh") == rc
+        assert len(runs) == 1 and pauses == []
 
 
 class TestDefaultExcludes:

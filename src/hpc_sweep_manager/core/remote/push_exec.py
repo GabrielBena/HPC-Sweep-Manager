@@ -5,10 +5,12 @@ the remote, run ``[conda run -n env] python train.py <params>`` per task with
 ``CUDA_VISIBLE_DEVICES`` pinning, rsync results back. These functions build the
 commands and partition the GPU pool — kept pure (no I/O) so they're unit-tested
 without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
+The one exception is :func:`run_rsync`, the rsync runner both SSH sources share.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Sequence
@@ -64,6 +66,10 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 # The ssh under every rsync: never prompt (a headless launcher would wait forever),
 # bound the connect, and give up on a link that stops answering mid-transfer.
 RSYNC_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30"
+# rsync exit codes of a dropped link, worth another try: ssh failed (255), socket I/O (10), the
+# protocol stream broke (12), a timeout (30, 35). Any other code (a bad path, a full disk) is final.
+RSYNC_RETRY_RCS = frozenset({10, 12, 30, 35, 255})
+RSYNC_BACKOFF_S = (5.0, 20.0)  # the pauses before the 2nd and the 3rd try
 
 
 def normalize_gpu_allowlist(
@@ -192,7 +198,8 @@ def build_rsync_pull_cmd(
     excludes: Sequence[str] = (),
     agentless: bool = False,
 ) -> list[str]:
-    """rsync a remote results dir back down (no ``--delete`` — purely additive).
+    """rsync a remote results dir back down (no ``--delete`` — purely additive). ``--partial``
+    keeps a file cut off mid-transfer, so the next try resumes it instead of starting over.
 
     ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task
     ``resume/`` checkpoint dir on intermediate pulls so a multi-GB checkpoint
@@ -200,12 +207,35 @@ def build_rsync_pull_cmd(
     cluster-internal archive instead. ``agentless`` as in :func:`build_rsync_push_cmd`.
     """
     ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
-    cmd = ["rsync", "-az", "-e", ssh]
+    cmd = ["rsync", "-az", "--partial", "-e", ssh]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
     cmd.append(f"{local_dir.rstrip('/')}/")
     return cmd
+
+
+async def run_rsync(cmd: list[str], host: str) -> int:
+    """Run an rsync command and return its exit code. A dropped link (:data:`RSYNC_RETRY_RCS`)
+    is tried again after each pause of :data:`RSYNC_BACKOFF_S`; the pull's ``--partial`` lets
+    a retry resume a big file."""
+    pauses = list(RSYNC_BACKOFF_S)
+    while True:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+        rc = proc.returncode or 0
+        if rc == 0:
+            return 0
+        retry = rc in RSYNC_RETRY_RCS and bool(pauses)
+        again = f", trying again in {pauses[0]:g} s" if retry else ""
+        stderr = (err or b"").decode("utf-8", errors="replace").strip()
+        level = logging.WARNING if retry else logging.ERROR
+        logger.log(level, f"rsync ({host}): rc={rc}{again}\n{stderr}")
+        if not retry:
+            return rc
+        await asyncio.sleep(pauses.pop(0))
 
 
 # Per-sweep code snapshots (tracker S4): a sweep's tasks run from ``snapshots/<sweep_id>/``, which
