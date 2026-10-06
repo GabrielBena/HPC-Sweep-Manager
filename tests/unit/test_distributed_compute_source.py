@@ -205,6 +205,35 @@ class TestBuildSshChildren:
         assert by_name["anahita"].conda_env == "lab"  # falls back to global
         assert by_name["box2"].conda_env == "lab-cpu"  # per-remote override
 
+    @pytest.mark.parametrize(
+        ("distributed", "want"),
+        [({}, "conda run -n proj python"), ({"python_path": "/opt/py"}, "/opt/py")],
+    )
+    async def test_paths_conda_env_is_the_widest_interpreter(self, tmp_path, distributed, want):
+        # FR#15b: the project's env used to beat an interpreter set on a remote or distributed:.
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+        from hpc_sweep_manager.core.remote.push_exec import resolve_run_prefix
+
+        remotes = {"plain": {}, "own_py": {"python_path": "/box/py"}, "own_env": {"conda_env": "e"}}
+
+        class FakeConfig:
+            config_data = {"distributed": {**distributed, "remotes": remotes}}
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+            def get_conda_env(self):
+                return "proj"
+
+        sources = await _build_ssh_children(FakeConfig(), remotes)
+        got = {s.name: resolve_run_prefix(s.conda_env, s.python_path) for s in sources}
+        assert got == {"plain": want, "own_py": "/box/py", "own_env": "conda run -n e python"}
+
     async def test_dispatches_backend_slurm_to_ssh_slurm_source(self, tmp_path):
         """A remote with ``backend: slurm`` becomes an SSHSlurmComputeSource."""
         from hpc_sweep_manager.core.distributed.distributed_compute_source import (
