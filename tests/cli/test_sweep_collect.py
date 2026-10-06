@@ -84,8 +84,7 @@ class TestCollectViaManifest:
     @pytest.mark.asyncio
     async def test_all_completed_pulls_and_cleans(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
-        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
+        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|COMPLETED\n"))
         conn.add("rm -rf", _Result(0))
         buf = io.StringIO()
         await _collect_via_manifest(
@@ -102,8 +101,7 @@ class TestCollectViaManifest:
     @pytest.mark.asyncio
     async def test_one_failed_reported_no_clean(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
-        conn.add("sacct", _Result(0, stdout="FAILED\n"))
+        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|FAILED\n"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -122,9 +120,8 @@ class TestCollectViaManifest:
         # maintenance reservation, not yet in sacct) must be treated as running —
         # NEVER classified COMPLETED via the sacct fallback and then deleted.
         conn, rsync_calls = patched
-        conn.add("squeue -j 1", _Result(0, stdout=""))  # job 1 gone → sacct
-        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))  # job 1 done
-        conn.add("squeue -j 2", _Result(0, stdout="PENDING\n"))  # job 2 queued
+        conn.add("squeue --me", _Result(0, stdout="2 PENDING\n"))  # job 2 queued, 1 gone
+        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))  # job 1 done
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -158,8 +155,7 @@ class TestCollectViaManifest:
     @pytest.mark.asyncio
     async def test_partial_running_pulls_only(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
-        conn.add("sacct", _Result(0, stdout="RUNNING\n"))
+        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|RUNNING\n"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -172,3 +168,18 @@ class TestCollectViaManifest:
         assert rsync_calls  # pulled what's done
         # Not all terminal → no cleanup.
         assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+
+    @pytest.mark.asyncio
+    async def test_slurm_outage_pulls_only(self, tmp_path, patched):
+        # Tracker S1: with slurmctld unreachable, squeue fails; collect must not read that as
+        # "every job finished" and archive + rm -rf the live sweep dir.
+        conn, rsync_calls = patched
+        conn.add("squeue --me", _Result(1, stderr="Unable to contact slurm controller"))
+        buf = io.StringIO()
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1",
+            _manifest(tmp_path, job_ids=["1", "2"]),
+            Console(file=buf, width=200),
+        )
+        assert "still running" in buf.getvalue()
+        assert not any(c.startswith(("sacct", "rm -rf")) for c in conn.run_calls)

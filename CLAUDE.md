@@ -322,14 +322,16 @@ it's trying to reintroduce them, push back.
    even when `N` tasks succeeded. The per-task truth lives in
    `tasks/*/task_info.txt`. Acceptable for now — defer until users complain.
 
-7b. **Terminal state comes from `sacct`, NOT queue-absence (field-report fix).**
-   A job leaving `squeue` is NOT success. Both Slurm sources, once `squeue -j`
-   returns empty, call `sacct -j <id> -n -X -o State` and map it via
-   `parse_sacct_state` (`slurm_protocol.py`) — so FAILED/TIMEOUT/OOM are
-   reported correctly instead of a false `COMPLETED` (the most dangerous bug in
-   the report). Fallback to `COMPLETED` only when sacct is absent / returns
-   nothing (no-accounting clusters; `FileNotFoundError` is caught). `hsm sweep
-   run` now exits non-zero when any job failed. Don't revert to "gone from
+7b. **Terminal state comes from `sacct`; a failed call is never a verdict.**
+   A job leaving `squeue` is NOT success, and a failed `squeue`/`sacct` is NOT
+   "gone" (an outage read as COMPLETED once let `collect` `rm -rf` a live sweep
+   dir; tracker S1). Both Slurm sources inherit `SlurmBase.update_all_job_statuses`
+   (`core/hpc/slurm_base.py`): per poll, one `squeue --me` and one `sacct -P -o
+   JobID,State` for the jobs that left the queue. squeue rc≠0 → no job changes
+   state that cycle; no sacct verdict (rc≠0 or no rows) → the job waits, and is
+   assumed COMPLETED only after `SACCT_GRACE` polls (no-accounting clusters).
+   `collect`/`advance` re-attach through `SlurmBase.adopt`. `hsm sweep run` exits
+   non-zero when any job failed. Don't revert to per-job polling or to "gone from
    squeue → COMPLETED".
 
 8. **`params_to_hydra_args` quoting:** values with spaces/commas may render

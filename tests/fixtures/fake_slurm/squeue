@@ -10,6 +10,7 @@ CANCELLED and FAILED states are sticky once set.
 
 Supports a tiny subset of squeue flags:
 - -j JOB_ID  (may be repeated or comma-separated)
+- --me       (accepted; every fake job is the caller's)
 - -h         (header suppressed; we never print one anyway)
 - -o FORMAT  (recognizes %i = job id, %T = state, %j = job name)
 """
@@ -63,6 +64,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-j", "--job", action="append", default=[])
+    parser.add_argument("--me", action="store_true")
     parser.add_argument("-h", action="store_true", dest="suppress_header")
     parser.add_argument("-o", "--format", default="%i %T %j")
     args, _ = parser.parse_known_args()
@@ -80,14 +82,14 @@ def main() -> int:
     now = time.time()
     if requested_ids:
         jobs = [j for j in jobs if j["id"] in requested_ids]
-        # Real squeue: completed/cancelled jobs drop out of the queue. Caller code
-        # interprets empty stdout + nonzero rc as "job finished".
-        jobs = [
-            j for j in jobs
-            if _current_state(j, now, pending_s, running_s) in ("PENDING", "RUNNING")
-        ]
-        if not jobs:
-            return 1
+    # Real squeue lists only PENDING/RUNNING (and COMPLETING) jobs by default: finished jobs
+    # drop out of the queue. An explicit -j that matches nothing exits 1 ("Invalid job id").
+    jobs = [
+        j for j in jobs
+        if _current_state(j, now, pending_s, running_s) in ("PENDING", "RUNNING")
+    ]
+    if requested_ids and not jobs:
+        return 1
 
     fmt = args.format
     for j in jobs:

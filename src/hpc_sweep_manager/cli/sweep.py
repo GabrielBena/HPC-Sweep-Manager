@@ -1095,7 +1095,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     """
     import shlex
 
-    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.common.compute_source import TERMINAL_STATES
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
     source = SSHSlurmComputeSource.from_manifest(manifest)
@@ -1120,20 +1120,12 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         num_tasks = manifest.get("num_tasks", len(job_ids))
         # For an array submission job_ids is one parent id covering num_tasks.
         task_hint = f" ({num_tasks} tasks)" if num_tasks != len(job_ids) else ""
-        # Classify via get_job_status (squeue FIRST, then sacct) — NOT
-        # _terminal_state_via_sacct directly. A still-queued task (e.g. held
-        # behind a maintenance reservation) is in squeue → RUNNING → routed to
-        # the pull-only branch below. Going straight to sacct would hit its
-        # optimistic "empty → COMPLETED" fallback (accounting lags PENDING jobs)
-        # and then archive/`rm -rf` the remote dir of a task that never ran.
-        statuses = {jid: await source.get_job_status(jid) for jid in job_ids}
+        # squeue first, then one sacct, through the same outage-safe refresh a live launcher
+        # uses: a task still queued (held behind a reservation, say) stays running and only gets
+        # pulled; the archive + `rm -rf` below needs every job named terminal.
+        statuses = await source.adopt(job_ids)
         terminal = {j: s for j, s in statuses.items() if s in TERMINAL_STATES}
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
-        # Seed completed_jobs so collect_results computes any_failed correctly.
-        for jid, s in terminal.items():
-            source.completed_jobs[jid] = JobInfo(
-                job_id=jid, job_name=jid, params={}, source_name=source.name, status=s
-            )
         if running:
             # Partial: pull what's done; keep remote + skip archive (not done yet).
             rc = await source._pull_tasks()
@@ -1240,7 +1232,7 @@ async def _advance_via_manifest(
     chain state, and re-derives the full param set from the sweep config.
     """
     from ..core.common.chain import ChainState
-    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.common.compute_source import TERMINAL_STATES
     from ..core.common.config import SweepConfig
     from ..core.common.param_generator import ParameterGenerator
     from ..core.common.resumable import ResumableConfig
@@ -1287,7 +1279,7 @@ async def _advance_via_manifest(
         source._remote_code_dir = manifest.get("remote_code_dir")
         source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
 
-        statuses = {j: await source.get_job_status(j) for j in last_job_ids}
+        statuses = await source.adopt(last_job_ids)
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
         if running:
             console.print(
@@ -1297,10 +1289,6 @@ async def _advance_via_manifest(
                 f"(or it advances on its own while the launcher is alive).[/yellow]"
             )
             return
-        for j, s in statuses.items():
-            source.completed_jobs[j] = JobInfo(
-                job_id=j, job_name=j, params={}, source_name=source.name, status=s
-            )
 
         result = await run_resumable_sweep_async(
             source=source,

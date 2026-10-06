@@ -470,13 +470,6 @@ class LocalComputeSource(ComputeSource):
             await asyncio.gather(*self._monitors.values(), return_exceptions=True)
         self._monitors.clear()
 
-    async def update_all_job_statuses(self) -> None:
-        for job_id in list(self.active_jobs.keys()):
-            try:
-                await self.get_job_status(job_id)
-            except Exception as e:  # pragma: no cover
-                logger.warning(f"Failed to update status for {job_id}: {e}")
-
     def __str__(self) -> str:
         gpus = self._gpu_indices or "none"
         return f"Local:{self.name}: {self.current_job_count}/{self._slot_count} jobs (gpus={gpus})"

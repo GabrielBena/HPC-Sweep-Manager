@@ -250,10 +250,11 @@ slots and S3IT has 32 jobs sitting PENDING, anahita keeps churning
 through the remaining work. You only see head-of-line behavior when
 *every* child is at `max_parallel_jobs`.
 
-Status polling itself is cheap — `SSHSlurmComputeSource` batches every
-live job ID into one `squeue -j 1,2,3,…` call per poll cycle, so the
-polling cost is O(1) round-trips regardless of how many jobs are in
-flight. Only submission is N round-trips (one `ssh + sbatch` per task).
+Status polling itself is cheap: every Slurm source asks one `squeue --me`
+and one `sacct` per poll cycle, whatever the number of jobs in flight. A
+failed `squeue` or `sacct` (a controller outage, a maintenance) changes no
+job's state, so it can't end a sweep early. Only individual submission is
+N round-trips (one `ssh + sbatch` per task).
 
 ### `wait_for_all` blocks on the slowest task
 

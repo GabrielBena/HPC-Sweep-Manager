@@ -6,6 +6,22 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed (2026-10 maintenance pass — `docs/dev/maintenance-2026-10.md`)
+
+- **A Slurm outage could delete a live sweep dir (S1).** When `squeue` failed
+  (rc≠0) and `sacct` failed too, a job was taken as COMPLETED; the launcher (or
+  `hsm sweep collect`) then archived and `rm -rf`'d the remote sweep dir while
+  tasks were still queued. A failed call is now never a verdict: squeue rc≠0
+  changes no state that cycle, and a job that left the queue waits for sacct to
+  name its terminal state (COMPLETED is assumed only after 3 polls without one).
+- **Status polling is batched for every Slurm source (S2).** One `squeue --me` and
+  one `sacct` per poll, shared by the native and SSH-driven sources
+  (`core/hpc/slurm_base.py`); it was one `squeue` (+ `sacct`) per job per cycle,
+  600 SSH channels a cycle at 600 jobs. `collect` and `advance` use the same
+  refresh.
+- **`sbatch` output without a `Submitted batch job <id>` line now raises** instead
+  of guessing an id from the last word of the output.
+
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
 and the first blind agent-driven consumer run from Comp-PVR

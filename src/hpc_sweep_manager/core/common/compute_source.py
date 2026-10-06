@@ -226,39 +226,39 @@ class ComputeSource(ABC):
         """Cleanup resources."""
         pass
 
+    async def update_all_job_statuses(self) -> None:
+        """Refresh every active job's status. Backends that can ask about all jobs at once
+        (one ``squeue``) override this; the default asks :meth:`get_job_status` per job."""
+        for job_id in list(self.active_jobs):
+            try:
+                await self.get_job_status(job_id)
+            except Exception as e:  # noqa: BLE001 — one job's probe must not stop the rest
+                logger.warning(f"Failed to update status for {job_id}: {e}")
+
+    async def _after_poll(self, newly_done: int) -> None:  # noqa: B027 — optional hook
+        """Hook run after each poll of :meth:`wait_for_all` (SSH-Slurm pulls finished tasks)."""
+
     async def wait_for_all(
         self,
         poll_interval: float = 5.0,
         on_progress: ProgressCallback | None = None,
     ) -> dict[str, str]:
-        """Block until every active job reaches a terminal state.
+        """Poll until every active job is terminal; return ``job_id -> final status``."""
 
-        Returns a mapping of ``job_id -> final_status``. Polls each active job
-        via :meth:`get_job_status` (which is expected to call
-        :meth:`update_job_status` internally so finished jobs leave
-        ``active_jobs``). Override for backends that can poll all jobs at once
-        more efficiently (e.g. a single Slurm ``squeue`` call).
-        """
-        final_statuses: dict[str, str] = {}
-        # Seed with anything already moved to completed before we started waiting.
-        for job_id, info in list(self.completed_jobs.items()):
-            final_statuses[job_id] = info.status
-
-        total = len(self.active_jobs) + len(final_statuses)
-        if on_progress is not None:
-            on_progress(len(final_statuses), max(total, 1))
-
-        while self.active_jobs:
-            for job_id in list(self.active_jobs.keys()):
-                status = await self.get_job_status(job_id)
-                if status in TERMINAL_STATES and job_id not in final_statuses:
-                    final_statuses[job_id] = status
+        def report() -> None:
             if on_progress is not None:
-                total = len(self.active_jobs) + len(final_statuses)
-                on_progress(len(final_statuses), max(total, 1))
+                done = len(self.completed_jobs)
+                on_progress(done, max(done + len(self.active_jobs), 1))
+
+        report()
+        while self.active_jobs:
+            done_before = len(self.completed_jobs)
+            await self.update_all_job_statuses()
+            await self._after_poll(len(self.completed_jobs) - done_before)
+            report()
             if self.active_jobs:
                 await asyncio.sleep(poll_interval)
-        return final_statuses
+        return {job_id: info.status for job_id, info in self.completed_jobs.items()}
 
     def update_job_status(self, job_id: str, new_status: str):
         """Update job status and move between active/completed as needed."""
