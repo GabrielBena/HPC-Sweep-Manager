@@ -24,8 +24,8 @@ is deleted; the CHANGELOG keeps the record.
 
 | ID | Finding | Fix → proving test | Compat | PR |
 |---|---|---|---|---|
-| S1 | *[NEW]* When `squeue` fails (rc≠0) and `sacct` also fails, the job is taken as **COMPLETED**. `collect` then archives and `rm -rf`s a live sweep dir. Both Slurm sources: `ssh_slurm_compute_source.py:817-852`, `slurm_compute_source.py:388-440`. A slurmctld/slurmdbd outage with the login node up is enough. | On rc≠0, keep the last known state (except squeue's "Invalid job id"). Assume COMPLETED only when sacct returns rc 0 with no rows, on two polls in a row. → A fake outage keeps the job active and issues no `rm`. | none | |
-| S2 | *[FR#4/#5 corrected]* Polling is per job. `wait_for_all` calls `get_job_status` for each job: 600 channels per cycle and 70–190 s cycles at N=600. The batched `update_all_job_statuses` is used only by distributed. `collect` loops the same way, and native Slurm runs one subprocess per job. | One shared `_refresh_statuses()`: 1 `squeue` + 1 `sacct` per cycle, used by both sources and by `collect`. → A counting FakeConn sees ≤2 channels per cycle at N=600. | none | |
+| S1 | *[NEW]* When `squeue` fails (rc≠0) and `sacct` also fails, the job is taken as **COMPLETED**. `collect` then archives and `rm -rf`s a live sweep dir. Both Slurm sources: `ssh_slurm_compute_source.py:817-852`, `slurm_compute_source.py:388-440`. A slurmctld/slurmdbd outage with the login node up is enough. | On rc≠0, keep the last known state (except squeue's "Invalid job id"). Assume COMPLETED only when sacct returns rc 0 with no rows, on two polls in a row. → A fake outage keeps the job active and issues no `rm`. | none | #21 |
+| S2 | *[FR#4/#5 corrected]* Polling is per job. `wait_for_all` calls `get_job_status` for each job: 600 channels per cycle and 70–190 s cycles at N=600. The batched `update_all_job_statuses` is used only by distributed. `collect` loops the same way, and native Slurm runs one subprocess per job. | One shared `_refresh_statuses()`: 1 `squeue` + 1 `sacct` per cycle, used by both sources and by `collect`. → A counting FakeConn sees ≤2 channels per cycle at N=600. | none | #21 |
 | S3 | *[FR#4]* `--remote <slurm>` defaults to individual submission: 2 channels and 1 slurmctld RPC per task. The manifest is written only after the whole loop, so a mid-loop failure (or Ctrl-C, since only `except Exception` is caught) leaves live jobs untracked. | Array becomes the default for slurm remotes. `--mode individual` warns above 50 tasks. Any partial submission writes the manifest (`BaseException`). One channel per script: `cat > p && sbatch --parsable p`, with the job id checked against `^\d+$`. → Tests for the default, the partial-failure manifest, and rejecting unparsable sbatch output. | the default changes; it prints a message; Comp-PVR already passes `--mode array` | |
 | S4 | *[FR#2, worse]* Every launch re-pushes the shared remote `code/` with `--delete`. Queued tasks of earlier sweeps, and chunk k+1 of a chain, run the newest code. Files that tasks write into their cwd are deleted. | A per-sweep snapshot, `<root>/<project>/snapshots/<sweep_id>/`, made with `rsync --link-dest=<newest>`. The manifest records it and a clean removes it. → Tests for the push command, the `cd` target, garbage collection, and `advance` reading the manifest path. | old manifests keep `code/` | |
 | X1 | *[FR#1, #21, + modularity's note]* The ssh backend holds 1 channel per running task, plus 1 per `cat >`, so 10 concurrent tasks hit sshd `MaxSessions`. Then:<br>- a submit failure aborts the sweep and orphans the started tasks (`run_sweep_async` has no `finally`);<br>- a dropped connection marks every running task FAILED (`exit_status=None`), and there is no keepalive;<br>- a graceful stop's `cleanup()` kills every running task;<br>- task stdout is buffered in the launcher's memory and never saved;<br>- there is no manifest, so nothing can re-attach. | **Detached launch:** `setsid nohup` with pid and rc files and a TERM trap in the wrapper.<br>**Supervision:** one poll command per cycle for all tasks, a `step()` loop (poll → free slots → launch pending → save the manifest), and a launch that fails 3 times becomes FAILED.<br>**Connection:** a reconnect changes no status.<br>**Cancel and cleanup:** cancel by process group; `cleanup()` only closes the connection.<br>**Re-attach:** `hsm sweep collect <id>` re-attaches ssh sweeps.<br>→ A FakeConn that refuses the 11th channel gives 10 COMPLETED plus 1 reported launch failure. Also: `parse_poll` tests, the traps run under bash, a reconnect keeps statuses, and collect never `rm`s while tasks are active. | Ctrl-C leaves tasks running, as Slurm does, and prints the attach hint | |
@@ -144,6 +144,12 @@ All told, about −5k of `src`'s 17k lines, while adding the P0 machinery.
 - **Formatting:** one mechanical ruff PR goes first, and every lane branches from it.
 - **Merging:** pure chores self-merge on green CI: docs filing, the mechanical format, deletions of dead code and
   dependencies, the docs refresh. Anything that changes execution, config or CLI behaviour waits for Gabriel's merge.
+  - *Superseded the same day:* Gabriel won't be reviewing, so the agent conducts every PR end to end: cold
+    reviews, fixes folded in, a 🤖-marked digest, and a true merge once the PR is clean and CI is green.
+  - Under that delegation the agent applies `oversize-approved` itself, only when a split would hurt
+    readability, and states why in the PR.
+  - Live runs on uzh/athena still need Gabriel's explicit go. Until then a merge rests on mocks plus the cold
+    reviews; validating live is a separate step before the reinstall on anahita.
 - **New defaults, each printing a message where it differs:**
   - array submission for slurm remotes (S3);
   - GPU indices in nvidia-smi order, using only free GPUs when no allowlist is given (X4). On anahita,
@@ -164,12 +170,12 @@ checkout, reinstall, restate `visible_gpus`.
 
 | Lane | PR | Closes | Sev |
 |---|---|---|---|
-| chore | chore-1 · this tracker plus the three field reports | — | — |
-| chore | chore-2 · loom's `[tool.ruff]`, ruff pinned to 0.15.13; one mechanical `ruff check --fix` + `ruff format` commit, listed in `.git-blame-ignore-revs` | G (ruff) | — |
-| chore | chore-3 · the 77 leftovers fixed by hand, so ruff is clean (the modules due for deletion get a temporary per-file ignore) | G (ruff) | — |
-| chore | chore-4 · the method: pre-commit, the push guard, the chunk cap, the PR template, a CI `gates` job, CONTRIBUTING | G (gates) | — |
+| chore | chore-1 (#17 ✓) · this tracker plus the three field reports | — | — |
+| chore | chore-2 (#18 ✓) · loom's `[tool.ruff]`, ruff pinned to 0.15.13; one mechanical `ruff check --fix` + `ruff format` commit, listed in `.git-blame-ignore-revs` | G (ruff) | — |
+| chore | chore-3 (#19 ✓) · the 77 leftovers fixed by hand, so ruff is clean (the modules due for deletion get a temporary per-file ignore) | G (ruff) | — |
+| chore | chore-4 (#20 ✓) · the method: pre-commit, the push guard, the chunk cap, the PR template, a CI `gates` job, CONTRIBUTING | G (gates) | — |
 | chore | chore-5 · `tests/fakes.py`, a harness that runs rendered templates, one pytest config, dead fixtures | G (tests) | — |
-| slurm | S-1 · transient-safe, batched status refresh for both Slurm sources; `collect` uses it; `sbatch --parsable` | S1, S2 | P0 |
+| slurm | S-1 (#21) · transient-safe, batched status refresh for both Slurm sources; `collect` uses it; `sbatch --parsable` | S1, S2 | P0 |
 | slurm | S-2 · array default; manifest at submit and on any partial failure; one channel per script; manifest-backed `cancel` | S3, S9 | P0 |
 | slurm | S-3 · per-sweep code snapshot (`--link-dest`), shared by both SSH sources | S4 | P0 |
 | slurm | S-4 · `array_throttle`, `extra_directives` key normalisation, reservation overlap, `--exclude`/`--nice` docs | S5–S7 | P1 |
