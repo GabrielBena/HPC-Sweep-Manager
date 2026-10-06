@@ -494,13 +494,6 @@ class SSHComputeSource(ComputeSource):
                 pass
             self._conn = None
 
-    async def update_all_job_statuses(self) -> None:
-        for job_id in list(self.active_jobs.keys()):
-            try:
-                await self.get_job_status(job_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to update status for {job_id}: {e}")
-
     def __str__(self) -> str:
         return (
             f"SSH:{self.name} ({self.host}): "
