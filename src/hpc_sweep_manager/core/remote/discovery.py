@@ -44,6 +44,12 @@ def expand_ssh_key_path(ssh_key_path: str) -> str | None:
     return None
 
 
+# A launcher gives up on a host unreachable this long: its tasks keep running, and
+# `hsm sweep collect` re-attaches once the host is back (an endless wait would block the
+# other children of a distributed sweep).
+LINK_GIVE_UP_S = 30 * 60
+
+
 async def create_ssh_connection(
     host: str,
     ssh_key: str | None = None,

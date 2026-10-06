@@ -641,6 +641,22 @@ class TestReconnect:
         assert src.active_jobs["777"].status == "PENDING" and not src.completed_jobs
 
     @pytest.mark.asyncio
+    async def test_a_link_down_for_good_ends_the_wait_with_the_re_attach_command(
+        self, tmp_path, monkeypatch
+    ):
+        # An endless wait would block a distributed sweep's other children.
+        from hpc_sweep_manager.core.remote import ssh_slurm_compute_source as mod
+
+        monkeypatch.setattr(mod, "LINK_GIVE_UP_S", 0)
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = await TestStatus._tracking(tmp_path, conn, "777")
+        src._conn = src._fake_conn = _DeadConn()
+        with pytest.raises(ConnectionError, match="hsm sweep collect"):
+            for _ in range(3):
+                await src.update_all_job_statuses()
+        assert src.active_jobs["777"].status == "PENDING"  # still no verdict
+
+    @pytest.mark.asyncio
     async def test_a_lost_sbatch_reply_is_never_resent(self, tmp_path):
         # The job may be queued: a second sbatch would run it twice.
         conn = FakeConn(responder=_setup_ok_responder())

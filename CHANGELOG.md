@@ -194,7 +194,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   connection made the next `squeue` raise and killed a multi-day wait. The connection
   now has a 30 s keepalive, and a command whose connection dropped reconnects and runs
   once more; while the host stays unreachable the polls fail and every job keeps its
-  state. `sbatch` is never resent (after a lost reply the job may be queued): the error
+  state. After 30 min unreachable the launcher gives up with the command that re-attaches
+  later (`hsm sweep collect <id>`); the jobs stay in Slurm. `sbatch` is never resent (after a lost reply the job may be queued): the error
   says to check `squeue`. A remote file write (params file, manifest, `.archived`) that
   fails now raises instead of passing silently. Slurm sources poll every 60 s instead of
   10 s; local and ssh sources stay at 10 s.

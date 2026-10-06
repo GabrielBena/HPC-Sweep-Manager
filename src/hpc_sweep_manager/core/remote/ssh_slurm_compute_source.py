@@ -46,6 +46,7 @@ import json
 import logging
 import re
 import shlex
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -75,7 +76,7 @@ from ..hpc.slurm_protocol import (
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
-from .discovery import agent_stalled
+from .discovery import LINK_GIVE_UP_S, agent_stalled
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
@@ -187,6 +188,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self._pull_excludes: tuple[str, ...] = ()
         self._resumable_config: ResumableConfig | None = None
         self._chain_state: ChainState | None = None
+        self._down_since: float | None = None  # when the ssh link went down (None: up)
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
@@ -771,7 +773,14 @@ class SSHSlurmComputeSource(SlurmBase):
         try:
             result = await self._ssh_run(shlex.join(argv))
         except (OSError, asyncssh.Error) as e:  # still unreachable: a failed call, no verdict
+            self._down_since = self._down_since or time.monotonic()
+            if time.monotonic() - self._down_since > LINK_GIVE_UP_S:
+                raise ConnectionError(
+                    f"{self.host} unreachable for {LINK_GIVE_UP_S // 60} min; its jobs stay in "
+                    f"Slurm: `hsm sweep collect {self.sweep_id}` re-attaches once it is back"
+                ) from e
             return 255, "", f"ssh to {self.host}: {e!r}"
+        self._down_since = None
         rc = 255 if result.returncode is None else result.returncode  # None: killed by a signal
         return rc, result.stdout or "", result.stderr or ""
 
