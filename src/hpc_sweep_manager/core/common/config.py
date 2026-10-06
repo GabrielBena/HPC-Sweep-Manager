@@ -8,15 +8,6 @@ from typing import Any, Optional
 
 import yaml
 
-try:
-    from omegaconf import DictConfig, OmegaConf
-
-    OMEGACONF_AVAILABLE = True
-except ImportError:
-    OMEGACONF_AVAILABLE = False
-    DictConfig = None
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -146,29 +137,6 @@ class SweepConfig:
             cost_map=sweep_config.get("cost_map") or {},
             # Accept `resumable:` at the top level OR under `sweep:`.
             resumable=config_dict.get("resumable") or sweep_config.get("resumable") or {},
-        )
-
-    @classmethod
-    def from_hydra_config(
-        cls,
-        hydra_config: DictConfig | dict[str, Any],
-        selected_params: dict[str, list[Any]],
-    ) -> "SweepConfig":
-        """Create sweep config from Hydra config with selected parameters."""
-        if not OMEGACONF_AVAILABLE:
-            raise ImportError("omegaconf is required for Hydra config support")
-
-        if isinstance(hydra_config, DictConfig):
-            hydra_config = OmegaConf.to_container(hydra_config, resolve=True)
-
-        return cls(
-            grid=selected_params,
-            paired=[],
-            defaults=hydra_config.get("defaults", {}),
-            metadata={
-                "source": "hydra_config",
-                "hydra_config_keys": list(hydra_config.keys()),
-            },
         )
 
     def validate(self) -> list[str]:
@@ -679,61 +647,3 @@ def resolve_sweep_dir(
         )
 
     return target
-
-
-class HydraConfigParser:
-    """Parser for Hydra configuration files."""
-
-    def __init__(self, config_dir: Path):
-        self.config_dir = config_dir
-
-    def discover_configs(self) -> dict[str, Path]:
-        """Discover all configuration files in the config directory."""
-        configs = {}
-
-        if not self.config_dir.exists():
-            return configs
-
-        # Look for YAML files
-        for yaml_file in self.config_dir.rglob("*.yaml"):
-            relative_path = yaml_file.relative_to(self.config_dir)
-            config_name = str(relative_path).replace("/", ".").replace(".yaml", "")
-            configs[config_name] = yaml_file
-
-        return configs
-
-    def load_config(self, config_path: Path) -> dict[str, Any]:
-        """Load a configuration file."""
-        with open(config_path) as f:
-            return yaml.safe_load(f)
-
-    def extract_parameters(self, config: dict[str, Any], prefix: str = "") -> dict[str, Any]:
-        """Extract parameters from a nested configuration."""
-        params = {}
-
-        for key, value in config.items():
-            full_key = f"{prefix}.{key}" if prefix else key
-
-            if isinstance(value, dict):
-                params.update(self.extract_parameters(value, full_key))
-            else:
-                params[full_key] = value
-
-        return params
-
-    def suggest_sweep_ranges(self, parameters: dict[str, Any]) -> dict[str, list[Any]]:
-        """Suggest sweep ranges for parameters based on their types and values."""
-        suggestions = {}
-
-        for param_name, value in parameters.items():
-            if isinstance(value, (int, float)):
-                if isinstance(value, int):
-                    suggestions[param_name] = [value // 2, value, value * 2]
-                else:
-                    suggestions[param_name] = [value * 0.5, value, value * 2.0]
-            elif isinstance(value, bool):
-                suggestions[param_name] = [True, False]
-            elif isinstance(value, str):
-                suggestions[param_name] = [value]
-
-        return suggestions

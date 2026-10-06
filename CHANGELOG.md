@@ -69,6 +69,17 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+- **Each sweep runs its own code (S4).** Every launch re-synced one shared remote
+  `code/` dir with `--delete`, so tasks of an earlier sweep still queued on a
+  cluster ran the newest code, and files tasks wrote in their working dir were
+  deleted by the next push. Each sweep now pushes to `snapshots/<sweep_id>/`
+  (hard-linked against the previous one, so it is cheap), its tasks run there, and
+  every wrapper exports `$HSM_CODE_DIR`. A snapshot lives as long as its sweep dir,
+  and with an `archive_dir` it is archived with the results. A `code/` dir from an
+  older HSM is left untouched (remove it once nothing runs from it), and a
+  `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
+  every HSM that launches on a remote together:** an older one keeps pushing to the
+  shared `code/` dir.
 - **`--mode distributed` deleted results under running tasks (X3).** Its
   collector ran every 30 s and called an ssh child's `collect_results`, which
   `rm -rf`'d the remote sweep dir while other tasks still ran there; the last
@@ -91,6 +102,19 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   stops the driver and leaves started tasks running and Slurm jobs queued, as in
   the other modes. The `strategy`, `collect_interval` and failsafe keys of the
   `distributed:` block no longer change anything, and HSM warns when it sees them.
+
+### Removed (2026-10 maintenance pass)
+
+- **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,
+  `hydra-core` or `omegaconf`; none is imported by HSM (an install drops from about
+  215 MB to 56 MB). Training environments that relied on HSM to pull them in must
+  list them themselves. `requirements.txt` (a stale copy of `pyproject.toml`) and the
+  empty `docs` extra are gone.
+- **Dead code (no caller anywhere):** ten helpers in `cli/common.py`,
+  `HydraConfigParser` and `SweepConfig.from_hydra_config`, six `utils` helpers
+  (`ProgressTracker`, `format_duration`, …), `PathDetector.suggest_setup`, two
+  `ParameterGenerator` helpers, `get_sweep_completion_summary`, and the unused
+  `templates/sweep.yaml.j2`.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

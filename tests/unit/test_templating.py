@@ -124,6 +124,13 @@ class TestCondaInitPartialRenders:
         "wandb_group": "g",
     }
 
+    @pytest.mark.parametrize("template", ["slurm_array.sh.j2", "slurm_single.sh.j2"])
+    def test_hsm_code_dir_is_exported_before_pre_script(self, template):
+        kwargs = {**self._BASE_KWARGS, "pre_script": ["echo $HSM_CODE_DIR"]}
+        rendered = render_template(template, uses_conda=False, **kwargs)
+        export = rendered.index("export HSM_CODE_DIR=/tmp/project")
+        assert export < rendered.index("echo $HSM_CODE_DIR")
+
     def test_slurm_array_emits_init_block_when_uses_conda(self):
         rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         # Conda paths

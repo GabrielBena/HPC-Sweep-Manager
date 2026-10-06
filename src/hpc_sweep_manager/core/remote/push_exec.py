@@ -1,7 +1,7 @@
 """Pure helpers for the push-based remote execution model.
 
-The push model: rsync the local project up to a rolling code dir on the
-remote, run ``[conda run -n env] python train.py <params>`` per task with
+The push model: rsync the local project up to the sweep's code snapshot on
+the remote, run ``[conda run -n env] python train.py <params>`` per task with
 ``CUDA_VISIBLE_DEVICES`` pinning, rsync results back. These functions build the
 commands and partition the GPU pool — kept pure (no I/O) so they're unit-tested
 without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
@@ -9,7 +9,11 @@ without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
 
 from __future__ import annotations
 
+import logging
+import re
 from collections.abc import Sequence
+
+logger = logging.getLogger(__name__)
 
 # Files never worth shipping to a compute node — keeps the rsync payload to
 # source only (no history, caches, prior outputs, data, checkpoints).
@@ -122,18 +126,26 @@ def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
 
 
 def build_rsync_push_cmd(
-    local_dir: str, host: str, remote_dir: str, excludes: Sequence[str], agentless: bool = False
+    local_dir: str,
+    host: str,
+    remote_dir: str,
+    excludes: Sequence[str],
+    agentless: bool = False,
+    link_dest: str | None = None,
 ) -> list[str]:
-    """rsync the local project tree up to the rolling remote code dir.
+    """rsync the local project tree up to a remote code dir.
 
     ``--delete`` keeps the remote copy an exact mirror (files removed locally
     vanish remotely); trailing slashes put *contents* of ``local_dir`` into
-    ``remote_dir``. Relies on the system ssh transport, which reads
-    ``~/.ssh/config`` natively, so ``host`` may be an alias. ``agentless`` skips
-    the SSH agent, for a host whose agent stalled (``discovery.agent_stalled``).
+    ``remote_dir``. ``link_dest`` (the previous snapshot) hard-links unchanged
+    files instead of copying them. Relies on the system ssh transport, which
+    reads ``~/.ssh/config`` natively, so ``host`` may be an alias. ``agentless``
+    skips the SSH agent, for a host whose agent stalled (``discovery.agent_stalled``).
     """
     ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
     cmd = ["rsync", "-az", "--delete", "-e", ssh]
+    if link_dest:
+        cmd.append(f"--link-dest={link_dest}")
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{local_dir.rstrip('/')}/")
@@ -162,3 +174,42 @@ def build_rsync_pull_cmd(
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
     cmd.append(f"{local_dir.rstrip('/')}/")
     return cmd
+
+
+# Per-sweep code snapshots (tracker S4): a sweep's tasks run from ``snapshots/<sweep_id>/``, which
+# lives as long as its sweep dir. An older HSM's shared ``code/`` is never written or deleted.
+
+
+def own_snapshot(code_dir: str | None, sweep_id: str | None) -> str | None:
+    """``code_dir`` if it is this sweep's own snapshot, the only code dir a cleanup may delete."""
+    if code_dir and sweep_id and code_dir.endswith(f"/snapshots/{sweep_id}"):
+        return code_dir
+    return None
+
+
+def snapshot_prepare_cmd(project_root: str, sweep_id: str, sweep_dirs: Sequence[str]) -> str:
+    """Remote shell: print the newest existing snapshot, or the legacy ``code/`` dir (the
+    ``--link-dest`` base), then create this sweep's snapshot dir and ``sweep_dirs``."""
+    snaps = f"{project_root}/snapshots"
+    return (
+        f"ls -1d {project_root}/code/ {snaps}/*/ 2>/dev/null | tail -1; "
+        f"mkdir -p {snaps}/{sweep_id} " + " ".join(sweep_dirs)
+    )
+
+
+def pin_code_refs(pre_script: Sequence[str], project: str) -> tuple[str, ...]:
+    """Point ``pre_script``'s references to the old shared ``.../<project>/code`` dir at
+    ``$HSM_CODE_DIR``, the task's own snapshot, so a task never mixes two sweeps' code."""
+    old = re.compile(rf"[^\s:=\"',;&|<>()]*/{re.escape(project)}/code(?![\w.-])")
+    pinned = tuple(old.sub("$HSM_CODE_DIR", line) for line in pre_script)
+    if pinned != tuple(pre_script):
+        logger.warning(
+            f"pre_script names the old shared .../{project}/code dir, which no longer receives "
+            "pushes; using $HSM_CODE_DIR (this sweep's code) instead. Write $HSM_CODE_DIR there."
+        )
+    if any(re.search(rf"/{re.escape(project)}/code\b", line) for line in pinned):
+        logger.warning(
+            f"pre_script still mentions .../{project}/code in a form HSM can't rewrite; that dir "
+            "no longer receives pushes: use $HSM_CODE_DIR."
+        )
+    return pinned

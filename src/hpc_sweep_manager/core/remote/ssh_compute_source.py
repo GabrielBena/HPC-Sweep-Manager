@@ -4,14 +4,15 @@ Mirrors :class:`LocalComputeSource` shape — one persistent asyncssh
 connection, a slot ``asyncio.Queue`` for back-pressure, a per-job monitor
 coroutine — but ships the work to a remote box. The model:
 
-    1. setup(): open ssh; rsync the local project up to a rolling code dir
-       (``~/.hsm/runs/<project>/code/``); probe ``nvidia-smi`` and partition
-       its GPUs into slots; create a per-sweep dir on the remote.
+    1. setup(): open ssh; rsync the local project up to this sweep's code
+       snapshot (``~/.hsm/runs/<project>/snapshots/<sweep_id>/``); probe
+       ``nvidia-smi`` and partition its GPUs into slots; create a per-sweep dir
+       on the remote.
     2. submit_job(): acquire a slot, render the wrapper template, write it to
        the remote via ``cat >``, ``create_process(bash <path>)``, spawn a
        monitor coro that releases the slot when the channel exits.
     3. collect_results(): rsync ``sweeps/<id>/tasks/`` back; on full success
-       ``rm -rf`` the per-sweep remote dir (code cache persists).
+       ``rm -rf`` the per-sweep remote dir and its code snapshot.
     4. cleanup(): cancel any leftover processes, close the connection.
 
 The class delegates command-shape decisions to pure helpers in
@@ -26,6 +27,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -40,8 +42,11 @@ from .push_exec import (
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
     normalize_gpu_allowlist,
+    own_snapshot,
     partition_gpu_slots,
+    pin_code_refs,
     resolve_run_prefix,
+    snapshot_prepare_cmd,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,31 +191,30 @@ class SSHComputeSource(ComputeSource):
         # quoted COMMAND strings do NOT — nor does the locally-run rsync. One
         # remote-shell echo at setup gives a single absolute path used everywhere.
         resolved_root = await self._resolve_remote_path(self.remote_root)
-        self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
+        project_root = f"{resolved_root}/{self._project_name}"
+        self._remote_code_dir = f"{project_root}/snapshots/{sweep_id}"
+        self._remote_sweep_dir = f"{project_root}/sweeps/{sweep_id}"
 
-        # Build the remote layout up front so rsync push + per-task writes
-        # don't have to worry about missing directories.
-        await self._conn.run(
-            f"mkdir -p {self._remote_code_dir} "
-            f"{self._remote_sweep_dir}/tasks "
-            f"{self._remote_sweep_dir}/logs "
-            f"{self._remote_sweep_dir}/scripts",
-            check=False,
+        # This sweep's code snapshot and dirs, hard-linked against the newest snapshot (S4).
+        sweep_dirs = [f"{self._remote_sweep_dir}/{d}" for d in ("tasks", "logs", "scripts")]
+        prep = await self._conn.run(
+            snapshot_prepare_cmd(project_root, sweep_id, sweep_dirs), check=False
         )
-
         push_cmd = build_rsync_push_cmd(
             local_dir=self.project_dir,
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
             agentless=agent_stalled(self.host),
+            link_dest=(prep.stdout or "").strip().rstrip("/") or None,
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
         if rc != 0:
             self.stats.health_status = "unhealthy"
             return False
+        pre_script = pin_code_refs(self.default_spec.pre_script, self._project_name)
+        self.default_spec = replace(self.default_spec, pre_script=pre_script)
 
         # GPU probe — best effort. A box with no nvidia-smi just gives []
         # which falls back to CPU slots downstream.
@@ -441,7 +445,8 @@ class SSHComputeSource(ComputeSource):
         any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
         if not any_failed and not self.keep_remote_on_success:
             try:
-                await self._conn.run(f"rm -rf {self._remote_sweep_dir}", check=False)
+                dirs = [self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id)]
+                await self._conn.run("rm -rf " + " ".join(d for d in dirs if d), check=False)
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
