@@ -330,6 +330,13 @@ class TestSetup:
             slots = [src._slot_queue.get_nowait() for _ in range(src._slot_queue.qsize())]
             assert slots == want, gpus
 
+    @pytest.mark.parametrize("gpus", [0, 1])
+    async def test_a_probe_without_an_answer_stops_only_a_gpu_job(self, tmp_path, caplog, gpus):
+        fake_conn = FakeConn(gpu_csv=NVIDIA_SMI_SAMPLE_4_GPUS, nvidia_smi_rc=None)  # link died
+        src = _make_src(tmp_path, fake_conn=fake_conn, default_spec=ResourceSpec(gpus=gpus))
+        assert await src.setup(tmp_path / "sweep", "test_sweep") is not bool(gpus)
+        assert ("gave no answer" in caplog.text) is bool(gpus)
+
     async def test_a_gpu_job_with_every_gpu_busy_fails_before_any_remote_write(
         self, tmp_path, caplog
     ):

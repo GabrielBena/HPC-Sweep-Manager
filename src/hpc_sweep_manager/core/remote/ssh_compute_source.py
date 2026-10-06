@@ -248,15 +248,21 @@ class SSHComputeSource(ComputeSource):
             self.stats.health_status = "unhealthy"
             return False
 
-        # GPU probe — best effort. A box with no nvidia-smi just gives []
-        # which falls back to CPU slots downstream. Checked before anything is written there.
-        gpus = []
+        # GPU probe, checked before anything is written there. A box with no nvidia-smi gives []
+        # (CPU slots); a probe with no answer (a dropped link, a hung driver) can't say the box
+        # has no GPU, so a GPU job stops here rather than run on CPU.
+        gpus, answered = [], False
         try:
-            result = await self._conn.run(NVIDIA_SMI_QUERY, check=False)
-            if (result.returncode or 0) == 0:
+            result = await self._conn.run(NVIDIA_SMI_QUERY, check=False, timeout=RUN_TIMEOUT_S)
+            answered = result.returncode is not None
+            if result.returncode == 0:
                 gpus = parse_nvidia_smi_csv(result.stdout or "")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"GPU probe on {self.host} failed: {e}")
+        if not answered and self.default_spec.gpus:
+            logger.error(f"{self.name}@{self.host}: the GPU probe (nvidia-smi) gave no answer")
+            self.stats.health_status = "unhealthy"
+            return False
         gpu_indices = self._gpu_indices = [g.index for g in gpus]
         busy = [g.index for g in gpus if not g.is_free]
 

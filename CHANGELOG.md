@@ -208,7 +208,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   per slot in `--mode distributed` (its `max_parallel_jobs` is capped by its slot count).
   A remote's `gpus:` written as a string (`"1,2"`, `ALL`, `cpu`) is parsed like `--gpus`
   (`"1,2"` used to mean CPU-only, as did `gpus: all`), and a hung local `nvidia-smi` times
-  out after 30 s. **Compatibility:** an allowlist written in CUDA's default order must be
+  out after 30 s. A remote GPU probe with no answer (a dropped link, a hung driver) stops a
+  GPU job at setup instead of running it on CPU. **Compatibility:** an allowlist written in CUDA's default order must be
   restated in nvidia-smi order (on anahita, `local.visible_gpus: [2, 3]`, the A6000s,
   becomes `[1, 2]`). **For consumers:** a remote's `gpus: 0` now renders an empty
   `CUDA_VISIBLE_DEVICES` (no GPU), and lists and counts skip busy GPUs (`--gpus all`
