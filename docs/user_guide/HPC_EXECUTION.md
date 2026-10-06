@@ -128,6 +128,8 @@ slurm:
   extra_directives:          # any extra #SBATCH directive
     mail-type: FAIL
     mail-user: me@example.com
+  array_throttle: 50         # at most 50 array tasks at once: --array=1-K%50. On a shared
+                             # account, fair share is per account: throttle big arrays.
   qos_whitelist:             # optional guard — errors on submit if --qos isn't in this list
     - normal
     - medium

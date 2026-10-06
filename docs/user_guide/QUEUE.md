@@ -181,6 +181,22 @@ Upcoming reservations
 
 Useful as a "should I bother submitting this overnight" pre-flight check.
 
+## `hsm queue share [--remote ALIAS] [--account ACCOUNT]`
+
+How loaded a shared Slurm account is, and how much of that is you. Slurm
+computes fair share **per account**, so one member's hundreds of tasks lower
+every co-worker's priority. One round trip (`sshare`, `squeue -A`, `sinfo`):
+
+```
+lab: usage 13.7x its fair share; me = 99% of its recorded usage and 0 of 16 running CPUs (0 jobs, 0 on GPU nodes); co-workers pending: bob (ReqNodeNotAvail, Reserved for maintenance)
+  running: bob 2 jobs / 16 cpus
+  The account is hot: throttle arrays (spec.array_throttle), keep CPU jobs off GPU nodes, and say so in the launch message.
+```
+
+The account defaults to the remote's `spec.account` (or the `slurm:` block's).
+The command exits 3 when the account is *hot* (over 2x its share, or a
+co-worker waiting on `Priority`), so scripts and hooks can react.
+
 ## Watch mode
 
 `mine` and `gpus` take `--watch` (with `--refresh N`, default 30s) for a
