@@ -143,8 +143,8 @@ class TestCondaInitPartialRenders:
     def test_slurm_array_emits_init_block_when_uses_conda(self):
         rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
         # Conda paths
-        assert "miniconda3/etc/profile.d/conda.sh" in rendered
-        assert "miniforge3/etc/profile.d/conda.sh" in rendered
+        assert "$HOME/miniconda3" in rendered and "/etc/profile.d/conda.sh" in rendered
+        assert "$HOME/miniforge3" in rendered
         # Micromamba paths
         assert "MAMBA_EXE" in rendered
         assert "micromamba" in rendered
@@ -154,7 +154,7 @@ class TestCondaInitPartialRenders:
     def test_slurm_array_skips_init_block_when_not_uses_conda(self):
         rendered = render_template("slurm_array.sh.j2", uses_conda=False, **self._BASE_KWARGS)
         assert "MAMBA_EXE" not in rendered
-        assert "miniconda3/etc/profile.d/conda.sh" not in rendered
+        assert "etc/profile.d/conda.sh" not in rendered
 
     def test_slurm_single_emits_init_block_when_uses_conda(self):
         rendered = render_template("slurm_single.sh.j2", uses_conda=True, **self._BASE_KWARGS)
@@ -178,7 +178,7 @@ class TestCondaInitPartialRenders:
             wandb_group="g",
         )
         assert "MAMBA_EXE" in rendered
-        assert "miniconda3/etc/profile.d/conda.sh" in rendered
+        assert "$HOME/miniconda3" in rendered and "/etc/profile.d/conda.sh" in rendered
 
     def test_micromamba_probe_includes_hsm_clone_path(self):
         # The user's S3IT layout has micromamba INSIDE the HSM clone's bin/,
@@ -205,7 +205,7 @@ class TestCondaInitPartialRenders:
             pre_script=[],
         )
         assert "MAMBA_EXE" in rendered
-        assert "miniconda3/etc/profile.d/conda.sh" in rendered
+        assert "$HOME/miniconda3" in rendered and "/etc/profile.d/conda.sh" in rendered
         assert "conda() { micromamba" in rendered
 
     def test_local_template_skips_init_block_when_not_uses_conda(self):
@@ -225,7 +225,7 @@ class TestCondaInitPartialRenders:
             pre_script=[],
         )
         assert "MAMBA_EXE" not in rendered
-        assert "miniconda3/etc/profile.d/conda.sh" not in rendered
+        assert "etc/profile.d/conda.sh" not in rendered
 
 
 class TestComputeSourceCondaEnvWrap:
@@ -304,3 +304,55 @@ class TestGpuPinning:
         rendered = render_template(template, cuda_visible_devices=None, **self._KWARGS)
         assert "export CUDA_VISIBLE_DEVICES" not in rendered
         assert "CUDA_DEVICE_ORDER" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("installs", "conda_exe", "conda_env", "picked"),
+    [
+        # FR#15a: a leftover ~/miniconda3 shadowed the ~/miniforge3 that has the env.
+        ({"miniconda3": [], "miniforge3": ["lab"]}, None, "lab", "miniforge3"),
+        ({"miniconda3": [], "mambaforge": ["lab"]}, None, "lab", "mambaforge"),
+        ({"miniconda3": [], "miniforge3": []}, None, "lab", "miniconda3"),  # none has it: first
+        ({"miniconda3": ["lab"]}, None, None, "miniconda3"),  # no env name: first, as before
+        ({"miniconda3": [], "opt/c": ["lab"]}, "opt/c/bin/conda", "lab", "opt/c"),  # $CONDA_EXE
+        ({"miniconda3": [], "micromamba": ["lab"]}, None, "lab", None),  # micromamba's own env
+    ],
+)
+def test_conda_init_sources_the_install_that_has_the_env(
+    tmp_path, installs, conda_exe, conda_env, picked
+):
+    """The rendered partial, run by a real bash with no conda on PATH."""
+    import shutil
+    import subprocess
+
+    for name, envs in installs.items():
+        (tmp_path / name / "etc" / "profile.d").mkdir(parents=True)
+        (tmp_path / name / "etc" / "profile.d" / "conda.sh").write_text(f"echo sourced {name}\n")
+        for env in envs:
+            (tmp_path / name / "envs" / env / "conda-meta").mkdir(parents=True)
+    (tmp_path / "miniconda3" / "envs" / "lab").mkdir(parents=True, exist_ok=True)  # leftover
+    script = render_template("_conda_init.sh.j2", uses_conda=True, conda_env=conda_env)
+    env = {"HOME": str(tmp_path), "PATH": str(tmp_path / "no-bin")}  # no conda on PATH (CI has one)
+    if conda_exe:
+        env["CONDA_EXE"] = str(tmp_path / conda_exe)
+    bash = shutil.which("bash")
+    out = subprocess.run([bash, "-c", script], env=env, capture_output=True, text=True)
+    assert out.stdout.split() == (["sourced", picked] if picked else []), out.stderr
+
+
+def test_every_render_with_the_conda_init_names_the_env():
+    """A render site that can emit the conda init also passes ``conda_env``: without it the probe
+    falls back to the first install found, the bug R11 fixed."""
+    import ast
+    from pathlib import Path
+
+    import hpc_sweep_manager
+
+    sites = []
+    for path in Path(hpc_sweep_manager.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            keys = {kw.arg for kw in getattr(node, "keywords", ())}
+            if isinstance(node, ast.Call) and "uses_conda" in keys:
+                sites.append((path.name, node.lineno, "conda_env" in keys))
+    assert len(sites) >= 6
+    assert all(named for *_, named in sites), [s for s in sites if not s[2]]

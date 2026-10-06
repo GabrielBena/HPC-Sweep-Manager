@@ -279,6 +279,13 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   shared by the ssh and ssh-slurm factories. **For consumers:** a remote with a
   `python_path` and no `conda_env`, or with neither under a `distributed:` block that sets a
   `python_path`, now runs that `python_path` instead of `conda run -n <paths.conda_env>`.
+- **The conda probe sources the install that has the env (R11, FR#15a).** With no conda on
+  PATH, the task script sourced the first `conda.sh` it found, so a leftover
+  `~/miniconda3` shadowed the `~/miniforge3` that holds the env. It now sources the first
+  install with `envs/<env>` (else the first found, as before, unless the env is in
+  micromamba's root), and also tries
+  `$CONDA_EXE`'s prefix and `~/mambaforge`. A conda already on PATH (`module load
+  miniforge3`) still wins.
 
 ### Removed (2026-10 maintenance pass)
 
