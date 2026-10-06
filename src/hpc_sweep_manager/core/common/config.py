@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
-
 from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -220,14 +218,6 @@ class SweepConfig:
         if self.script:
             result["script"] = self.script
         return result
-
-    def save(self, output_path: str | Path) -> None:
-        """Save sweep config to YAML file."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_path, "w") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, indent=2)
 
 
 class HSMConfig:

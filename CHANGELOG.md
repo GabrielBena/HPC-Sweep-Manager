@@ -88,7 +88,9 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `1e-1` floats; `yes`/`no` unchanged). A `walltime` that isn't a Slurm time
   string (`M`, `M:S`, `H:M:S`, `D-H`, `D-H:M`, `D-H:M:S`), or a
   `chunk_walltime` that isn't an `HH:MM:SS` string, is an error asking you to
-  quote it.
+  quote it. `hsm remote add/remove` write the file back quoting every string a
+  YAML 1.1 or 1.2 reader would take for a number, so it reads the same here and
+  in an older HSM.
 - **`hsm remote add/remove` rewrote the project file from the merged config
   (C3).** They stripped every comment, copied machine keys
   (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and

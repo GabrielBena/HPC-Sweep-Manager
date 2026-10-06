@@ -1,4 +1,4 @@
-"""The one YAML loader HSM reads sweep files and ``.hsm/config.yaml`` with.
+"""The one YAML loader HSM reads sweep files and ``.hsm/config.yaml`` with, and its dumper.
 
 PyYAML's ``SafeLoader`` resolves numbers by YAML 1.1: ``1e-1`` (no dot) stays a
 string, ``010`` is octal 8, and an unquoted ``12:00:00`` is the base-60 int
@@ -40,3 +40,22 @@ YAML12Loader.add_constructor(_INT, lambda loader, node: int(loader.construct_sca
 def load_yaml(stream: Any) -> Any:
     """``yaml.safe_load`` with YAML 1.2 numbers (see :class:`YAML12Loader`)."""
     return yaml.load(stream, Loader=YAML12Loader)  # safe: a SafeLoader subclass
+
+
+class YAMLDumper(yaml.SafeDumper):
+    """Quotes every string a YAML 1.1 *or* 1.2 reader would take for something else.
+
+    So a file HSM rewrites reads back the same here (``"1e-3"`` stays a string) and in an
+    older HSM (``"12:00:00"`` never becomes 43200).
+    """
+
+
+YAMLDumper.yaml_implicit_resolvers = {
+    first: YAML12Loader.yaml_implicit_resolvers.get(first, []) + resolvers
+    for first, resolvers in yaml.SafeDumper.yaml_implicit_resolvers.items()
+}
+
+
+def dump_yaml(data: Any) -> str:
+    """Block-style YAML, keys in order, every ambiguous string quoted (see :class:`YAMLDumper`)."""
+    return yaml.dump(data, Dumper=YAMLDumper, default_flow_style=False, sort_keys=False)

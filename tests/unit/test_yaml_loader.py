@@ -9,7 +9,7 @@ import yaml
 
 from hpc_sweep_manager.core.common.config import HSMConfig, SweepConfig
 from hpc_sweep_manager.core.common.param_generator import ParameterGenerator
-from hpc_sweep_manager.core.common.yaml_loader import load_yaml
+from hpc_sweep_manager.core.common.yaml_loader import dump_yaml, load_yaml
 
 
 @pytest.mark.parametrize(
@@ -54,3 +54,18 @@ def test_unquoted_walltime_in_hsm_config_stays_a_string(tmp_path):
     path.write_text("slurm:\n  walltime: 12:00:00\n  gpus: 1\n")
     cfg = HSMConfig.load(config_path=path, machine_config_path=tmp_path / "none.yaml")
     assert cfg.get_slurm_spec().walltime == "12:00:00"
+
+
+@pytest.mark.parametrize("value", ["1e-3", "1e3", "12:00:00", "010", "0x1f", "yes", "~", "1_000"])
+def test_dumped_strings_read_back_as_strings_under_both_grammars(value):
+    # A rewrite of .hsm/config.yaml must not turn a quoted string into a number, here
+    # (YAML 1.2) or in an older HSM (YAML 1.1, where 12:00:00 is 43200).
+    text = dump_yaml({"k": value})
+    assert load_yaml(text) == {"k": value}
+    assert yaml.safe_load(text) == {"k": value}
+
+
+def test_dump_keeps_key_order_and_plain_values():
+    data = {"z": 1, "a": {"walltime": "04:00:00", "lr": 0.001, "on": True}}
+    assert load_yaml(dump_yaml(data)) == data
+    assert dump_yaml(data).startswith("z: 1\na:\n")
