@@ -405,6 +405,11 @@ hsm remote clean my-box                  # wipe ~/.hsm/runs/<this-project>/
 hsm remote clean my-box --all-projects   # wipe ~/.hsm/runs/ (every project)
 ```
 
+For a `backend: slurm` remote the root is its `workdir` instead of
+`remote_root`, and `<this-project>` is the project root's directory name, as
+the sweep itself uses. `clean` expands the root on the remote first and
+refuses one that is `/`, your remote `$HOME` (or above it) or a top-level dir.
+
 To list / probe / health-check your remotes:
 
 ```bash

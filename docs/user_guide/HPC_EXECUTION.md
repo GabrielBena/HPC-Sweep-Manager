@@ -559,7 +559,10 @@ distributed:
 
 **Precedence** (highest wins): CLI `--gpus`/`--walltime`/`--resources` >
 per-remote `spec:` > hardcoded defaults. `hsm remote add` writes the
-connection fields only — add `spec:` and `gpus:` by hand-editing.
+connection fields only — add `spec:` and `gpus:` by hand-editing. Re-running
+it on a registered remote updates only the fields you pass, so `spec:` and
+the rest survive; it never rewrites a config file that has comments (it
+prints the YAML to paste instead).
 
 An unknown key in `spec:` (or in the `slurm:` / `local:` blocks) is dropped
 with a warning that names it; the rest of the block still applies. An
