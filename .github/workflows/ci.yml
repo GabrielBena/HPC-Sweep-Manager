@@ -12,6 +12,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  gates:
+    # Fast, apart from the tests: the same hooks as pre-commit (ruff, ruff-format), so the editor,
+    # a local commit and CI never disagree; then the chunk cap (CONTRIBUTING.md).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install pre-commit && pre-commit run --all-files --show-diff-on-failure
+      - name: chunk size (hand-written lines; tests and prose excluded; cap 150)
+        if: github.event_name == 'pull_request' && !contains(join(github.event.pull_request.labels.*.name, ','), 'oversize-approved')
+        run: scripts/chunk_size.sh "origin/${{ github.base_ref }}" 150
+
   test:
     name: tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest

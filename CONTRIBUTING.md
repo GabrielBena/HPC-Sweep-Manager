@@ -8,7 +8,8 @@ rule: **`main` stays green.** CI runs the test suite on every PR; don't merge re
 ```bash
 git clone git@github.com:GabrielBena/HPC-Sweep-Manager.git
 cd HPC-Sweep-Manager
-pip install -e ".[dev]"     # editable install + pytest/ruff/mypy
+pip install -e ".[dev]"     # editable install + pytest/ruff/pre-commit
+pre-commit install          # ruff on commit, the no-push-to-main guard on push
 ```
 
 Pick one conda env name per project and create it with that exact name on every
@@ -33,28 +34,49 @@ against a real Slurm/SSH target; not part of CI).
 
 ## Workflow
 
-1. Branch off `main` (`git switch -c your-feature`).
-2. Make the change **with tests** — unit tests under `tests/unit/` using the
-   fake-conn / PATH-stub fixtures in `tests/conftest.py`.
-3. Open a PR. CI must pass.
-4. Merge: self-merge is fine for small/obvious changes; for anything touching
-   the execution paths (job submission, result collection, terminal-state
-   detection) get a second pair of eyes — those are where silent bugs hide
-   (see the field report under `docs/dev/field-reports/`).
+HSM follows the PR discipline of Gabriel's research program (loom's `DISCIPLINE.md`):
+
+1. **Branch** off `main`; never commit or push to it. The pre-push guard (`scripts/guard_push.sh`) refuses a push
+   to `main`. Install it with `pre-commit install`, which sets up both hook types: ruff on commit, the guard on push.
+2. **Make one change per PR, with its tests.** Unit tests go under `tests/unit/`, using the fake-conn and
+   PATH-stub fixtures. The PR fills in `.github/pull_request_template.md`.
+   - A PR's scope freezes when it opens: review fixes only. New work waits for the next branch.
+   - **The chunk cap:** at most 150 hand-written changed lines (tests and prose excluded;
+     `scripts/chunk_size.sh`). Only Gabriel's `oversize-approved` label lets a larger PR through.
+3. **Open a draft PR.** Gabriel reviews it inline and submits the review. A review round goes:
+   1. fix on the branch;
+   2. run the gates locally;
+   3. push (a round never waits for CI; only a merge does);
+   4. reply on each thread and resolve it;
+   5. post one round-closing digest.
+
+   Agent-posted comments start with `🤖 **claude-code** · automated reply (via Gabriel's token, not Gabriel)`.
+   The PR stays a draft until Gabriel says "mark ready".
+4. **Merge** with `gh pr merge --merge`, a true merge commit (never squash or rebase), once every check is green.
+   There is one open PR per lane (`slurm`, `ssh`, `cli`).
+   - Anything touching an execution path (job submission, result collection, terminal-state detection) gets a
+     cold review before merge. Those paths are where silent bugs hide (`docs/dev/field-reports/`).
+5. **The chore lane** covers encapsulated changes that make no claim: tooling, docs, formatting, dead code,
+   dependency pins.
+   - A chore PR's first line reads `chore lane — self-merged on green CI`, and the author merges it the moment
+     CI is green. Chores are exempt from the one-PR count.
+   - Never for behaviour.
 
 Keep `CHANGELOG.md` updated under `## [Unreleased]` for user-facing changes.
 
-## Style
+## Gates
 
-`ruff` and `mypy` are configured (`pip install -e ".[dev]"` pulls them in):
+ruff is the style SSOT. `[tool.ruff]` in `pyproject.toml` and the pinned `ruff==0.15.13` match loom's. CI's
+`gates` job runs the same pre-commit hooks as a local commit, plus the chunk cap:
 
 ```bash
-ruff check src/ tests/      # lint
-ruff format src/ tests/     # format
+pre-commit run --all-files                       # ruff + ruff-format, exactly as CI runs them
+scripts/chunk_size.sh origin/main 150            # this branch's hand-written lines
+git config blame.ignoreRevsFile .git-blame-ignore-revs   # once per clone: blame skips the format commit
 ```
 
-Not yet enforced in CI (the codebase predates the config and isn't clean — a
-cleanup PR is welcome before we turn the gate on).
+`.pre-commit-config.yaml`, `scripts/guard_push.sh` and `scripts/chunk_size.sh` are vendored verbatim from loom.
+Bump ruff in `pyproject.toml` and `.pre-commit-config.yaml` together.
 
 ## Where things live
 

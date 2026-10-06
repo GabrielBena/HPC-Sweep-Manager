@@ -1,0 +1,21 @@
+# ruff pinned to the version in pyproject [dev]; bump both together, deliberately. The guard refuses
+# any push to main (scripts/guard_push.sh). `pre-commit install` installs both hook types.
+# Canonical in EIS-Hub/loom and vendored verbatim into EIS-Hub/mosaic-sim; loom's scripts/audit.sh
+# flags any drift (loom's DISCIPLINE.md, the method).
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]  # ruff on commit; only the guard runs on push
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.13
+    hooks:
+      - id: ruff
+      - id: ruff-format
+  - repo: local
+    hooks:
+      - id: guard-push
+        name: no push to main
+        entry: scripts/guard_push.sh
+        language: script
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
