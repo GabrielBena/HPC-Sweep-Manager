@@ -54,7 +54,8 @@ the **SweepOrchestrator** in
 
 `hsm sweep run --remote <alias>` implies `--mode remote` (you don't pass
 both). `--gpus all\|cpu\|N\|i,j,k` is the per-remote GPU allowlist
-(separate from `spec.gpus`, which is per-job count — see "Gotchas" below).
+(separate from `spec.gpus`, which is per-job count — see "Gotchas" below);
+busy GPUs are skipped unless it is `all`.
 
 **Backend dispatch lives at the remote level**, NOT inside `spec:`.
 `distributed.remotes.<alias>.backend` is either `ssh` (default, →
@@ -273,7 +274,16 @@ it's trying to reintroduce them, push back.
    on the box (allowlist). `spec.gpus` (from `--resources --gpus=N`
    slurm-style, OR from the typed `local:` / `slurm:` / per-remote `spec:`
    blocks) = how many GPUs *per task*. Both must be set for GPU mode;
-   the slot queue falls back to CPU slots if either is missing.
+   the slot queue falls back to CPU slots if either is missing (a GPU job
+   with no full slot fails setup on a box with GPUs; it runs on CPU, warned,
+   only on a GPU-less box or with `--gpus cpu`). Allowlist indices are
+   **nvidia-smi's (PCI order)**; the local/ssh templates export
+   `CUDA_DEVICE_ORDER=PCI_BUS_ID` next to `CUDA_VISIBLE_DEVICES`, or CUDA reads
+   them fastest-first (on anahita CUDA 1 ≠ nvidia-smi 1). **HSM never joins a
+   busy GPU (`not GpuInfo.is_free`) unless told `all`**: no allowlist, a list
+   and a count all skip busy GPUs. Only `cpu` renders `CUDA_VISIBLE_DEVICES=`;
+   a CPU task otherwise keeps its environment (visibility follows config, not
+   load).
 
 5b. **Mode-scoped config blocks — no cross-mode bleed.** As of the post-
    sync-deletion refactor, `spec_from_cli(mode=...)` reads:

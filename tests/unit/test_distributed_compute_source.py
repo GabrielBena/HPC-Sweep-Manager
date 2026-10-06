@@ -390,13 +390,14 @@ class TestConfig:
         self, tmp_path, monkeypatch
     ):
         from hpc_sweep_manager.core.local import local_compute_source
+        from hpc_sweep_manager.core.remote.gpu_probe import GpuInfo
 
         async def four_gpus():
-            return [0, 1, 2, 3]
+            return [GpuInfo(i, "gpu", 0, 49140, 0) for i in range(4)]
 
         monkeypatch.setattr(local_compute_source, "_detect_gpus", four_gpus)
         cfg = self._config(
-            tmp_path, {"local_max_jobs": 2}, local={"gpus": 1, "visible_gpus": [1, 2]}
+            tmp_path, {"local_max_jobs": 5}, local={"gpus": 1, "visible_gpus": [1, 2]}
         )
         src = DistributedComputeSource(hsm_config=cfg)
         assert await src.setup(tmp_path / "sweep", "sw")
@@ -405,6 +406,8 @@ class TestConfig:
         assert local.default_spec.gpus == 1
         slots = [local._slot_queue.get_nowait() for _ in range(local._slot_queue.qsize())]
         assert slots == [[1], [2]]  # GPU 0 (and 3) never get a task
+        # Its cap (local_max_jobs: 5) is bounded by its 2 slots: no task waits behind a slot.
+        assert local.max_parallel_jobs == src.max_parallel_jobs == 2
 
     async def test_retired_dispatcher_keys_warn(self, tmp_path, caplog):
         cfg = self._config(

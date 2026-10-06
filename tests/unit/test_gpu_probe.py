@@ -32,11 +32,16 @@ class TestParse:
         assert parse_nvidia_smi_csv("\n  \n") == []
 
     def test_skips_malformed_lines(self):
-        text = "0, GoodGPU, 100, 1000, 5\ngarbage line\n1, BadMem, NaNmb, 1000, 5\n"
+        text = "0, GoodGPU, 100, 1000, 5\ngarbage line\nx, BadIndex, 1, 1000, 5\n"
         gpus = parse_nvidia_smi_csv(text)
-        # Only the first row is well-formed + numeric.
+        # Only the first row has the right columns and a numeric index.
         assert len(gpus) == 1
         assert gpus[0].name == "GoodGPU"
+
+    def test_an_unreadable_number_keeps_the_gpu_as_busy(self):
+        # A MIG GPU reports [N/A] utilisation: it is never taken for free, nor dropped.
+        [gpu] = parse_nvidia_smi_csv("3, NVIDIA A100 MIG, 10, 40960, [N/A]")
+        assert gpu.index == 3 and gpu.is_free is False
 
     def test_free_threshold_boundary(self):
         # 4% util, 499 MB used → free; bump either past threshold → busy.

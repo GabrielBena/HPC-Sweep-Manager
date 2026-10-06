@@ -10,6 +10,7 @@ connection opened through :func:`create_ssh_connection`, so it honors
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 from .discovery import create_ssh_connection
@@ -49,12 +50,21 @@ class GpuInfo:
         return self.mem_total_mb / 1024.0
 
 
+def _number(field: str) -> float:
+    """A numeric nvidia-smi field, or NaN when unreadable: no free threshold passes NaN."""
+    try:
+        return float(field)
+    except ValueError:
+        return math.nan
+
+
 def parse_nvidia_smi_csv(text: str) -> list[GpuInfo]:
     """Parse ``nvidia-smi --query-gpu=...,--format=csv,noheader,nounits`` output.
 
     Each non-empty line is ``index, name, mem_used, mem_total, util``. Lines
-    that don't parse (unexpected column count / non-numeric) are skipped with a
-    debug log rather than raising — a half-readable probe still beats none.
+    that don't parse (unexpected column count / non-numeric index) are skipped with a
+    debug log rather than raising — a half-readable probe still beats none. An
+    unreadable number (``[N/A]`` on a MIG GPU) is NaN, so that GPU counts as busy.
     """
     gpus: list[GpuInfo] = []
     for line in text.splitlines():
@@ -70,9 +80,9 @@ def parse_nvidia_smi_csv(text: str) -> list[GpuInfo]:
                 GpuInfo(
                     index=int(parts[0]),
                     name=parts[1],
-                    mem_used_mb=float(parts[2]),
-                    mem_total_mb=float(parts[3]),
-                    util_pct=float(parts[4]),
+                    mem_used_mb=_number(parts[2]),
+                    mem_total_mb=_number(parts[3]),
+                    util_pct=_number(parts[4]),
                 )
             )
         except ValueError:
