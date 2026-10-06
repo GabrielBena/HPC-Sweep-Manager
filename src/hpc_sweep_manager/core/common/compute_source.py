@@ -61,6 +61,8 @@ class ComputeSourceStats:
 class ComputeSource(ABC):
     """Abstract base class for compute sources."""
 
+    poll_interval: float = 10.0  # seconds between the status polls of a launcher's wait
+
     def __init__(self, name: str, source_type: str, max_parallel_jobs: int):
         self.name = name
         self.source_type = source_type  # "local", "ssh_remote"

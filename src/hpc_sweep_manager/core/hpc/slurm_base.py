@@ -82,6 +82,7 @@ class SlurmBase(ComputeSource):
     """A :class:`ComputeSource` whose jobs live in a Slurm scheduler."""
 
     slurm_user: str | None = None  # whose queue to read; defaults to the local user
+    poll_interval = 60.0  # Slurm jobs run for hours: a poll a minute is soon enough
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

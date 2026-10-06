@@ -740,7 +740,7 @@ def _run_sweep_via_orchestrator(
                     resumable=rconf,
                     wandb_group=group,
                     job_name_prefix=sweep_id,
-                    poll_interval=10.0,
+                    poll_interval=source.poll_interval,
                     on_progress=progress_cb,
                     costs=costs,
                 )
@@ -773,7 +773,7 @@ def _run_sweep_via_orchestrator(
                 wandb_group=group,
                 job_name_prefix=sweep_id,
                 wait=True,
-                poll_interval=10.0,
+                poll_interval=source.poll_interval,
                 on_progress=progress_cb,
                 costs=costs,
             )
@@ -1156,9 +1156,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     try:
         # Idempotency: if the remote sweep dir is gone, a prior successful
         # collect already pulled + archived + cleaned it. Re-running is a no-op.
-        exists = await source._ssh_run(
-            f"test -d {shlex.quote(source._remote_sweep_dir)}", check=False
-        )
+        exists = await source._ssh_run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
         if (exists.returncode or 0) != 0:
             console.print(
                 f"[green]Remote sweep dir already cleaned on {source.host} — "
@@ -1359,6 +1357,7 @@ async def _advance_via_manifest(
             initial_job_ids=last_job_ids,
             initial_prev_done=int(chain.get("last_done_count") or 0),
             initial_prev_mtime=chain.get("last_checkpoint_mtime"),
+            poll_interval=source.poll_interval,
             block=block,
         )
         decision = (result.chain_decision or "").upper()

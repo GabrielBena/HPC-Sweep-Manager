@@ -262,10 +262,12 @@ jobs sitting PENDING, anahita keeps churning through the remaining work.
 You only see head-of-line behavior when *every* child is full.
 
 Status polling itself is cheap: every Slurm source asks one `squeue -u <user>`
-and one `sacct` per poll cycle, whatever the number of jobs in flight. A
+and one `sacct` per poll cycle (once a minute; local and ssh sources poll every
+10 s), whatever the number of jobs in flight. A
 failed `squeue` or `sacct` (a controller outage, a maintenance) changes no
-job's state, so it can't end a sweep early. Only individual submission is
-N round-trips (one `ssh + sbatch` per task).
+job's state, so it can't end a sweep early. Nor does a dropped connection to
+the login node: it is reopened, and while it stays down the polls just fail.
+Only individual submission is N round-trips (one `ssh + sbatch` per task).
 
 ### `wait_for_all` blocks on the slowest task
 

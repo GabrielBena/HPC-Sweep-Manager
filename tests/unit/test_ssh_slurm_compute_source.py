@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 
+import asyncssh
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
@@ -48,8 +50,9 @@ class FakeConn:
     ``.run()`` call we scan in order, pick the first entry whose substring
     appears in the command text, and **pop it** — so appending another
     entry with the same substring lets a test script multiple distinct
-    responses to repeated commands (e.g. two sbatch submissions). Falls
-    back to ``_Result(returncode=0, stdout="")`` when no entry matches.
+    responses to repeated commands (e.g. two sbatch submissions). An
+    exception entry is raised (a dropped link). Falls back to
+    ``_Result(returncode=0, stdout="")`` when no entry matches.
     """
 
     def __init__(
@@ -89,6 +92,8 @@ class FakeConn:
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:
                 del self._responder[i]
+                if isinstance(res, Exception):
+                    raise res
                 return res
         # Simulate the remote shell expanding `echo <path>` (~, $USER, $HOME).
         if cmd.startswith("echo "):
@@ -586,6 +591,74 @@ class TestStatus:
         conn = FakeConn(responder=_setup_ok_responder())
         src = await self._tracking(tmp_path, conn, replies=[("squeue -u", _Result(None))])
         assert (await src._sh(["squeue", "-u", "gbena"]))[0] == 255
+
+    def test_slurm_sources_poll_every_minute_the_others_every_10_s(self):
+        # Tracker R9: a 10 s poll for jobs that run 47 h.
+        from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
+        from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
+        from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
+
+        assert SSHSlurmComputeSource.poll_interval == SlurmComputeSource.poll_interval == 60
+        assert LocalComputeSource.poll_interval == SSHComputeSource.poll_interval == 10
+
+
+class _DeadConn(FakeConn):
+    async def run(self, cmd: str, **kw) -> _Result:
+        raise asyncssh.ConnectionLost("link down")
+
+
+class TestReconnect:
+    """Tracker S11: a login-node blip used to end a multi-day launcher."""
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_link_is_reopened_once_and_changes_no_status(self, tmp_path, caplog):
+        conn = FakeConn(responder=_setup_ok_responder())
+        blip = ("squeue -u", asyncssh.ConnectionLost("blip"))
+        src = await TestStatus._tracking(tmp_path, conn, "777", replies=[blip])
+        src.active_jobs["777"].status = "RUNNING"
+        src._fake_conn = fresh = FakeConn(responder=[("squeue -u", _Result(0, "777 RUNNING\n"))])
+        with caplog.at_level(logging.WARNING):
+            await src.update_all_job_statuses()
+        assert src._conn is fresh and src.active_jobs["777"].status == "RUNNING"
+        assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == [
+            "uzh: connection lost (ConnectionLost('blip')); reconnecting"
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reopen", ["dead", "unreachable"])
+    async def test_a_link_that_stays_down_keeps_every_state(self, tmp_path, reopen):
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = await TestStatus._tracking(tmp_path, conn, "777")
+        src._conn = src._fake_conn = _DeadConn()
+        if reopen == "unreachable":
+
+            async def unreachable():
+                raise ConnectionError("Could not reach uzh within 60 s")
+
+            src._open_connection = unreachable
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(src.wait_for_all(poll_interval=0.001), timeout=0.2)
+        assert src.active_jobs["777"].status == "PENDING" and not src.completed_jobs
+
+    @pytest.mark.asyncio
+    async def test_a_lost_sbatch_reply_is_never_resent(self, tmp_path):
+        # The job may be queued: a second sbatch would run it twice.
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = await TestStatus._tracking(tmp_path, conn)
+        conn.add("&& sbatch", asyncssh.ConnectionLost("blip"))
+        conn.add("&& sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        with pytest.raises(RuntimeError, match="may be queued, check squeue"):
+            await src.submit_batch([{"s": 0}], "sweep_1", mode="array")
+        assert sum("&& sbatch" in c["cmd"] for c in conn.run_calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rc", [1, None])
+    async def test_a_failed_write_raises_naming_the_path(self, tmp_path, rc):
+        conn = FakeConn(responder=_setup_ok_responder())
+        full = ("cat > /x/f.json", _Result(rc, stderr="No space left on device"))
+        src = await TestStatus._tracking(tmp_path, conn, replies=[full])
+        with pytest.raises(RuntimeError, match="writing /x/f.json on uzh failed: No space"):
+            await src._write_remote_file("/x/f.json", "{}")
 
 
 class TestReservationWarning:

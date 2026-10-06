@@ -210,7 +210,8 @@ S3IT jobs from your lab workstation), declare a remote with
 `backend: slurm` instead of the default `ssh`. HSM still rsyncs your
 project up the same way; the difference is that submissions go through
 `sbatch` on the remote (over the same persistent SSH connection) and
-status polls hit `squeue`. The login node needs `sbatch`/`squeue`/
+status polls hit `squeue` once a minute. A connection that drops is reopened
+and changes no job's state. The login node needs `sbatch`/`squeue`/
 `scancel` on `$PATH`.
 
 ```yaml

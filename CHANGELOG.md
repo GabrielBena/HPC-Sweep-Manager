@@ -190,6 +190,14 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   reservation at setup. It now warns at submission only about a maintenance window
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
+- **A login-node blip no longer ends a Slurm-over-SSH launcher (S11, R9).** A dropped
+  connection made the next `squeue` raise and killed a multi-day wait. The connection
+  now has a 30 s keepalive, and a command whose connection dropped reconnects and runs
+  once more; while the host stays unreachable the polls fail and every job keeps its
+  state. `sbatch` is never resent (after a lost reply the job may be queued): the error
+  says to check `squeue`. A remote file write (params file, manifest, `.archived`) that
+  fails now raises instead of passing silently. Slurm sources poll every 60 s instead of
+  10 s; local and ssh sources stay at 10 s.
 
 ### Removed (2026-10 maintenance pass)
 

@@ -95,9 +95,14 @@ async def test_login_and_connect_are_bounded(captured_connect, ssh_config_presen
     await discovery.create_ssh_connection("gpubox")
     assert captured_connect["login_timeout"] == 30
     assert captured_connect["connect_timeout"] == 60
-    # No forced keepalive: without a reconnect it would turn a network stall into a dead
+    # No keepalive by default: without a reconnect it would turn a network stall into a dead
     # launcher, and it would override the user's ServerAliveInterval.
     assert "keepalive_interval" not in captured_connect
+
+
+async def test_a_caller_that_reconnects_asks_for_a_keepalive(captured_connect, ssh_config_present):
+    await discovery.create_ssh_connection("gpubox", keepalive_interval=30)
+    assert captured_connect["keepalive_interval"] == 30
 
 
 # --- stale SSH agent (field report 2026-09-29): login stalls until the server resets
