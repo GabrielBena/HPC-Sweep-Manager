@@ -9,7 +9,9 @@
    regardless of which package manager the user actually has.
 
    Caller-supplied context: requires `uses_conda` to be truthy to emit
-   anything; emits a no-op when false (no conda env requested).
+   anything; emits a no-op when false (no conda env requested). With
+   `conda_env`, the first install that has `envs/<conda_env>` wins (else the
+   first install found), so a leftover ~/miniconda3 can't shadow ~/miniforge3.
 #}
 {% if uses_conda %}
 # --- HSM conda / micromamba init (non-interactive shells skip .bashrc) -------
@@ -23,18 +25,23 @@ if command -v conda >/dev/null 2>&1; then
     _hsm_conda_loaded=1
 fi
 if [ "$_hsm_conda_loaded" -eq 0 ]; then
-    for _c in "$HOME/miniconda3/etc/profile.d/conda.sh" \
-             "$HOME/anaconda3/etc/profile.d/conda.sh" \
-             "$HOME/miniforge3/etc/profile.d/conda.sh" \
-             "$HOME/.miniconda3/etc/profile.d/conda.sh" \
-             "/opt/conda/etc/profile.d/conda.sh"; do
-        if [ -f "$_c" ]; then
-            # shellcheck disable=SC1090
-            . "$_c"
-            _hsm_conda_loaded=1
-            break
-        fi
+    _hsm_first="" _hsm_pick=""
+    for _r in "${CONDA_EXE:+${CONDA_EXE%/bin/conda}}" "$HOME/miniconda3" "$HOME/anaconda3" \
+             "$HOME/miniforge3" "$HOME/mambaforge" "$HOME/.miniconda3" "/opt/conda"; do
+        [ -n "$_r" ] && [ -f "$_r/etc/profile.d/conda.sh" ] || continue
+        _hsm_first="${_hsm_first:-$_r}"
+{% if conda_env %}
+        [ -d "$_r/envs/{{ conda_env }}" ] || continue
+{% endif %}
+        _hsm_pick="$_r"
+        break
     done
+    _hsm_pick="${_hsm_pick:-$_hsm_first}"
+    if [ -n "$_hsm_pick" ]; then
+        # shellcheck disable=SC1091
+        . "$_hsm_pick/etc/profile.d/conda.sh"
+        _hsm_conda_loaded=1
+    fi
 fi
 if [ "$_hsm_conda_loaded" -eq 0 ]; then
     # Conda not found; try micromamba. Probe MAMBA_EXE (if exported), then

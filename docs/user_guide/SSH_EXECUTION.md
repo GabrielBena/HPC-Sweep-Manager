@@ -507,8 +507,8 @@ the launcher:
   record the host key.
 - **`conda: command not found` in task output:** your conda install is
   in a non-standard location. Either set `python_path:
-  /full/path/to/python` per-remote, or symlink your `conda.sh` into one
-  of the standard spots.
+  /full/path/to/python` per-remote, export `CONDA_EXE` (`<prefix>/bin/conda`)
+  in a `pre_script`, or symlink your `conda.sh` into one of the standard spots.
 - **Tasks succeed but `output.dir` is empty locally:** check that your
   `train.py` actually honors the `output.dir` Hydra arg HSM passes in.
   See [`examples/test_train.py`](../../examples/test_train.py) for the

@@ -226,8 +226,9 @@ it's trying to reintroduce them, push back.
    real conda is already present it does NOTHING ELSE (never defines the
    `conda() { micromamba "$@"; }` bridge, which would otherwise shadow the
    module conda and silently train on CPU). Only if no real conda is found does
-   it probe standard paths (`~/miniconda3`/`~/anaconda3`/`~/miniforge3`/`/opt/conda`)
-   then fall back to micromamba (`$MAMBA_EXE` + common locations, including
+   it probe standard paths (`$CONDA_EXE`'s prefix, `~/miniconda3`/`~/anaconda3`/
+   `~/miniforge3`/`~/mambaforge`/`/opt/conda`), sourcing the first that has
+   `envs/<conda_env>` (else the first found; templates get `conda_env`), then fall back to micromamba (`$MAMBA_EXE` + common locations, including
    `~/code/packages/HPC-Sweep-Manager/bin/micromamba`). SSHComputeSource +
    SSHSlurmComputeSource pass `uses_conda` based on `bool(self.conda_env)`;
    native SlurmComputeSource uses `_python_needs_conda_init(python_path)`.
