@@ -7,8 +7,11 @@ focus on directive rendering, spec resolution, and QOS validation.
 
 from __future__ import annotations
 
+import getpass
+
 import pytest
 
+from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
 from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
@@ -145,48 +148,53 @@ class TestEffectiveSpec:
         assert eff.qos == "custom"
 
 
-class TestNativeJobStatus:
-    """get_job_status: squeue-absence triggers a sacct terminal-state query
-    instead of optimistically assuming COMPLETED."""
+class TestNativeTransport:
+    """The native ``_sh`` seam: SlurmBase's refresh runs over local subprocesses
+    (the status semantics themselves are tested in test_slurm_base.py)."""
 
     @staticmethod
-    def _patch_run(monkeypatch, *, squeue_out: str, sacct_out: str):
+    def _patch_run(monkeypatch, replies):
         from hpc_sweep_manager.core.hpc import slurm_compute_source as mod
 
+        calls = []
+
         def fake_run(argv, capture_output=True, text=True):
-            r = type("R", (), {})()
-            r.returncode = 0
-            r.stderr = ""
-            if "squeue" in argv:
-                r.stdout = squeue_out
-            elif "sacct" in argv:
-                r.stdout = sacct_out
-            else:
-                r.stdout = ""
-            return r
+            calls.append(argv)
+            if argv[0] not in replies:
+                raise FileNotFoundError(argv[0])
+            rc, out = replies[argv[0]]
+            return type("R", (), {"returncode": rc, "stdout": out, "stderr": ""})()
 
         monkeypatch.setattr(mod.subprocess, "run", fake_run)
+        return calls
+
+    @staticmethod
+    def _tracking(job="123"):
+        src = SlurmComputeSource()
+        src.active_jobs[job] = JobInfo(job, job, {}, src.name)
+        return src
 
     @pytest.mark.asyncio
-    async def test_absent_failed_via_sacct(self, monkeypatch):
-        self._patch_run(monkeypatch, squeue_out="", sacct_out="FAILED\n")
-        assert await SlurmComputeSource().get_job_status("123") == "FAILED"
+    async def test_gone_from_squeue_and_failed_in_sacct(self, monkeypatch):
+        calls = self._patch_run(monkeypatch, {"squeue": (0, ""), "sacct": (0, "123|FAILED\n")})
+        src = self._tracking()
+        await src.update_all_job_statuses()
+        assert src.completed_jobs["123"].status == "FAILED"
+        assert [c[0] for c in calls] == ["squeue", "sacct"]
+        assert calls[0][1:3] == ["-u", getpass.getuser()]
 
     @pytest.mark.asyncio
-    async def test_absent_completed_via_sacct(self, monkeypatch):
-        self._patch_run(monkeypatch, squeue_out="", sacct_out="COMPLETED\n")
-        assert await SlurmComputeSource().get_job_status("123") == "COMPLETED"
+    async def test_still_queued_never_asks_sacct(self, monkeypatch):
+        calls = self._patch_run(monkeypatch, {"squeue": (0, "123 RUNNING\n")})
+        src = self._tracking()
+        await src.update_all_job_statuses()
+        assert await src.get_job_status("123") == "RUNNING"
+        assert [c[0] for c in calls] == ["squeue"]
 
     @pytest.mark.asyncio
-    async def test_absent_empty_sacct_falls_back_completed(self, monkeypatch):
-        self._patch_run(monkeypatch, squeue_out="", sacct_out="")
-        assert await SlurmComputeSource().get_job_status("123") == "COMPLETED"
-
-    @pytest.mark.asyncio
-    async def test_running_in_squeue_unchanged(self, monkeypatch):
-        self._patch_run(monkeypatch, squeue_out="RUNNING\n", sacct_out="FAILED\n")
-        # Still in the queue → trust squeue, never consult sacct.
-        assert await SlurmComputeSource().get_job_status("123") == "RUNNING"
+    async def test_a_missing_binary_reads_as_rc_127(self, monkeypatch):
+        self._patch_run(monkeypatch, {})
+        assert (await SlurmComputeSource()._sh(["sacct"]))[0] == 127
 
 
 class TestTemplatesExist:

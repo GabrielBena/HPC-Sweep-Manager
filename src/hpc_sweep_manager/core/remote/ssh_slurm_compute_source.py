@@ -17,9 +17,9 @@ that doesn't itself have Slurm installed. This module does:
        REMOTE paths baked in, pipe the script to the remote via ``cat >``,
        then ``ssh host "cd <sweep_dir> && sbatch <script>"`` — capturing
        the job id from sbatch's stdout.
-    3. ``get_job_status`` / ``update_all_job_statuses``: ``ssh host
-       "squeue -j <ids> -h -o '%i %T'"`` — batched across all live jobs
-       so each poll cycle is one round-trip, not N.
+    3. Status: :class:`SlurmBase` (shared with the native source) asks one
+       ``squeue -u <user>`` and one ``sacct`` per poll, whatever the job count, and
+       never reads a failed call as a verdict.
     4. ``collect_results()``: rsync the remote ``tasks/`` tree back to
        the local sweep dir; on full-success, ``rm -rf`` the remote sweep
        dir (the per-project code mirror persists for the next sweep).
@@ -51,10 +51,7 @@ from typing import Any
 
 from ..common.chain import ChainState
 from ..common.compute_source import (
-    TERMINAL_STATES,
-    ComputeSource,
     JobInfo,
-    ProgressCallback,
     SubmissionMode,
 )
 from ..common.resource_spec import ResourceSpec
@@ -68,10 +65,9 @@ from ..hpc.gpu_planner import (
     replace_sub_walltime,
 )
 from ..hpc.scheduler_queue import parse_reservations_output
+from ..hpc.slurm_base import SlurmBase
 from ..hpc.slurm_protocol import (
-    SLURM_STATE_MAP,
     format_signal,
-    parse_sacct_state,
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
@@ -85,7 +81,7 @@ from .push_exec import (
 logger = logging.getLogger(__name__)
 
 
-class SSHSlurmComputeSource(ComputeSource):
+class SSHSlurmComputeSource(SlurmBase):
     """Push-model Slurm-over-SSH compute source.
 
     The remote needs ``bash`` + ``rsync`` + ``sbatch``/``squeue``/``scancel``
@@ -302,6 +298,7 @@ class SSHSlurmComputeSource(ComputeSource):
         # locally) and the archive target (shlex-quoted) point at real paths —
         # the docs promise this expansion (HPC_EXECUTION.md).
         resolved_root = await self._resolve_remote_path(active_root)
+        self.slurm_user = await self._resolve_remote_path("$USER")  # whose squeue to read
         self._resolved_archive_dir = (
             await self._resolve_remote_path(self.archive_dir) if self.archive_dir else None
         )
@@ -606,6 +603,7 @@ class SSHSlurmComputeSource(ComputeSource):
         self._remote_sweep_dir = manifest["remote_sweep_dir"]
         self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
+        self.slurm_user = await self._resolve_remote_path("$USER")
         return True
 
     @classmethod
@@ -773,81 +771,10 @@ class SSHSlurmComputeSource(ComputeSource):
         return job_id
 
     # ----------------------------------------------------------------- status
-    async def _terminal_state_via_sacct(self, job_id: str) -> str:
-        """Classify a job that's no longer in ``squeue`` via ``sacct``.
-
-        Leaving the queue is NOT success — query the accounting DB for the real
-        terminal state (COMPLETED vs FAILED/TIMEOUT/OOM/CANCELLED). Falls back
-        to ``"COMPLETED"`` only when sacct returns nothing (accounting disabled
-        or job unknown), preserving the old optimistic behavior on clusters
-        that genuinely can't tell us better.
-        """
-        result = await self._ssh_run(f"sacct -j {shlex.quote(job_id)} -n -X -o State", check=False)
-        rc = result.returncode or 0
-        state = parse_sacct_state(result.stdout or "") if rc == 0 else None
-        if state is None:
-            if rc != 0:
-                # sacct errored (not just "no rows") — surface it: this is the
-                # rare window where a real FAILED could be missed.
-                stderr = (result.stderr or "").strip() or "no stderr"
-                logger.warning(
-                    f"sacct failed for job {job_id} on {self.host} (rc={rc}): "
-                    f"{stderr} — assuming COMPLETED; verify it didn't fail."
-                )
-            else:
-                logger.debug(
-                    f"sacct returned no state for job {job_id} on {self.host}; "
-                    f"assuming COMPLETED (accounting may be disabled)"
-                )
-            return "COMPLETED"
-        return state
-
-    async def get_job_status(self, job_id: str) -> str:
-        result = await self._ssh_run(f"squeue -j {shlex.quote(job_id)} -h -o '%T'", check=False)
-        if (result.returncode or 0) != 0 or not (result.stdout or "").strip():
-            # Gone from the queue — ask sacct for the actual terminal state
-            # rather than assuming success (queue-absence ≠ completion).
-            status = await self._terminal_state_via_sacct(job_id)
-        else:
-            raw = (result.stdout or "").strip().splitlines()[0].strip()
-            status = SLURM_STATE_MAP.get(raw, "RUNNING")
-        if job_id in self.active_jobs:
-            self.update_job_status(job_id, status)
-        return status
-
-    async def update_all_job_statuses(self) -> None:
-        """Refresh every live job's status in a single ``squeue`` call.
-
-        N round-trips → 1 round-trip per poll cycle for jobs still queued.
-        Jobs absent from the response have left the queue; we then ask
-        ``sacct`` for each one's terminal state — queue-absence is not a
-        completion signal. Array parents whose tasks are still queued (squeue
-        reports ``<id>_<task>`` rows) are recognized as still RUNNING so we
-        don't hit sacct every poll while they run.
-        """
-        live = list(self.active_jobs.keys())
-        if not live:
-            return
-        joined = ",".join(shlex.quote(j) for j in live)
-        result = await self._ssh_run(f"squeue -j {joined} -h -o '%i %T'", check=False)
-        seen: dict[str, str] = {}
-        for line in (result.stdout or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            seen[parts[0]] = SLURM_STATE_MAP.get(parts[1], "RUNNING")
-        for jid in live:
-            if jid in seen:
-                status = seen[jid]
-            elif any(k.startswith(f"{jid}_") for k in seen):
-                status = "RUNNING"  # array parent: some tasks still queued
-            else:
-                status = await self._terminal_state_via_sacct(jid)
-            if jid in self.active_jobs:
-                self.update_job_status(jid, status)
+    async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
+        result = await self._ssh_run(shlex.join(argv))
+        rc = 255 if result.returncode is None else result.returncode  # None: killed by a signal
+        return rc, result.stdout or "", result.stderr or ""
 
     async def cancel_job(self, job_id: str) -> bool:
         result = await self._ssh_run(f"scancel {shlex.quote(job_id)}", check=False)
@@ -919,51 +846,15 @@ class SSHSlurmComputeSource(ComputeSource):
                 mtime = None
         return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime)
 
-    async def wait_for_all(
-        self,
-        poll_interval: float = 5.0,
-        on_progress: ProgressCallback | None = None,
-    ) -> dict[str, str]:
-        """Poll like the base loop, but rsync-pull ``tasks/`` whenever a job
-        newly reaches a terminal state (T1).
-
-        Partial progress then survives a single stuck task (a 12h maintenance
-        hold no longer holds the other N-1 hostage) and a launcher death loses
-        at most the last poll interval. The final ``collect_results()`` still
-        runs the authoritative archive → pull → cleanup (CLAUDE.md gotcha 4/4b)
-        — these mid-flight pulls are additive and idempotent, never a
-        replacement. Mirrors :meth:`ComputeSource.wait_for_all`; kept in sync.
-        """
-        final_statuses: dict[str, str] = {}
-        for job_id, info in list(self.completed_jobs.items()):
-            final_statuses[job_id] = info.status
-
-        total = len(self.active_jobs) + len(final_statuses)
-        if on_progress is not None:
-            on_progress(len(final_statuses), max(total, 1))
-
-        pulled_through = len(final_statuses)
-        while self.active_jobs:
-            for job_id in list(self.active_jobs.keys()):
-                status = await self.get_job_status(job_id)
-                if status in TERMINAL_STATES and job_id not in final_statuses:
-                    final_statuses[job_id] = status
-            # New completions this cycle → pull their task dirs now.
-            if len(final_statuses) > pulled_through and self._remote_sweep_dir:
-                pulled_through = len(final_statuses)
-                try:
-                    await self._pull_tasks()
-                except Exception as e:  # noqa: BLE001 — best-effort; retried at end
-                    logger.warning(
-                        f"incremental tasks/ pull on {self.host} failed "
-                        f"(will retry in collect_results): {e}"
-                    )
-            if on_progress is not None:
-                total = len(self.active_jobs) + len(final_statuses)
-                on_progress(len(final_statuses), max(total, 1))
-            if self.active_jobs:
-                await asyncio.sleep(poll_interval)
-        return final_statuses
+    async def _after_poll(self, newly_done: int) -> None:
+        """Pull ``tasks/`` whenever a job newly finishes (T1), so a stuck task or a dead launcher
+        strands nothing that is done. Additive and idempotent: the final
+        :meth:`collect_results` still runs archive → pull → cleanup (gotchas 4/4b)."""
+        if newly_done and self._remote_sweep_dir:
+            try:
+                await self._pull_tasks()
+            except Exception as e:  # noqa: BLE001 — best-effort; retried in collect_results
+                logger.warning(f"incremental tasks/ pull on {self.host} failed: {e}")
 
     async def collect_results(
         self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False

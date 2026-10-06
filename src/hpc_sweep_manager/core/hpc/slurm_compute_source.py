@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..common.compute_source import ComputeSource, JobInfo, SubmissionMode
+from ..common.compute_source import JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.resumable import ChunkProgress, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
@@ -32,10 +32,9 @@ from .gpu_planner import (
     build_array_submissions,
     replace_sub_walltime,
 )
+from .slurm_base import SlurmBase
 from .slurm_protocol import (
-    SLURM_STATE_MAP,
     format_signal,
-    parse_sacct_state,
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
@@ -60,7 +59,7 @@ def _python_needs_conda_init(python_path: str) -> bool:
     return p.startswith("conda ") or p.startswith("mamba ") or p.startswith("micromamba ")
 
 
-class SlurmComputeSource(ComputeSource):
+class SlurmComputeSource(SlurmBase):
     def __init__(
         self,
         name: str = "slurm",
@@ -379,59 +378,12 @@ class SlurmComputeSource(ComputeSource):
         )
         return job_id
 
-    async def _terminal_state_via_sacct(self, job_id: str) -> str:
-        """Classify a job that's gone from ``squeue`` via ``sacct``.
-
-        Queue-absence is not a completion signal — query the accounting DB for
-        the real terminal state. Falls back to ``"COMPLETED"`` only when sacct
-        is unavailable / returns nothing (sacct not installed, accounting
-        disabled).
-        """
-        state = None
+    async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
         try:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                ["sacct", "-j", job_id, "-n", "-X", "-o", "State"],
-                capture_output=True,
-                text=True,
-            )
-        except (FileNotFoundError, OSError) as e:
-            logger.debug(f"sacct unavailable for job {job_id}: {e}; assuming COMPLETED")
-            return "COMPLETED"
-        rc = result.returncode
-        state = parse_sacct_state(result.stdout or "") if rc == 0 else None
-        if state is None:
-            if rc != 0:
-                stderr = (result.stderr or "").strip() or "no stderr"
-                logger.warning(
-                    f"sacct failed for job {job_id} (rc={rc}): {stderr} — "
-                    f"assuming COMPLETED; verify it didn't fail."
-                )
-            else:
-                logger.debug(
-                    f"sacct returned no state for job {job_id}; assuming COMPLETED "
-                    f"(accounting may be disabled)"
-                )
-            return "COMPLETED"
-        return state
-
-    async def get_job_status(self, job_id: str) -> str:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["squeue", "-j", job_id, "-h", "-o", "%T"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            # Gone from the queue — ask sacct for the actual terminal state
-            # rather than assuming success (queue-absence ≠ completion).
-            status = await self._terminal_state_via_sacct(job_id)
-        else:
-            raw = result.stdout.strip().splitlines()[0].strip()
-            status = SLURM_STATE_MAP.get(raw, "RUNNING")
-        if job_id in self.active_jobs:
-            self.update_job_status(job_id, status)
-        return status
+            r = await asyncio.to_thread(subprocess.run, list(argv), capture_output=True, text=True)
+        except OSError as e:  # the binary is missing: what a shell would report as rc 127
+            return 127, "", str(e)
+        return r.returncode, r.stdout or "", r.stderr or ""
 
     async def cancel_job(self, job_id: str) -> bool:
         result = await asyncio.to_thread(
