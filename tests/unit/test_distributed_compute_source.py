@@ -268,6 +268,35 @@ class TestBuildSshChildren:
         assert uzh.default_spec.walltime == "06:00:00"
         assert uzh.default_spec.gpu_type == "H100"
 
+    async def test_bad_spec_value_fails_instead_of_dropping_remote(self, tmp_path):
+        """A config error must fail the run — dropping the remote would shift its
+        tasks onto the other children (local included) without anyone noticing."""
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            DistributedComputeSource,
+        )
+
+        class FakeConfig:
+            config_data = {
+                "distributed": {
+                    "local_max_jobs": 0,
+                    "remotes": {
+                        "ok": {"max_parallel_jobs": 1},
+                        "uzh": {"backend": "slurm", "spec": {"gpus": -1, "account": "lab"}},
+                    },
+                }
+            }
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        src = DistributedComputeSource(hsm_config=FakeConfig())
+        with pytest.raises(ValueError, match="remote 'uzh' spec"):
+            await src.setup(tmp_path / "sweep", "sweep_x")
+        assert src._child_sources == [] and src._manager is None
+
     async def test_unknown_backend_skipped(self, tmp_path, caplog):
         """Misconfigured `backend:` doesn't kill the whole sweep — just skips."""
         from hpc_sweep_manager.core.distributed.distributed_compute_source import (

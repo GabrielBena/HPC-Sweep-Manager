@@ -42,7 +42,7 @@ hsm sweep run [OPTIONS]
 
   -c, --config PATH                  Path to sweep config (default: sweeps/sweep.yaml)
   --mode [auto|local|array|individual|distributed|remote]
-                                     Default: 'remote' if --remote given, else 'auto'
+                                     Default 'auto'; with --remote, omitted or 'auto' means 'remote'
   --remote TEXT                      ssh-config alias to push the sweep to. Implies --mode remote.
   --gpus TEXT                        GPU allowlist (local or remote): 'all' (default), 'cpu', int N, or '0,1,3'.
   -d, --dry-run                      Show resolved spec + the exact task-1 command; no submission.

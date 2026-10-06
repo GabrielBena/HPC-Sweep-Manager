@@ -435,11 +435,7 @@ class HSMConfig:
         # Strip orchestrator-/scheduler-only keys before handing to ResourceSpec.
         _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size", "speed_factors"}
         filtered = {k: v for k, v in block.items() if k not in _NON_SPEC_KEYS}
-        try:
-            return ResourceSpec.from_dict(filtered)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `slurm:` block in HSM config: {e}")
-            return None
+        return ResourceSpec.from_dict(filtered, where="`slurm:` block")
 
     def get_local_spec(self):
         """Read the typed ``local:`` block as a :class:`ResourceSpec`, or ``None``.
@@ -482,11 +478,7 @@ class HSMConfig:
                 f"move them to the `slurm:` block. Ignoring."
             )
         filtered = {k: v for k, v in block.items() if k in _LOCAL_SPEC_FIELDS}
-        try:
-            return ResourceSpec.from_dict(filtered)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `local:` block in HSM config: {e}")
-            return None
+        return ResourceSpec.from_dict(filtered, where="`local:` block")
 
     def get_local_visible_gpus(self):
         """Read ``local.visible_gpus`` as a list of int indices, or ``None`` if unset.
@@ -599,6 +591,19 @@ class HSMConfig:
         )
 
 
+def _mkdir_fresh(parent: Path, sweep_id: str) -> Path:
+    """Create ``parent/<sweep_id>`` exclusively, suffixing ``_2``, ``_3``, … on collision
+    (1-second ids: same-second launches would share, and clean up, one sweep dir)."""
+    path, n = parent / sweep_id, 1
+    while True:
+        try:
+            path.mkdir(parents=True)
+            return path
+        except FileExistsError:
+            n += 1
+            path = parent / f"{sweep_id}_{n}"
+
+
 def resolve_sweep_dir(
     hsm_config: Optional["HSMConfig"],
     sweep_id: str,
@@ -617,7 +622,8 @@ def resolve_sweep_dir(
 
     The returned ``Path`` is the *target* (where data actually lives),
     not the symlink, so callers using it for ``mkdir``, ``glob``, etc.
-    operate on the canonical location.
+    operate on the canonical location. It is always a NEW dir (``<sweep_id>_2``
+    … if taken): take its ``.name`` as the sweep id.
 
     Raises:
         FileNotFoundError: when ``local.sweeps_root`` is set but resolves
@@ -628,12 +634,11 @@ def resolve_sweep_dir(
             been a mount point.
     """
     project_dir = project_dir or Path.cwd()
-    default = project_dir / "sweeps" / "outputs" / sweep_id
+    link_parent = project_dir / "sweeps" / "outputs"
 
     sweeps_root = hsm_config.get_local_sweeps_root() if hsm_config is not None else None
     if not sweeps_root:
-        default.mkdir(parents=True, exist_ok=True)
-        return default
+        return _mkdir_fresh(link_parent, sweep_id)
 
     expanded = Path(os.path.expandvars(os.path.expanduser(sweeps_root)))
     if not expanded.exists():
@@ -645,13 +650,10 @@ def resolve_sweep_dir(
             f"field from your HSM config (machine: {MACHINE_CONFIG_PATH}, "
             f"or this project's `.hsm/config.yaml`)."
         )
-    expanded = expanded.resolve()
-    target = expanded / sweep_id
-    target.mkdir(parents=True, exist_ok=True)
+    target = _mkdir_fresh(expanded.resolve(), sweep_id)
 
-    link_parent = project_dir / "sweeps" / "outputs"
     link_parent.mkdir(parents=True, exist_ok=True)
-    link = link_parent / sweep_id
+    link = link_parent / target.name
 
     # If a stale symlink already exists at the link path (e.g., from a
     # collision on sweep_id), replace it with one pointing at the new

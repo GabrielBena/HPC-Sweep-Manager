@@ -6,8 +6,22 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
-### Fixed (2026-10 maintenance pass — ssh lane)
+### Fixed (2026-10 maintenance pass — `docs/dev/maintenance-2026-10.md`)
 
+- **A Slurm outage could delete a live sweep dir (S1).** When `squeue` failed
+  (rc≠0) and `sacct` failed too, a job was taken as COMPLETED; the launcher (or
+  `hsm sweep collect`) then archived and `rm -rf`'d the remote sweep dir while
+  tasks were still queued. A failed call is now never a verdict: a failing squeue
+  or sacct changes no state that cycle, and a job that left the queue waits for
+  sacct to name its terminal state. COMPLETED is assumed only when accounting has
+  no record of the job (no rows, or accounting absent) on 3 polls in a row.
+- **Status polling is batched for every Slurm source (S2).** One `squeue -u <user>` and
+  one `sacct` per poll, shared by the native and SSH-driven sources
+  (`core/hpc/slurm_base.py`); it was one `squeue` (+ `sacct`) per job per cycle,
+  600 SSH channels a cycle at 600 jobs. `collect` and `advance` use the same
+  refresh.
+- **`sbatch` output without a `Submitted batch job <id>` line now raises** instead
+  of guessing an id from the last word of the output.
 - **A stale SSH agent no longer breaks the connection (X2).** When `SSH_AUTH_SOCK`
   pointed at an agent that no longer answers (often one forwarded by an old
   session), asyncssh waited in auth until the server reset the connection: HSM
@@ -25,6 +39,24 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `BatchMode=yes`, `ConnectTimeout=30` and `ServerAliveInterval=30` (passed with
   `-e`, so it overrides `RSYNC_RSH`): a push or a pull fails instead of waiting for
   a password, or for TCP keepalive to notice a dead link (about 2 h).
+- **`--remote X --mode auto` ran locally (C1).** `auto` resolved to
+  `local`/`array` and ignored the alias. With `--remote`, `auto` now means
+  remote, and `build_compute_source` refuses an alias with any other mode.
+- **One unknown key dropped a whole spec block (C2).** A typo such as
+  `cpus: 4` in a per-remote `spec:` or the `slurm:` block discarded every
+  field (account, qos, `--exclude`, …) behind a single log line. Now only the
+  unknown key is dropped, with a warning naming it; an invalid value of a
+  known key stops the run with an error naming the block.
+- **An unregistered `--remote` alias became a bare ssh-bash remote (C6).** A
+  typo'd `uzh` could train on the cluster's login node. When the project has
+  a `distributed.remotes:` block, an alias missing from it is now an error
+  with a "did you mean" suggestion; projects without the block keep bare
+  `~/.ssh/config` aliases.
+- **Same-second launches shared a sweep dir (C7).** Sweep ids have
+  one-second resolution and the dir was created with `exist_ok`, so two
+  launches shared their local and remote dirs, and one's cleanup could delete
+  the other's. The dir is now created exclusively; on a collision the id gets
+  a `_2` (`_3`, …) suffix.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

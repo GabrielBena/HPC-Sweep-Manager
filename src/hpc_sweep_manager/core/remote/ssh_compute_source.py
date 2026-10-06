@@ -498,13 +498,6 @@ class SSHComputeSource(ComputeSource):
                 pass
             self._conn = None
 
-    async def update_all_job_statuses(self) -> None:
-        for job_id in list(self.active_jobs.keys()):
-            try:
-                await self.get_job_status(job_id)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Failed to update status for {job_id}: {e}")
-
     def __str__(self) -> str:
         return (
             f"SSH:{self.name} ({self.host}): "
@@ -598,15 +591,7 @@ def build_ssh_source(
     # flags (--walltime, --resources) still override.
     remote_spec_dict = remote_cfg.get("spec")
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:
-        try:
-            per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
-            per_remote_spec = None
-    else:
-        per_remote_spec = None
-
-    if per_remote_spec is not None:
+        per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
     conda_env = (

@@ -5,7 +5,7 @@ Mirrors the fake ``squeue`` state model, but — like real sacct — reports job
 even after they've left the queue (that's the whole point: squeue forgets,
 sacct remembers, which is exactly what HSM consults to tell COMPLETED from
 FAILED). Supports the subset HSM uses: ``-j ID[,ID...]`` (repeatable), ``-n``,
-``-X``, ``-o State``.
+``-X``, ``-P``, ``-o State`` or ``-o JobID,State`` (pipe-delimited).
 """
 
 from __future__ import annotations
@@ -55,6 +55,7 @@ def main() -> int:
     parser.add_argument("-j", "--job", action="append", default=[])
     parser.add_argument("-n", action="store_true", dest="noheader")
     parser.add_argument("-X", action="store_true", dest="allocations")
+    parser.add_argument("-P", action="store_true", dest="parsable")
     parser.add_argument("-o", "--format", default="State")
     args, _ = parser.parse_known_args()
 
@@ -72,8 +73,10 @@ def main() -> int:
     now = time.time()
     # -o State → one State token per allocation row. We store one record per
     # job, so -X (allocations only) is a no-op here.
+    with_id = args.format.split(",")[0] == "JobID"
     for j in jobs:
-        print(_current_state(j, now, pending_s, running_s))
+        state = _current_state(j, now, pending_s, running_s)
+        print(f"{j['id']}|{state}" if with_id else state)
     return 0
 
 

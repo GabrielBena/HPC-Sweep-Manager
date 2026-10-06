@@ -78,18 +78,21 @@ class TestSlurmSpec:
         assert spec is not None
         assert spec.gpus == 1
 
-    def test_invalid_field_returns_none_and_warns(self, caplog):
-        # ResourceSpec's __post_init__ rejects bad values; the accessor catches.
-        with caplog.at_level("WARNING"):
-            result = HSMConfig({"slurm": {"cpus_per_task": -1}}).get_slurm_spec()
-        assert result is None
-        assert any("Invalid `slurm:` block" in r.message for r in caplog.records)
+    def test_invalid_value_raises_naming_the_block(self):
+        # C2: a bad value is an error the user sees — never a silent drop of
+        # the whole block (account, qos, --exclude, ...).
+        with pytest.raises(ValueError, match="`slurm:` block: .*cpus_per_task"):
+            HSMConfig({"slurm": {"cpus_per_task": -1}}).get_slurm_spec()
 
-    def test_gpu_type_without_gpus_returns_none(self, caplog):
-        # ResourceSpec rejects gpu_type without gpus >= 1.
+    def test_gpu_type_without_gpus_raises(self):
+        with pytest.raises(ValueError, match="gpu_type requires gpus"):
+            HSMConfig({"slurm": {"gpu_type": "h100"}}).get_slurm_spec()
+
+    def test_unknown_key_drops_only_itself(self, caplog):
         with caplog.at_level("WARNING"):
-            result = HSMConfig({"slurm": {"gpu_type": "h100"}}).get_slurm_spec()
-        assert result is None
+            spec = HSMConfig({"slurm": {"account": "a", "qos": "q", "cpus": 4}}).get_slurm_spec()
+        assert (spec.account, spec.qos) == ("a", "q")
+        assert any("`slurm:` block" in r.message and "cpus" in r.message for r in caplog.records)
 
 
 # ----------------------------------------------------------------- get_local_spec
@@ -328,6 +331,25 @@ class TestResolveSweepDir:
         assert result.is_dir()
         assert squatter.is_dir() and not squatter.is_symlink()
         assert any("non-symlink" in r.message for r in caplog.records)
+
+    def test_same_id_twice_gets_distinct_dirs(self, tmp_path):
+        # C7: ids have 1-second resolution; a same-second launch must not
+        # share (and later rm -rf) another launch's sweep dir.
+        first = resolve_sweep_dir(None, "sweep_20261006_120000", project_dir=tmp_path)
+        second = resolve_sweep_dir(None, "sweep_20261006_120000", project_dir=tmp_path)
+        assert first.name == "sweep_20261006_120000"
+        assert second.name == "sweep_20261006_120000_2"
+        assert second.is_dir()
+
+    def test_same_id_twice_under_sweeps_root(self, tmp_path):
+        big_disk = tmp_path / "big-disk"
+        big_disk.mkdir()
+        cfg = HSMConfig({"local": {"sweeps_root": str(big_disk)}})
+        first = resolve_sweep_dir(cfg, "sweep_x", project_dir=tmp_path)
+        second = resolve_sweep_dir(cfg, "sweep_x", project_dir=tmp_path)
+        assert (first.name, second.name) == ("sweep_x", "sweep_x_2")
+        link = tmp_path / "sweeps" / "outputs" / "sweep_x_2"
+        assert link.is_symlink() and link.resolve() == second
 
     def test_raises_when_sweeps_root_missing(self, tmp_path):
         # Hard-error guard: shared .hsm/config.yaml that references a path

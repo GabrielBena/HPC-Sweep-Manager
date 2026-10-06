@@ -475,8 +475,7 @@ def _run_sweep_via_orchestrator(
     remote_resumable_block = None
     if remote_alias and hsm_config is not None:
         remote_resumable_block = (
-            hsm_config.config_data.get("distributed", {})
-            .get("remotes", {})
+            (hsm_config.config_data.get("distributed", {}).get("remotes") or {})
             .get(remote_alias, {})
             .get("resumable")
         )
@@ -498,14 +497,14 @@ def _run_sweep_via_orchestrator(
     # otherwise mode='auto' would silently read the slurm: block on every machine.
     resolved_mode_for_spec = resolve_auto_mode(mode)
     scheduler_hint = "slurm" if resolved_mode_for_spec in ("array", "individual") else None
-    spec = spec_from_cli(
-        walltime=walltime,
-        resources=resources,
-        scheduler=scheduler_hint,
-        hsm_config=hsm_config,
-        mode=resolved_mode_for_spec,
-    )
     try:
+        spec = spec_from_cli(
+            walltime=walltime,
+            resources=resources,
+            scheduler=scheduler_hint,
+            hsm_config=hsm_config,
+            mode=resolved_mode_for_spec,
+        )
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
@@ -662,8 +661,8 @@ def _run_sweep_via_orchestrator(
         console.print(f"\nTotal combinations: {len(combinations)}")
         return
 
-    sweep_id = create_sweep_id()
-    sweep_dir = resolve_sweep_dir(hsm_config, sweep_id, project_dir=Path(project_dir))
+    sweep_dir = resolve_sweep_dir(hsm_config, create_sweep_id(), project_dir=Path(project_dir))
+    sweep_id = sweep_dir.name  # `_2`-suffixed if a same-second launch took the id
     console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
     console.print(f"Sweep directory: {sweep_dir}")
 
@@ -970,7 +969,7 @@ def sweep_cmd(ctx):
     "--mode",
     type=click.Choice(["auto", "individual", "array", "local", "distributed", "remote"]),
     default=None,
-    help="Job submission mode (default: 'remote' if --remote given, else 'auto')",
+    help="Job submission mode (default 'auto'; with --remote, omitted or 'auto' means 'remote')",
 )
 @click.option(
     "--remote",
@@ -1038,8 +1037,8 @@ def run_cmd(
 ):
     """Run parameter sweep."""
     remote_submission = None
-    if mode is None:
-        mode = "remote" if remote_alias else "auto"
+    if mode in (None, "auto"):
+        mode = "remote" if remote_alias else "auto"  # with --remote, auto means remote
     elif mode == "remote" and not remote_alias:
         ctx.obj["console"].print("[red]--mode remote requires --remote <alias>[/red]")
         return
@@ -1049,7 +1048,7 @@ def run_cmd(
         # local block (per-remote spec lives under distributed.remotes.<alias>).
         remote_submission = mode
         mode = "remote"
-    elif remote_alias and mode not in ("remote", "auto"):
+    elif remote_alias and mode != "remote":
         ctx.obj["console"].print(
             f"[red]--remote can't be combined with --mode {mode!r} "
             f"(use --mode array|individual to pick submission style, or omit it).[/red]"
@@ -1095,7 +1094,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     """
     import shlex
 
-    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.common.compute_source import TERMINAL_STATES
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
     source = SSHSlurmComputeSource.from_manifest(manifest)
@@ -1120,26 +1119,20 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         num_tasks = manifest.get("num_tasks", len(job_ids))
         # For an array submission job_ids is one parent id covering num_tasks.
         task_hint = f" ({num_tasks} tasks)" if num_tasks != len(job_ids) else ""
-        # Classify via get_job_status (squeue FIRST, then sacct) — NOT
-        # _terminal_state_via_sacct directly. A still-queued task (e.g. held
-        # behind a maintenance reservation) is in squeue → RUNNING → routed to
-        # the pull-only branch below. Going straight to sacct would hit its
-        # optimistic "empty → COMPLETED" fallback (accounting lags PENDING jobs)
-        # and then archive/`rm -rf` the remote dir of a task that never ran.
-        statuses = {jid: await source.get_job_status(jid) for jid in job_ids}
+        # squeue first, then one sacct, through the same outage-safe refresh a live launcher
+        # uses: a task still queued (held behind a reservation, say) stays running and only gets
+        # pulled; the archive + `rm -rf` below needs every job named terminal.
+        statuses = await source.adopt(job_ids)
         terminal = {j: s for j, s in statuses.items() if s in TERMINAL_STATES}
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
-        # Seed completed_jobs so collect_results computes any_failed correctly.
-        for jid, s in terminal.items():
-            source.completed_jobs[jid] = JobInfo(
-                job_id=jid, job_name=jid, params={}, source_name=source.name, status=s
-            )
         if running:
             # Partial: pull what's done; keep remote + skip archive (not done yet).
             rc = await source._pull_tasks()
             console.print(
                 f"[yellow]{len(terminal)}/{len(job_ids)} job(s){task_hint} terminal; "
-                f"{len(running)} still running.[/yellow]"
+                f"{len(running)} still running"
+                + (" (Slurm didn't answer for some)" if "UNKNOWN" in statuses.values() else "")
+                + ".[/yellow]"
             )
             console.print(
                 f"Pulled tasks/ → {sweep_dir / 'tasks'} (rc={rc}). "
@@ -1240,7 +1233,7 @@ async def _advance_via_manifest(
     chain state, and re-derives the full param set from the sweep config.
     """
     from ..core.common.chain import ChainState
-    from ..core.common.compute_source import TERMINAL_STATES, JobInfo
+    from ..core.common.compute_source import TERMINAL_STATES
     from ..core.common.config import SweepConfig
     from ..core.common.param_generator import ParameterGenerator
     from ..core.common.resumable import ResumableConfig
@@ -1287,7 +1280,7 @@ async def _advance_via_manifest(
         source._remote_code_dir = manifest.get("remote_code_dir")
         source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
 
-        statuses = {j: await source.get_job_status(j) for j in last_job_ids}
+        statuses = await source.adopt(last_job_ids)
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
         if running:
             console.print(
@@ -1297,10 +1290,6 @@ async def _advance_via_manifest(
                 f"(or it advances on its own while the launcher is alive).[/yellow]"
             )
             return
-        for j, s in statuses.items():
-            source.completed_jobs[j] = JobInfo(
-                job_id=j, job_name=j, params={}, source_name=source.name, status=s
-            )
 
         result = await run_resumable_sweep_async(
             source=source,

@@ -152,8 +152,11 @@ goes stale if you change the project name or `remote_root`.
 
 You can submit a sweep with **just** a bare `~/.ssh/config` alias and no
 HSM-side registration (`hsm sweep run --remote my-box` works as long as
-`ssh my-box` works). Registering the remote in `.hsm/config.yaml` lets
-you set per-remote knobs:
+`ssh my-box` works) — but only while the project has no
+`distributed.remotes:` block. Once it has one, an alias missing from it is
+an error with a "did you mean" hint, so a typo can't quietly run bash on
+some other host (a cluster login node, say). Registering the remote in
+`.hsm/config.yaml` lets you set per-remote knobs:
 
 ```yaml
 distributed:
@@ -236,8 +239,8 @@ hsm sweep run --remote uzh -c sweeps/sweep.yaml              # one sbatch per co
 hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode array # one sbatch --array
 ```
 
-`--remote` implies remote execution; the optional `--mode array|individual`
-picks the **submission style**. Default is `individual` (one `sbatch` per
+`--remote` implies remote execution (`--mode auto` is the same as omitting
+`--mode`); the optional `--mode array|individual` picks the **submission style**. Default is `individual` (one `sbatch` per
 parameter combo). `--mode array` packs the whole sweep into a single
 `sbatch --array` — fewer scheduler entries, faster to queue. (`--mode array`
 is ignored for `backend: ssh` bash remotes, which have no scheduler.)
