@@ -57,6 +57,11 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 #   ship — rename it (no un-exclude mechanism yet).
 
 
+# The ssh under every rsync: never prompt (a headless launcher would wait forever),
+# bound the connect, and give up on a link that stops answering mid-transfer.
+RSYNC_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30"
+
+
 def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence[int]) -> list[int]:
     """Resolve the per-remote ``gpus`` config against the box's detected GPUs.
 
@@ -126,7 +131,7 @@ def build_rsync_push_cmd(
     ``remote_dir``. Relies on the system ssh transport, which reads
     ``~/.ssh/config`` natively, so ``host`` may be an alias.
     """
-    cmd = ["rsync", "-az", "--delete"]
+    cmd = ["rsync", "-az", "--delete", "-e", RSYNC_SSH]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{local_dir.rstrip('/')}/")
@@ -147,7 +152,7 @@ def build_rsync_pull_cmd(
     isn't dragged over the WAN at every chunk seam — it rides the cheap
     cluster-internal archive instead.
     """
-    cmd = ["rsync", "-az"]
+    cmd = ["rsync", "-az", "-e", RSYNC_SSH]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")

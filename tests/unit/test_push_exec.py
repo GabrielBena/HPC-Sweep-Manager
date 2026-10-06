@@ -6,6 +6,7 @@ import pytest
 
 from hpc_sweep_manager.core.remote.push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
+    RSYNC_SSH,
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
     normalize_gpu_allowlist,
@@ -99,6 +100,16 @@ class TestRsyncCommands:
         assert "--delete" not in cmd
         assert cmd[-2] == "anahita:/remote/tasks/"
         assert cmd[-1] == "/local/tasks/"
+
+    def test_ssh_transport_never_prompts_or_hangs(self):
+        # A password prompt or a dead link must fail the rsync, not hang the launcher.
+        for cmd in (
+            build_rsync_push_cmd("/l", "h", "/r", []),
+            build_rsync_pull_cmd("h", "/r", "/l", ["resume/"]),
+        ):
+            assert cmd[cmd.index("-e") + 1] == RSYNC_SSH
+        for opt in ("BatchMode=yes", "ConnectTimeout=30", "ServerAliveInterval=30"):
+            assert f"-o {opt}" in RSYNC_SSH
 
 
 class TestDefaultExcludes:

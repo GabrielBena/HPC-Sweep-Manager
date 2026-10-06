@@ -45,11 +45,18 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     ``ssh_key`` / ``ssh_port`` arguments (from ``hsm_config.yaml``) override
     the corresponding ssh-config directives. Host keys are verified against
     ``~/.ssh/known_hosts`` (and any ``UserKnownHostsFile`` /
-    ``StrictHostKeyChecking`` the config specifies).
+    ``StrictHostKeyChecking`` the config specifies). A login that stalls on a
+    stale SSH agent is retried once without it (:func:`_connect`).
     """
     logger.debug(f"Attempting SSH connection to {host}")
 
-    connection_kwargs: dict[str, Any] = {"host": host}
+    # End a stuck login before sshd's LoginGraceTime does (asyncssh waits 120 s), and
+    # probe an idle link so a silently dead TCP path can't hang a launcher.
+    connection_kwargs: dict[str, Any] = {
+        "host": host,
+        "login_timeout": 30,
+        "keepalive_interval": 30,
+    }
 
     # Hand asyncssh the user's ssh config so aliases resolve like `ssh <alias>`.
     ssh_config_path = os.path.expanduser("~/.ssh/config")
@@ -73,7 +80,7 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     # known_hosts is intentionally NOT set to None → asyncssh verifies against
     # ~/.ssh/known_hosts and honors the config's host-key directives.
     try:
-        conn = await asyncssh.connect(**connection_kwargs)
+        conn = await _connect(host, connection_kwargs)
         logger.debug(f"✓ SSH connection established to {host}")
         return conn
     except asyncssh.PermissionDenied as e:
@@ -87,3 +94,34 @@ async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port:
     except Exception as e:
         logger.error(f"SSH connection to {host} failed: {type(e).__name__}: {e}")
         raise
+
+
+async def _connect(host: str, kwargs: dict[str, Any]):
+    """``asyncssh.connect``; a login that stalls on an SSH agent is retried once without it.
+
+    asyncssh asks the agent before the key files, so a stale agent (a forwarded
+    ``SSH_AUTH_SOCK`` whose session is gone) stalls auth until our login_timeout
+    or the server's LoginGraceTime resets the connection (field report 2026-09-29).
+    """
+    stalled = (asyncssh.ConnectionLost, ConnectionResetError, TimeoutError)
+    try:
+        return await asyncssh.connect(**kwargs)
+    except stalled as e:
+        # The agent asyncssh used: '' if SSH_AUTH_SOCK is unset or `IdentityAgent none`.
+        agent = asyncssh.SSHClientConnectionOptions(**kwargs).agent_path
+        if not agent:
+            raise ConnectionError(f"SSH login to {host} timed out or was reset ({e!r})") from e
+        logger.warning(
+            f"SSH login to {host} stalled ({e!r}) on the agent at {agent}, usually a stale "
+            f"(e.g. forwarded) SSH_AUTH_SOCK. Retrying with key files only, and without the "
+            f"agent for the rest of this run; to skip it for good, set `IdentityAgent none` "
+            f"for {host} in ~/.ssh/config."
+        )
+    try:
+        conn = await asyncssh.connect(**kwargs, agent_path=None)
+    except stalled as e:
+        raise ConnectionError(
+            f"SSH login to {host} timed out or was reset, with the agent and without it ({e!r})"
+        ) from e
+    os.environ.pop("SSH_AUTH_SOCK", None)  # rsync's ssh and later logins skip the stale agent too
+    return conn

@@ -6,6 +6,24 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed (2026-10 maintenance pass — ssh lane)
+
+- **A stale SSH agent no longer breaks the connection (X2).** When `SSH_AUTH_SOCK`
+  pointed at an agent that no longer answers (often one forwarded by an old
+  session), asyncssh waited in auth until the server reset the connection: HSM
+  reported a bare `Connection reset by peer` while `ssh <host>` worked, and the
+  workaround was `env -u SSH_AUTH_SOCK hsm …`. The login is now bounded at 30 s; a
+  timeout or reset while an agent is in use is retried once with key files only,
+  with a warning that names the agent and the lasting fix (`IdentityAgent none` in
+  `~/.ssh/config`), and the agent is dropped for the rest of the run so rsync
+  skips it too. A login that still fails says so: `SSH login to <host> timed out
+  or was reset …`.
+- **A dead link no longer hangs a launcher.** SSH connections send a keepalive
+  every 30 s (asyncssh sends none by default), and every rsync runs ssh with
+  `BatchMode=yes`, `ConnectTimeout=30` and `ServerAliveInterval=30`, so a push or
+  a pull fails instead of waiting forever on a silent TCP path or a password
+  prompt.
+
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
 and the first blind agent-driven consumer run from Comp-PVR

@@ -6,6 +6,8 @@ the kwargs HSM would hand it.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hpc_sweep_manager.core.remote import discovery
@@ -87,3 +89,70 @@ async def test_no_ssh_config_file_omits_config(captured_connect, monkeypatch, tm
     await discovery.create_ssh_connection("plainhost")
     assert "config" not in captured_connect
     assert captured_connect["host"] == "plainhost"
+
+
+async def test_login_is_bounded_and_link_kept_alive(captured_connect, ssh_config_present):
+    await discovery.create_ssh_connection("gpubox")
+    assert captured_connect["login_timeout"] == 30
+    assert captured_connect["keepalive_interval"] == 30
+
+
+# --- stale SSH agent (field report 2026-09-29): login stalls until the server resets
+
+
+@pytest.fixture
+def stalls_on_agent(monkeypatch, tmp_path):
+    """asyncssh.connect is reset by the server unless the agent is disabled; record each call."""
+    calls: list[dict] = []
+
+    async def fake_connect(**kwargs):
+        calls.append(kwargs)
+        if "agent_path" not in kwargs:
+            raise ConnectionResetError(104, "Connection reset by peer")
+        return object()
+
+    monkeypatch.setattr(discovery.asyncssh, "connect", fake_connect)
+    monkeypatch.setenv("HOME", str(tmp_path))  # asyncssh's default-key lookup stays hermetic
+    return calls
+
+
+async def test_stale_agent_is_retried_without_it(
+    stalls_on_agent, ssh_config_present, monkeypatch, caplog
+):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    assert await discovery.create_ssh_connection("gpubox") is not None
+    assert len(stalls_on_agent) == 2
+    assert stalls_on_agent[1]["agent_path"] is None
+    assert "/tmp/stale-agent.sock" in caplog.text and "IdentityAgent none" in caplog.text
+    assert "SSH_AUTH_SOCK" not in os.environ  # rsync's ssh skips the stale agent too
+
+
+async def test_no_agent_means_no_retry_and_a_clear_error(
+    stalls_on_agent, ssh_config_present, monkeypatch
+):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    with pytest.raises(ConnectionError, match="SSH login to gpubox timed out or was reset"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(stalls_on_agent) == 1
+
+
+async def test_identity_agent_none_counts_as_no_agent(
+    stalls_on_agent, ssh_config_present, monkeypatch
+):
+    ssh_config_present.write_text("Host gpubox\n    IdentityAgent none\n")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(ConnectionError, match=r"reset \(ConnectionResetError"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(stalls_on_agent) == 1
+
+
+async def test_failed_retry_is_a_clear_error(ssh_config_present, monkeypatch, tmp_path):
+    async def fake_connect(**kwargs):
+        raise discovery.asyncssh.ConnectionLost("Login timeout expired")
+
+    monkeypatch.setattr(discovery.asyncssh, "connect", fake_connect)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(ConnectionError, match="with the agent and without it"):
+        await discovery.create_ssh_connection("gpubox")
+    assert os.environ["SSH_AUTH_SOCK"] == "/tmp/stale-agent.sock"  # kept: the agent wasn't it
