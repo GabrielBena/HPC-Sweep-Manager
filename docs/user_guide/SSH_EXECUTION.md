@@ -211,7 +211,8 @@ S3IT jobs from your lab workstation), declare a remote with
 project up the same way; the difference is that submissions go through
 `sbatch` on the remote (over the same persistent SSH connection) and
 status polls hit `squeue` once a minute. A connection that drops is reopened
-and changes no job's state. The login node needs `sbatch`/`squeue`/
+and changes no job's state (after 30 minutes unreachable the launcher gives up;
+the jobs stay in Slurm). The login node needs `sbatch`/`squeue`/
 `scancel` on `$PATH`.
 
 ```yaml

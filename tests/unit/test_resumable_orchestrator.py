@@ -127,6 +127,13 @@ class TestDrive:
         assert src._pull_excludes == ("*/resume/",)
 
     @pytest.mark.asyncio
+    async def test_a_failed_probe_is_asked_again_not_a_strike(self):
+        # Tracker S11 review: an empty probe after a blip counted as a chunk without progress.
+        src = FakeSource([None, None, ChunkProgress(frozenset({1, 2}), 100.0)])
+        res = await _run(src, _cfg(max_consecutive_failures=1), params=2, poll_interval=0)
+        assert res.chain_decision == "done" and res.chunks_run == 1 and not src._script
+
+    @pytest.mark.asyncio
     async def test_done_in_one_chunk(self):
         src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)])
         res = await _run(src, _cfg(), params=2)

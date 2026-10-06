@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from contextlib import nullcontext
 from typing import Any
 
 import asyncssh
@@ -87,8 +88,9 @@ class FakeConn:
         *,
         input: str | None = None,
         check: bool = False,
+        timeout: float | None = None,
     ) -> _Result:
-        self.run_calls.append({"cmd": cmd, "input": input, "check": check})
+        self.run_calls.append({"cmd": cmd, "input": input, "check": check, "timeout": timeout})
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:
                 del self._responder[i]
@@ -619,7 +621,7 @@ class TestReconnect:
         src._fake_conn = fresh = FakeConn(responder=[("squeue -u", _Result(0, "777 RUNNING\n"))])
         with caplog.at_level(logging.WARNING):
             await src.update_all_job_statuses()
-        assert src._conn is fresh and src.active_jobs["777"].status == "RUNNING"
+        assert src._conn is fresh and conn.closed and src.active_jobs["777"].status == "RUNNING"
         assert [r.message for r in caplog.records if r.levelno >= logging.WARNING] == [
             "uzh: connection lost (ConnectionLost('blip')); reconnecting"
         ]
@@ -657,15 +659,66 @@ class TestReconnect:
         assert src.active_jobs["777"].status == "PENDING"  # still no verdict
 
     @pytest.mark.asyncio
-    async def test_a_lost_sbatch_reply_is_never_resent(self, tmp_path):
-        # The job may be queued: a second sbatch would run it twice.
+    async def test_a_reply_without_exit_status_is_unknown(self, tmp_path):
+        # asyncssh reports a link that died mid-command as returncode None, not as an error.
         conn = FakeConn(responder=_setup_ok_responder())
-        src = await TestStatus._tracking(tmp_path, conn)
-        conn.add("&& sbatch", asyncssh.ConnectionLost("blip"))
-        conn.add("&& sbatch", _Result(0, stdout="Submitted batch job 1\n"))
-        with pytest.raises(RuntimeError, match="may be queued, check squeue"):
-            await src.submit_batch([{"s": 0}], "sweep_1", mode="array")
+        src = await TestStatus._tracking(tmp_path, conn, replies=[("squeue", _Result(None))])
+        src._down_since = 1.0
+        assert (await src._sh(["squeue"]))[0] == 255 and src._down_since == 1.0
+        assert (await src._sh(["squeue"]))[0] == 0 and src._down_since is None
+        assert {c["timeout"] for c in conn.run_calls} == {300}  # a hung command is bounded
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            asyncssh.ConnectionLost("blip"),
+            asyncssh.ChannelOpenError(asyncssh.OPEN_REQUEST_SESSION_FAILED, "exec reply lost"),
+            _Result(None),
+        ],
+        ids=["lost", "exec-unanswered", "no-exit-status"],
+    )
+    @pytest.mark.parametrize(
+        "queued, found",
+        [("", None), ("444\n555_[2-3]\n555_1\n", "555"), ("555\n556\n", None)],
+        ids=["not-queued", "queued", "ambiguous"],
+    )
+    async def test_a_lost_sbatch_reply_is_looked_up_never_resent(
+        self, tmp_path, reply, queued, found
+    ):
+        # A second sbatch could queue the job twice. 444 is the chain's previous chunk.
+        conn = FakeConn(responder=_setup_ok_responder())
+        replies = [
+            ("&& sbatch", reply),
+            ("squeue -h -u gbena -n sweep_1_array", _Result(0, queued)),
+        ]
+        src = await TestStatus._tracking(tmp_path, conn, replies=replies)
+        src.completed_jobs["444"] = JobInfo("444", "sweep_1_array", {}, "uzh", "COMPLETED")
+        with nullcontext() if found else pytest.raises(RuntimeError, match="may be queued"):
+            assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == [found]
         assert sum("&& sbatch" in c["cmd"] for c in conn.run_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_sbatch_that_never_started_is_sent_again(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        unsent = asyncssh.ChannelOpenError(asyncssh.OPEN_CONNECT_FAILED, "SSH connection closed")
+        ok = _Result(0, stdout="Submitted batch job 7\n")
+        src = await TestStatus._tracking(
+            tmp_path, conn, replies=[("&& sbatch", unsent), ("&& sbatch", ok)]
+        )
+        assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == ["7"]
+        assert sum("&& sbatch" in c["cmd"] for c in conn.run_calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_no_exit_status_is_never_a_success(self, tmp_path):
+        conn = FakeConn(responder=_setup_ok_responder())
+        replies = [("scancel", _Result(None)), ("echo $USER", _Result(None))]
+        src = await TestStatus._tracking(tmp_path, conn, "777", replies=replies)
+        assert await src.cancel_job("777") is False and "777" in src.active_jobs
+        with pytest.raises(RuntimeError, match="could not expand"):  # a literal $USER: no squeue
+            await src._resolve_remote_path("$USER")
+        conn.add("find", _Result(None))  # an empty probe would count as a chunk without progress
+        assert await src.chunk_progress(1, done_sentinel=".d", checkpoint_subdir="r") is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rc", [1, None])
@@ -1190,6 +1243,31 @@ class TestStorageTier:
             c for c in conn.run_calls if c["cmd"].startswith("mkdir -p") and "rsync -a" in c["cmd"]
         ]
         assert arch_calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_archive_cut_short_keeps_the_remote_dir(self, tmp_path):
+        # Tracker S11 review: rc None (the link died during the rsync) read as success, so the
+        # launcher pulled and rm -rf'd the scratch copy behind a partial archive.
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
+            workdir="/scratch/gbena/hsm-runs",
+            archive_dir="/shares/payvand/hsm-archive",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sw1")
+        src.update_job_status(await src.submit_job({"s": 0}, "task_0", "sw1"), "COMPLETED")
+        conn.add("rsync -a", _Result(None))
+        assert await src.collect_results() is False
+        assert len(src._rsync_calls) == 1  # the setup push only: no pull
+        assert not any(
+            c["cmd"].startswith("rm -rf") or ".archived" in c["cmd"] for c in conn.run_calls
+        )
+        assert [c["timeout"] for c in conn.run_calls if "rsync -a" in c["cmd"]] == [None]
 
     @pytest.mark.asyncio
     async def test_archive_runs_before_pull(self, tmp_path):

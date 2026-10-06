@@ -1157,7 +1157,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         # Idempotency: if the remote sweep dir is gone, a prior successful
         # collect already pulled + archived + cleaned it. Re-running is a no-op.
         exists = await source._ssh_run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
-        if (exists.returncode or 0) != 0:
+        if exists.returncode == 1:  # test -d says no (None: unknown, go on)
             console.print(
                 f"[green]Remote sweep dir already cleaned on {source.host} — "
                 f"nothing left to collect (a prior collect finished it).[/green]"
@@ -1198,7 +1198,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "
-                f"({'ok' if ok else 'pull reported an error — see logs'})."
+                f"({'ok' if ok else 'an error, see the log; the remote dir is kept'})."
             )
     finally:
         await source.cleanup()

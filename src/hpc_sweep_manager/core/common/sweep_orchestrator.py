@@ -17,6 +17,7 @@ fold in once the SSH + distributed backends finish their own refactor.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import shutil
@@ -587,11 +588,13 @@ async def run_resumable_sweep_async(
         if chunks_meta:
             chunks_meta[-1]["terminal_states"] = list(last_statuses.values())
 
-        progress = await source.chunk_progress(
-            num_tasks,
-            done_sentinel=resumable.done_sentinel,
-            checkpoint_subdir=ckpt_subdir,
-        )
+        # A failed probe (None) is no verdict, and the chunk is in the manifest: ask again.
+        while (
+            progress := await source.chunk_progress(
+                num_tasks, done_sentinel=resumable.done_sentinel, checkpoint_subdir=ckpt_subdir
+            )
+        ) is None:
+            await asyncio.sleep(poll_interval)
         done_count = len(progress.done_indices)
         progressed = (done_count > prev_done) or (
             progress.checkpoint_mtime is not None

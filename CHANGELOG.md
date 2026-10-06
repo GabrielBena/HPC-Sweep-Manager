@@ -192,13 +192,22 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
 - **A login-node blip no longer ends a Slurm-over-SSH launcher (S11, R9).** A dropped
   connection made the next `squeue` raise and killed a multi-day wait. The connection
-  now has a 30 s keepalive, and a command whose connection dropped reconnects and runs
-  once more; while the host stays unreachable the polls fail and every job keeps its
-  state. After 30 min unreachable the launcher gives up with the command that re-attaches
-  later (`hsm sweep collect <id>`); the jobs stay in Slurm. `sbatch` is never resent (after a lost reply the job may be queued): the error
-  says to check `squeue`. A remote file write (params file, manifest, `.archived`) that
-  fails now raises instead of passing silently. Slurm sources poll every 60 s instead of
-  10 s; local and ssh sources stay at 10 s.
+  now has a 30 s keepalive and each command a 5 min bound (none for the archive rsync
+  and `rm -rf`); a command whose connection failed reconnects and runs once more. While
+  the host stays unreachable the polls fail and every job keeps its state; after 30 min
+  the launcher gives up, and the jobs stay in Slurm (`hsm queue mine --remote <name>`
+  lists them; `hsm sweep collect <id>`, or `advance` for a chain, re-attaches). A command
+  cut off mid-run (no exit status) no longer counts as a success: a server-side archive
+  cut short keeps the remote dir (no pull, no `rm -rf`) and `collect` says so, `scancel`
+  marks nothing CANCELLED, an unexpanded `$USER` is an error, a failed chain-progress
+  probe is asked again instead of counting as a chunk without progress, and a failed
+  `sinfo` is no longer cached (CPU-only jobs kept off GPU nodes on the next try).
+  `sbatch` is never resent after a lost reply (the job may be queued): HSM looks the job
+  up by its name and goes on if exactly one untracked job has it, else says to check
+  `squeue`; a submission whose channel never opened is sent again. A remote file write
+  (params file, manifest, `.archived`) that fails now raises instead of passing
+  silently. Slurm sources poll every 60 s instead of 10 s; local and ssh sources stay at
+  10 s (a distributed sweep still polls its Slurm children every 10 s).
 
 ### Removed (2026-10 maintenance pass)
 

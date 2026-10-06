@@ -31,7 +31,7 @@ class FakeConn:
     def add(self, sub, res):
         self._responder.append((sub, res))
 
-    async def run(self, cmd, *, input: str | None = None, check: bool = False):
+    async def run(self, cmd, *, input: str | None = None, check: bool = False, timeout=None):
         self.run_calls.append(cmd)
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:

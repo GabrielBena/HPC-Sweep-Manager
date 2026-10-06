@@ -158,7 +158,12 @@ class SlurmBase(ComputeSource):
         part = spec.partition
         if part not in self._gpu_nodes:
             rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
-            rows = [ln.split()[:2] for ln in out.splitlines() if rc == 0 and len(ln.split()) > 1]
+            if rc != 0:  # not cached: the next job asks again
+                logger.warning(
+                    f"sinfo -p {part} failed (rc={rc}): GPU nodes not excluded this time"
+                )
+                return spec
+            rows = [ln.split()[:2] for ln in out.splitlines() if len(ln.split()) > 1]
             gpu = {node for node, gres in rows if "gpu" in gres}
             self._gpu_nodes[part] = sorted(gpu) if gpu < {node for node, _ in rows} else []
             if self._gpu_nodes[part]:
