@@ -734,6 +734,7 @@ class SSHSlurmComputeSource(SlurmBase):
             job_name=sub.job_name,
             sweep_id=sweep_id,
             num_jobs=len(sub.entries),
+            array_throttle=sub.spec.array_throttle,
             logs_dir=self._remote_logs_dir,
             tasks_dir=self._remote_tasks_dir,
             params_file=remote_params_file,
@@ -1081,6 +1082,13 @@ def build_ssh_slurm_source(
             remote_spec_dict = {k: v for k, v in remote_spec_dict.items() if k != "speed_factors"}
         per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
+    # The remote's max_parallel_jobs caps its arrays (S5); before, Slurm never saw it.
+    if max_parallel_jobs and (default_spec is None or default_spec.array_throttle is None):
+        if isinstance(max_parallel_jobs, bool) or not isinstance(max_parallel_jobs, int):
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be an integer")
+        if max_parallel_jobs < 1:
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be >= 1")
+        default_spec = replace(default_spec or ResourceSpec(), array_throttle=max_parallel_jobs)
 
     conda_env = (
         conda_env_override

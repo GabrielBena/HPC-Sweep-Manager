@@ -45,6 +45,9 @@ class ResourceSpec:
     modules: tuple[str, ...] = ()
     pre_script: tuple[str, ...] = ()
     extra_directives: tuple[tuple[str, str], ...] = ()
+    # At most this many tasks of an array run at once (`--array=1-K%N`): a shared account's
+    # co-workers keep their priority (tracker S5).
+    array_throttle: int | None = None
 
     def __post_init__(self) -> None:
         if self.walltime is not None and not (
@@ -58,6 +61,10 @@ class ResourceSpec:
             raise ValueError("ResourceSpec: cannot set both 'mem' and 'mem_per_cpu'")
         if self.cpus_per_task is not None and self.cpus_per_task < 1:
             raise ValueError(f"ResourceSpec: cpus_per_task must be >= 1, got {self.cpus_per_task}")
+        if self.array_throttle is not None and self.array_throttle < 1:
+            raise ValueError(
+                f"ResourceSpec: array_throttle must be >= 1, got {self.array_throttle}"
+            )
         if self.gpus is not None and self.gpus < 0:
             raise ValueError(f"ResourceSpec: gpus must be >= 0, got {self.gpus}")
         if self.gpu_type is not None and (self.gpus is None or self.gpus < 1):

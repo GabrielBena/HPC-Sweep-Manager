@@ -128,6 +128,8 @@ slurm:
   extra_directives:          # any extra #SBATCH directive
     mail-type: FAIL
     mail-user: me@example.com
+  array_throttle: 50         # at most 50 array tasks at once: --array=1-K%50. On a shared
+                             # account, fair share is per account: throttle big arrays.
   qos_whitelist:             # optional guard — errors on submit if --qos isn't in this list
     - normal
     - medium
@@ -559,7 +561,10 @@ distributed:
 
 **Precedence** (highest wins): CLI `--gpus`/`--walltime`/`--resources` >
 per-remote `spec:` > hardcoded defaults. `hsm remote add` writes the
-connection fields only — add `spec:` and `gpus:` by hand-editing.
+connection fields only — add `spec:` and `gpus:` by hand-editing. Re-running
+it on a registered remote updates only the fields you pass, so `spec:` and
+the rest survive; it never rewrites a config file that has comments (it
+prints the YAML to paste instead).
 
 An unknown key in `spec:` (or in the `slurm:` / `local:` blocks) is dropped
 with a warning that names it; the rest of the block still applies. An

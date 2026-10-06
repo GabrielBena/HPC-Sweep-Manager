@@ -124,6 +124,15 @@ class TestCondaInitPartialRenders:
         "wandb_group": "g",
     }
 
+    def test_array_throttle_renders_as_percent_n(self):
+        base = {**self._BASE_KWARGS, "num_jobs": 600}
+        assert "#SBATCH --array=1-600%50\n" in render_template(
+            "slurm_array.sh.j2", uses_conda=False, array_throttle=50, **base
+        )
+        assert "#SBATCH --array=1-600\n" in render_template(
+            "slurm_array.sh.j2", uses_conda=False, **base
+        )
+
     @pytest.mark.parametrize("template", ["slurm_array.sh.j2", "slurm_single.sh.j2"])
     def test_hsm_code_dir_is_exported_before_pre_script(self, template):
         kwargs = {**self._BASE_KWARGS, "pre_script": ["echo $HSM_CODE_DIR"]}

@@ -15,6 +15,7 @@ from hpc_sweep_manager.core.hpc.gpu_planner import (
     build_array_submissions,
     jobs_manifest_entries,
     plan_gpu_split,
+    split_throttle,
     task_costs,
 )
 
@@ -445,3 +446,28 @@ class TestSweepConfigCostFields:
         cfg = SweepConfig.from_dict({"sweep": {"grid": {"a": [1]}}})
         assert cfg.cost_param is None
         assert cfg.cost_map == {}
+
+
+class TestSplitThrottle:
+    """A throttle caps the sweep, not each GPU type's array (review of #31)."""
+
+    def test_in_proportion_to_the_sub_arrays(self):
+        assert split_throttle(50, [100, 200]) == [16, 33]
+        assert split_throttle(50, [300]) == [50]
+        assert split_throttle(None, [1, 2]) == [None, None]
+
+    def test_every_sub_array_gets_at_least_one(self):
+        assert split_throttle(2, [5, 5, 5]) == [1, 1, 1]
+        assert sum(split_throttle(10, [1, 1000])) <= 10
+
+    def test_the_planner_applies_it(self):
+        spec = ResourceSpec(
+            walltime="10:00:00", gpus=1, gpu_type=("A100", "H200"), array_throttle=40
+        )
+        subs = build_array_submissions(
+            params_list=[{"s": i} for i in range(8)],
+            effective_spec=spec,
+            prefix="sw",
+            speed_factors={"a100": 1.0, "h200": 1.0},
+        )
+        assert sum(s.spec.array_throttle for s in subs) <= 40

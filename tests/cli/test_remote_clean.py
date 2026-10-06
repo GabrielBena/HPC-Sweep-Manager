@@ -1,131 +1,321 @@
-"""CLI tests for `hsm remote clean`."""
+"""CLI tests for `hsm remote clean`.
+
+The fake SSH connection runs every command through a REAL local bash, with a
+temp dir as the "remote" ``$HOME`` and cwd, so the probe's ``realpath``/``find``
+and the final ``rm`` act on real files under ``tmp_path``. As a backstop, the
+fake refuses to run any ``rm`` outside ``tmp_path``.
+"""
 
 from __future__ import annotations
 
+import os
+import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
 from hpc_sweep_manager.cli import remote as remote_cli
+from hpc_sweep_manager.cli.remote import _clean_verdict
 
 
 class FakeResult:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+    def __init__(self, returncode: int | None = 0, stdout: str = "", stderr: str = ""):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
 
 
-class FakeConn:
-    """Async context manager that records run() calls."""
+class BashConn:
+    """Async context manager whose run() executes in local bash as the 'remote'."""
 
-    def __init__(self):
+    def __init__(self, home: Path, sandbox: Path):
+        self.home, self.sandbox = home, sandbox
         self.run_calls: list[str] = []
-        self.closed = False
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, *exc):
-        self.closed = True
         return False
 
     async def run(self, cmd: str, *, check: bool = False, input: str | None = None):
         self.run_calls.append(cmd)
-        return FakeResult(returncode=0)
+        if cmd.startswith("rm "):
+            target = shlex.split(cmd)[-1]
+            assert target.startswith(str(self.sandbox.resolve()) + "/"), f"unsafe rm: {cmd}"
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.home)}
+        proc = subprocess.run(
+            ["bash", "-c", cmd], env=env, cwd=self.home, capture_output=True, text=True
+        )
+        return FakeResult(proc.returncode, proc.stdout, proc.stderr)
 
 
 @pytest.fixture
-def fake_ssh(monkeypatch):
-    """Swap create_ssh_connection for a fake-conn factory recording the host it would dial."""
-    state = {"last_host": None, "last_key": None, "last_port": None, "conn": None}
+def remote(tmp_path, monkeypatch):
+    """The 'remote' filesystem (under tmp_path) + a recording SSH-connect fake."""
+    monkeypatch.setattr(
+        "hpc_sweep_manager.core.common.config.MACHINE_CONFIG_PATH", tmp_path / "no-machine.yaml"
+    )
+    home = tmp_path / "remote" / "home" / "u"
+    home.mkdir(parents=True)
+    (home / "precious.txt").write_text("keep me")
+    state = {"home": home, "last_host": None, "last_key": None, "last_port": None, "conn": None}
 
     async def _fake_connect(host, ssh_key=None, ssh_port=None):
-        state["last_host"] = host
-        state["last_key"] = ssh_key
-        state["last_port"] = ssh_port
-        conn = FakeConn()
-        state["conn"] = conn
-        return conn
+        state.update(last_host=host, last_key=ssh_key, last_port=ssh_port)
+        state["conn"] = BashConn(state["home"], tmp_path)
+        return state["conn"]
 
-    # Patch the symbol imported at function-resolution time in cli/remote.py.
     monkeypatch.setattr(
-        "hpc_sweep_manager.core.remote.discovery.create_ssh_connection",
-        _fake_connect,
+        "hpc_sweep_manager.core.remote.discovery.create_ssh_connection", _fake_connect
     )
     return state
 
 
-def _write_hsm_config(cwd: Path, payload: dict) -> None:
-    (cwd / ".hsm").mkdir(exist_ok=True)
-    (cwd / ".hsm" / "config.yaml").write_text(yaml.safe_dump(payload))
+def _project(tmp_path: Path, monkeypatch, payload: dict, name: str = "proj") -> Path:
+    """A local project dir (cwd) with a .hsm/config.yaml."""
+    proj = tmp_path / "local" / name
+    (proj / ".hsm").mkdir(parents=True)
+    (proj / ".hsm" / "config.yaml").write_text(yaml.safe_dump(payload))
+    monkeypatch.chdir(proj)
+    return proj
 
 
-class TestRemoteClean:
-    def test_default_removes_current_project_dir(self, tmp_path, monkeypatch, fake_ssh):
-        monkeypatch.chdir(tmp_path)
-        # No hsm_config — bare alias path.
-        from click.testing import CliRunner
+def _hsm_tree(root: Path, *projects: str) -> None:
+    """What HSM leaves on a remote: <root>/<project>/{code,sweeps,snapshots}/..."""
+    for p in projects:
+        for sub in ("code", "sweeps", "snapshots"):
+            (root / p / sub).mkdir(parents=True)
+            (root / p / sub / "f").write_text("x")
 
-        runner = CliRunner()
-        result = runner.invoke(remote_cli.remote, ["clean", "anahita", "-y"])
+
+def _rm_calls(remote) -> list[str]:
+    conn = remote["conn"]
+    return [c for c in conn.run_calls if c.startswith("rm ")] if conn else []
+
+
+def _clean(*args, input: str | None = None):
+    return CliRunner().invoke(remote_cli.remote, ["clean", *args], input=input)
+
+
+def _root_cfg(root) -> dict:
+    return {"distributed": {"remote_root": str(root)}}
+
+
+class TestCleanTargets:
+    def test_project_dir_cleaned(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "scratch" / "u" / "hsm-runs"
+        _hsm_tree(runs, "proj", "other")
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        result = _clean("box", "-y")
         assert result.exit_code == 0, result.output
-        assert fake_ssh["last_host"] == "anahita"
-        # rm -rf <remote_root>/<cwd_basename>
-        cmd = fake_ssh["conn"].run_calls[0]
-        assert cmd.startswith("rm -rf ")
-        assert cmd.endswith(f"~/.hsm/runs/{tmp_path.name}")
+        assert not (runs / "proj").exists() and (runs / "other").exists()
+        assert _rm_calls(remote) == [f"rm -rf -- {runs / 'proj'}"]
+        assert f"Cleaned {runs / 'proj'} on box" in result.output.replace("\n", "")  # rich wraps
 
-    def test_all_projects_removes_remote_root(self, tmp_path, monkeypatch, fake_ssh):
-        monkeypatch.chdir(tmp_path)
-        from click.testing import CliRunner
+    def test_all_projects_cleans_root_of_hsm_projects(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "scratch" / "u" / "hsm-runs"
+        _hsm_tree(runs, "p1", "p2")
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        result = _clean("box", "-y", "--all-projects")
+        assert result.exit_code == 0, result.output
+        assert not runs.exists() and runs.parent.exists()
 
-        runner = CliRunner()
-        result = runner.invoke(remote_cli.remote, ["clean", "anahita", "-y", "--all-projects"])
-        assert result.exit_code == 0
-        cmd = fake_ssh["conn"].run_calls[0]
-        assert cmd == "rm -rf ~/.hsm/runs"
+    def test_project_name_from_project_root_not_cwd(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "my proj $x")
+        _project(tmp_path, monkeypatch, {**_root_cfg(runs), "project": {"root": "/x/my proj $x"}})
+        result = _clean("box", "-y")
+        assert result.exit_code == 0, result.output
+        assert _rm_calls(remote) == [f"rm -rf -- {shlex.quote(str(runs / 'my proj $x'))}"]
+        assert not (runs / "my proj $x").exists()
 
-    def test_registered_remote_uses_overrides(self, tmp_path, monkeypatch, fake_ssh):
-        monkeypatch.chdir(tmp_path)
-        _write_hsm_config(
-            tmp_path,
-            {
-                "distributed": {
-                    "remote_root": "/scratch/hsm",
-                    "remotes": {
-                        "anahita": {
-                            "host": "anahita.lab",
-                            "ssh_key": "~/.ssh/foo",
-                            "ssh_port": 2222,
-                            "remote_root": "/scratch/private",
-                        }
-                    },
-                }
-            },
+    def test_slurm_workdir_wins_over_remote_root(self, tmp_path, monkeypatch, remote):
+        workdir = tmp_path / "remote" / "scratch" / "hsm-runs"
+        _hsm_tree(workdir, "proj")
+        uzh = {"backend": "SLURM", "workdir": str(workdir), "remote_root": "/elsewhere/x"}
+        _project(tmp_path, monkeypatch, {"distributed": {"remotes": {"uzh": uzh}}})
+        result = _clean("uzh", "-y")
+        assert result.exit_code == 0, result.output
+        assert not (workdir / "proj").exists()
+
+    def test_registered_remote_uses_overrides(self, tmp_path, monkeypatch, remote):
+        box = {"host": "box.lab", "ssh_key": "~/.ssh/k", "ssh_port": 2222}
+        box["remote_root"] = str(tmp_path / "remote" / "private")
+        _project(tmp_path, monkeypatch, {"distributed": {"remotes": {"box": box}}})
+        result = _clean("box", "-y")
+        assert result.exit_code == 0, result.output
+        assert (remote["last_host"], remote["last_key"], remote["last_port"]) == (
+            "box.lab",
+            "~/.ssh/k",
+            2222,
         )
+        assert "Nothing to clean" in result.output and _rm_calls(remote) == []
 
-        from click.testing import CliRunner
+    def test_prompt_shows_canonical_target_and_decline_keeps_it(
+        self, tmp_path, monkeypatch, remote
+    ):
+        real = tmp_path / "remote" / "real-runs"
+        _hsm_tree(real, "proj")
+        link = tmp_path / "remote" / "runs-link"
+        link.symlink_to(real)
+        _project(tmp_path, monkeypatch, _root_cfg(link))
+        result = _clean("box", input="n\n")
+        assert f"Remove {real / 'proj'} on box?" in result.output  # canonical, not the link
+        assert (real / "proj" / "code").exists() and _rm_calls(remote) == []
 
-        runner = CliRunner()
-        result = runner.invoke(remote_cli.remote, ["clean", "anahita", "-y"])
-        assert result.exit_code == 0
-        # Per-remote remote_root overrides global.
-        cmd = fake_ssh["conn"].run_calls[0]
-        assert cmd.startswith("rm -rf /scratch/private/")
-        # Explicit host / key / port make it through.
-        assert fake_ssh["last_host"] == "anahita.lab"
-        assert fake_ssh["last_key"] == "~/.ssh/foo"
-        assert fake_ssh["last_port"] == 2222
 
-    def test_confirmation_declined_does_not_invoke_ssh(self, tmp_path, monkeypatch, fake_ssh):
-        monkeypatch.chdir(tmp_path)
-        from click.testing import CliRunner
+class TestCleanRefusals:
+    @staticmethod
+    def _assert_refused(result, remote):
+        assert result.exit_code != 0
+        assert "Refusing to clean" in result.output
+        assert _rm_calls(remote) == []
+        assert (remote["home"] / "precious.txt").exists()
 
-        runner = CliRunner()
-        # No -y flag → prompt; "n" declines.
-        result = runner.invoke(remote_cli.remote, ["clean", "anahita"], input="n\n")
-        assert result.exit_code == 0
-        # Cancelled before SSH.
-        assert fake_ssh["last_host"] is None
+    def test_tilde_root_is_home(self, tmp_path, monkeypatch, remote):
+        _project(tmp_path, monkeypatch, _root_cfg("~"))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+
+    def test_symlinked_home_refused(self, tmp_path, monkeypatch, remote):
+        # $HOME is a symlink (/home/u → /nfs/home/u); the root spells the physical path.
+        physical = remote["home"]
+        remote["home"] = tmp_path / "remote" / "home-link"
+        remote["home"].symlink_to(physical)
+        _project(tmp_path, monkeypatch, _root_cfg(physical))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+
+    def test_root_symlinked_to_home_refused(self, tmp_path, monkeypatch, remote):
+        link = tmp_path / "remote" / "runs"
+        link.symlink_to(remote["home"])
+        _project(tmp_path, monkeypatch, _root_cfg(link))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+
+    def test_ancestor_of_home_refused(self, tmp_path, monkeypatch, remote):
+        _project(tmp_path, monkeypatch, _root_cfg(remote["home"].parent))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+
+    def test_project_target_resolving_to_home_refused(self, tmp_path, monkeypatch, remote):
+        # <root>/<project> with root = home's parent and project named like the home dir.
+        _project(tmp_path, monkeypatch, _root_cfg(remote["home"].parent), name="u")
+        self._assert_refused(_clean("box", "-y"), remote)
+
+    def test_scratch_like_root_with_foreign_children_refused(self, tmp_path, monkeypatch, remote):
+        scratch = tmp_path / "remote" / "scratch" / "u"
+        _hsm_tree(scratch / "hsm-runs", "proj")
+        (scratch / "data").mkdir()
+        (scratch / "data" / "x.npy").write_text("results")
+        _project(tmp_path, monkeypatch, _root_cfg(scratch))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+        assert (scratch / "data" / "x.npy").exists()
+
+    def test_loose_file_under_all_projects_root_refused(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        (runs / "notes.txt").write_text("mine")
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+
+    def test_project_dir_with_foreign_child_refused(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        (runs / "proj" / "results").mkdir()
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        self._assert_refused(_clean("box", "-y"), remote)
+        assert (runs / "proj" / "code").exists()
+
+    @pytest.mark.parametrize("root", ["/tmp/x; rm -rf ~", "$(id)/x", "/tmp/`id`", "/a b"])
+    def test_unsafe_root_characters_refused_before_connecting(
+        self, tmp_path, monkeypatch, remote, root
+    ):
+        _project(tmp_path, monkeypatch, _root_cfg(root))
+        result = _clean("box", "-y")
+        assert result.exit_code != 0 and "unexpected characters" in result.output
+        assert remote["last_host"] is None
+
+    def test_crafted_name_cannot_redirect_the_rm(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        (runs / "x\n@@target " / "victim").mkdir(parents=True)
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+        assert (runs / "proj" / "code").exists()
+
+    def test_target_changed_during_the_prompt_refused(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+
+        def confirm_while_someone_writes(*args, **kwargs):
+            (runs / "proj" / "results").mkdir()
+            return True
+
+        monkeypatch.setattr("click.confirm", confirm_while_someone_writes)
+        result = _clean("box")
+        assert result.exit_code != 0 and "changed since it was checked" in result.output
+        assert _rm_calls(remote) == [] and (runs / "proj" / "results").exists()
+
+    def test_default_mode_without_project_config_refused(self, tmp_path, monkeypatch, remote):
+        sub = tmp_path / "local" / "proj" / "subdir"
+        sub.mkdir(parents=True)
+        monkeypatch.chdir(sub)
+        result = _clean("box", "-y")
+        assert result.exit_code != 0 and "No project config" in result.output
+        assert remote["last_host"] is None
+
+
+def _records(*records: str, noise: str = "") -> str:
+    """Probe output: optional rc-file noise, then NUL-terminated records."""
+    return noise + "".join(f"{r}\0" for r in records)
+
+
+class TestCleanVerdict:
+    """The pure guard on probe output (cases a local bash can't stage safely)."""
+
+    def test_rc_file_noise_is_ignored(self):
+        out = _records(
+            "@@target /s/u/runs/p", "@@home /home/u", "@@entry d ", "@@entry d code", noise="Hi!\n"
+        )
+        assert _clean_verdict(out, all_projects=False) == ("/s/u/runs/p", True, None)
+
+    @pytest.mark.parametrize("target", ["/", "/home", "/home/u"])
+    def test_root_home_and_ancestors_refused(self, target):
+        out = _records(f"@@target {target}", "@@home /home/u", "@@entry d ")
+        assert _clean_verdict(out, all_projects=True)[2] is not None
+
+    @pytest.mark.parametrize("home", ["", "relative"])
+    def test_unresolved_home_is_unsafe(self, home):
+        out = _records("@@target /s/u/runs", f"@@home {home}")
+        assert _clean_verdict(out, all_projects=True)[2] is not None
+
+    def test_missing_target_is_a_noop(self):
+        out = _records("@@target /s/u/runs/p", "@@home /home/u")
+        assert _clean_verdict(out, False) == ("/s/u/runs/p", False, None)
+
+    def test_a_name_cannot_forge_the_target(self):
+        # A dir named "x\n@@target " with a child "victim": with newline-separated
+        # output its child's line read "@@target /victim" and replaced the target.
+        out = _records(
+            "@@target /s/u/runs",
+            "@@home /home/u",
+            "@@entry d ",
+            "@@entry d x\n@@target ",
+            "@@entry d x\n@@target /victim",
+        )
+        target, _, why = _clean_verdict(out, all_projects=True)
+        assert target == "/s/u/runs" and why is not None
+
+    @pytest.mark.parametrize(
+        "out",
+        [
+            _records("@@target /s/u/runs", "@@target /victim", "@@home /home/u"),
+            _records("@@target /s/u/runs", "@@home /home/u", "@@target /victim"),
+            _records("@@target /s/u/runs", "@@home /home/u", "@@entry d ") + "trailing",
+            "@@target /s/u/runs\n@@home /home/u\n@@entry d \n",  # not NUL-separated
+        ],
+    )
+    def test_unexpected_records_refused(self, out):
+        assert "unexpected probe output" in _clean_verdict(out, all_projects=True)[2]

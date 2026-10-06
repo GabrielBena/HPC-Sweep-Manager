@@ -89,6 +89,36 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   string (`M`, `M:S`, `H:M:S`, `D-H`, `D-H:M`, `D-H:M:S`), or a
   `chunk_walltime` that isn't an `HH:MM:SS` string, is an error asking you to
   quote it.
+- **`hsm remote add/remove` rewrote the project file from the merged config
+  (C3).** They stripped every comment, copied machine keys
+  (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and
+  `add` replaced an existing entry, so re-adding `uzh` erased `backend: slurm`,
+  `workdir` and `spec`. They now edit the project file only (never the machine
+  config, even from `$HOME`), `add` updates just the fields you pass, and a
+  file with comments is left untouched: the YAML to paste is printed and the
+  command exits 1.
+- **`hsm remote clean` could delete the wrong directory, or `~` (C8).** It ran
+  an unquoted `rm -rf`, named the project after the cwd, ignored a slurm
+  remote's `workdir`, and with `remote_root: ~` plus `--all-projects` removed
+  the home directory. It now targets the same dir the sweep sources use
+  (`workdir` or `remote_root`, plus the project root's name). Before any
+  prompt, one remote command canonicalises the target with `realpath` and
+  lists it; the target is refused if it is `/` or `$HOME` (or above it) under
+  any spelling or symlink, or if it holds anything but HSM's own
+  `<project>/{code,sweeps,snapshots}`. The prompt shows the canonical path,
+  `-y` skips only the prompt, and the `rm` is quoted. A root with shell
+  metacharacters, or a default-mode run outside a project, is refused first.
+- **Arrays can be throttled (S5).** `spec.array_throttle: N` renders
+  `--array=1-K%N`; before, HSM had no throttle and the consumer ran
+  `scontrol update ArrayTaskThrottle=N` after every submission. On a `backend:
+  slurm` remote, `max_parallel_jobs` now becomes that throttle when the spec sets
+  none: it used to be a client-side count that Slurm arrays never saw. A multi-GPU-type
+  sweep shares the throttle across its per-type arrays, so `N` caps the whole sweep. An
+  older HSM running `hsm sweep advance` on a newer chain drops the throttle: upgrade
+  together.
+- **`hsm queue share` (FR#10).** How loaded the shared account is, and how much of it
+  is you: the account's usage against its share, running CPUs by user, co-workers
+  waiting and why. It exits 3 when the account is hot. One SSH round trip.
 
 ### Removed (2026-10 maintenance pass)
 

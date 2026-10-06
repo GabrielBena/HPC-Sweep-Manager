@@ -327,6 +327,7 @@ class SlurmComputeSource(SlurmBase):
             job_name=sub.job_name,
             sweep_id=sweep_id,
             num_jobs=len(sub.entries),
+            array_throttle=sub.spec.array_throttle,
             logs_dir=str(logs_dir),
             tasks_dir=str(tasks_dir),
             params_file=str(params_file),

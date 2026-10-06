@@ -238,6 +238,11 @@ distributed:
       ...
 ```
 
+On a `backend: slurm` remote, `max_parallel_jobs` is also the default
+**array throttle** (`--array=1-K%32`) unless `spec.array_throttle` sets one:
+an array never has more tasks running at once. See `hsm queue share` (QUEUE.md)
+for how loaded the shared account is.
+
 Reasonable values: small enough that you don't dominate the cluster's
 fair-share, large enough that a few jobs can be PENDING while others
 run. On S3IT, 32–64 is usually fine.
