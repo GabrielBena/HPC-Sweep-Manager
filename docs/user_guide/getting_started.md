@@ -85,6 +85,10 @@ metadata:
   description: "smoke test for new arch"
 ```
 
+HSM reads sweep files and `.hsm/config.yaml` with YAML 1.2 numbers: `1e-3`
+is a float, `010` is ten (not octal 8), and an unquoted `12:00:00` stays a
+string (still quote walltimes: `walltime: "12:00:00"`).
+
 Quick stats without running anything:
 
 ```bash

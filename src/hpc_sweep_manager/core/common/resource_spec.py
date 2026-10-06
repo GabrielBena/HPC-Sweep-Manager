@@ -15,10 +15,16 @@ to derive a modified spec.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, fields, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# A Slurm time: M, H:M:S, D-H, D-H:M, D-H:M:S or UNLIMITED; a bare int is minutes. Never M:S:
+# Slurm reads "23:00" as 23 minutes, where an unquoted 23:00 meant 23 hours under YAML 1.1.
+_WALLTIME = re.compile(r"[0-9]+(:[0-9]+:[0-9]+)?|[0-9]+-[0-9]+(:[0-9]+){0,2}|UNLIMITED|INFINITE")
+_MIN_SEC = re.compile(r"[0-9]+:[0-9]+")
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,21 @@ class ResourceSpec:
     cpu_only_nodes: bool | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.walltime, int) and not isinstance(self.walltime, bool):
+            # Minutes, as Slurm reads them; 0 sets no limit line, as on main (partition default).
+            object.__setattr__(self, "walltime", str(self.walltime) if self.walltime else None)
+        w = self.walltime
+        if isinstance(w, str) and _MIN_SEC.fullmatch(w):
+            raise ValueError(
+                f"ResourceSpec: walltime {w!r} is ambiguous: Slurm reads it as minutes:seconds, "
+                f"and unquoted YAML used to read it as hours:minutes. Write it in full, "
+                f'e.g. "{w}:00" for hours'
+            )
+        if w is not None and not (isinstance(w, str) and _WALLTIME.fullmatch(w)):
+            raise ValueError(
+                f'ResourceSpec: walltime must be a Slurm time ("H:M:S", "D-H:M:S", minutes, '
+                f'"UNLIMITED"), got {w!r}'
+            )
         if self.mem is not None and self.mem_per_cpu is not None:
             raise ValueError("ResourceSpec: cannot set both 'mem' and 'mem_per_cpu'")
         if self.cpus_per_task is not None and self.cpus_per_task < 1:

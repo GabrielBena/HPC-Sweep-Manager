@@ -58,6 +58,12 @@ class TestValidate:
         errs = ResumableConfig(enabled=True, chunk_walltime="23:00").validate()
         assert any("HH:MM:SS" in e for e in errs)
 
+    def test_unquoted_yaml_walltime_is_an_error_not_a_crash(self):
+        # YAML 1.1 loaded `chunk_walltime: 23:00:00` as the int 82800.
+        errs = ResumableConfig(enabled=True, chunk_walltime=82800).validate()
+        assert any("quote it" in e for e in errs)
+        assert not is_hms(82800)
+
     def test_signal_grace_ge_walltime_rejected(self):
         errs = ResumableConfig(enabled=True, chunk_walltime="00:01:00", signal_grace=120).validate()
         assert any("smaller than" in e for e in errs)

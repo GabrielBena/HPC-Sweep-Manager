@@ -92,6 +92,34 @@ class TestResourceSpecValidation:
             ResourceSpec(modules=(123,))  # type: ignore[arg-type]
 
 
+class TestWalltime:
+    """C4: walltime must be a Slurm time; a bare int is minutes (main accepted it)."""
+
+    @pytest.mark.parametrize(
+        "ok",
+        ["60", "12:00:00", "1:00:00", "48:00:00", "2-00", "2-12:30", "1-00:00:00", "UNLIMITED"],
+    )
+    def test_every_unambiguous_slurm_form_accepted(self, ok):
+        assert ResourceSpec(walltime=ok).walltime == ok
+
+    def test_an_int_is_minutes_and_zero_sets_no_limit_line(self):
+        assert ResourceSpec(walltime=90).walltime == "90"
+        assert ResourceSpec(walltime=0).walltime is None  # as on main: the partition default
+
+    @pytest.mark.parametrize("two_part", ["23:00", "1:30"])
+    def test_minutes_seconds_is_refused_as_ambiguous(self, two_part):
+        # Unquoted, YAML 1.1 read 23:00 as 1380 (23 h); Slurm reads "23:00" as 23 min.
+        with pytest.raises(ValueError, match=f"ambiguous.*{two_part}:00"):
+            ResourceSpec(walltime=two_part)
+
+    @pytest.mark.parametrize(
+        "bad", [True, 12.5, "2h", "12::00", "1:2:3:4", "1-2-3", "", "\u0663:00:00"]
+    )
+    def test_rejected(self, bad):
+        with pytest.raises(ValueError, match="Slurm time"):
+            ResourceSpec(walltime=bad)
+
+
 class TestResourceSpecFromDict:
     def test_empty_dict(self):
         assert ResourceSpec.from_dict({}) == ResourceSpec()
