@@ -69,6 +69,35 @@ class TestAdd:
         assert entry == {"backend": "slurm", "host": "uzh.host"}
         assert "has comments" in result.output
 
+    def test_noop_add_short_circuits_even_on_commented_file(self, project):
+        text = "distributed:\n  remotes:\n    uzh:\n      host: uzh  # cluster\n"
+        project.write_text(text)
+        result = _invoke("add", "uzh", "uzh")
+        assert result.exit_code == 0, result.output
+        assert "already configured" in result.output and project.read_text() == text
+
+    def test_null_distributed_block_is_filled_in(self, project):
+        project.write_text("distributed:\n")
+        result = _invoke("add", "box")
+        assert result.exit_code == 0, result.output
+        assert yaml.safe_load(project.read_text())["distributed"]["remotes"] == {"box": {}}
+
+    def test_non_mapping_entry_is_a_clean_error(self, project):
+        project.write_text(yaml.safe_dump({"distributed": {"remotes": {"box": "oops"}}}))
+        result = _invoke("add", "box", "--max-jobs", "2")
+        assert result.exit_code != 0 and "must map names to mappings" in result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+    def test_refuses_to_write_the_machine_config(self, project, tmp_path, monkeypatch):
+        # cwd = $HOME: the "project" config search finds ~/.hsm/config.yaml, the machine file.
+        machine = tmp_path / "home" / ".hsm" / "config.yaml"
+        before = machine.read_text()
+        monkeypatch.chdir(tmp_path / "home")
+        for args in (("add", "box"), ("remove", "box", "--yes")):
+            result = _invoke(*args)
+            assert result.exit_code != 0 and "machine config" in result.output
+        assert machine.read_text() == before
+
 
 class TestRemove:
     def test_removes_only_that_entry_from_project_file(self, project):

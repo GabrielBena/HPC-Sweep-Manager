@@ -73,16 +73,21 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   (C3).** They stripped every comment, copied machine keys
   (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and
   `add` replaced an existing entry, so re-adding `uzh` erased `backend: slurm`,
-  `workdir` and `spec`. They now edit the project file only, `add` updates just
-  the fields you pass, and a file with comments is left untouched: the YAML to
-  paste is printed and the command exits 1.
+  `workdir` and `spec`. They now edit the project file only (never the machine
+  config, even from `$HOME`), `add` updates just the fields you pass, and a
+  file with comments is left untouched: the YAML to paste is printed and the
+  command exits 1.
 - **`hsm remote clean` could delete the wrong directory, or `~` (C8).** It ran
   an unquoted `rm -rf`, named the project after the cwd, ignored a slurm
   remote's `workdir`, and with `remote_root: ~` plus `--all-projects` removed
   the home directory. It now targets the same dir the sweep sources use
-  (`workdir` or `remote_root`, plus the project root's name), quotes it,
-  expands the root on the remote first, and refuses `/`, `$HOME` (or above it),
-  a top-level dir, or an unsafe project name.
+  (`workdir` or `remote_root`, plus the project root's name). Before any
+  prompt, one remote command canonicalises the target with `realpath` and
+  lists it; the target is refused if it is `/` or `$HOME` (or above it) under
+  any spelling or symlink, or if it holds anything but HSM's own
+  `<project>/{code,sweeps,snapshots}`. The prompt shows the canonical path,
+  `-y` skips only the prompt, and the `rm` is quoted. A root with shell
+  metacharacters, or a default-mode run outside a project, is refused first.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

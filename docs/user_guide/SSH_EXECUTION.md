@@ -407,8 +407,13 @@ hsm remote clean my-box --all-projects   # wipe ~/.hsm/runs/ (every project)
 
 For a `backend: slurm` remote the root is its `workdir` instead of
 `remote_root`, and `<this-project>` is the project root's directory name, as
-the sweep itself uses. `clean` expands the root on the remote first and
-refuses one that is `/`, your remote `$HOME` (or above it) or a top-level dir.
+the sweep itself uses (so run it from the project, where its config is).
+Before asking, `clean` resolves the target on the remote with `realpath` and
+refuses it if it is `/` or your remote `$HOME` (or above it, under any
+spelling or symlink), or if it holds anything besides what HSM creates
+(`<project>/code`, `sweeps`, `snapshots`). The prompt shows the canonical
+path; `-y` skips the prompt, never the check. The remote needs GNU
+`realpath` and `find` (any Linux box).
 
 To list / probe / health-check your remotes:
 

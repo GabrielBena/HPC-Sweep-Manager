@@ -96,12 +96,12 @@ Manage SSH remote registrations. Many of these work with a bare
 
 | Subcommand | What it does |
 |---|---|
-| `hsm remote add <name> [host]` | Register a remote in the project's `.hsm/config.yaml`. Host defaults to alias. Optional flags: `--key`, `--port`, `--max-jobs`, `--enabled/--disabled`. On a registered remote it updates only the fields you pass (`backend`, `workdir`, `spec` … survive). A config file with comments is never rewritten: the YAML to paste is printed instead (exit 1). |
+| `hsm remote add <name> [host]` | Register a remote in the project's `.hsm/config.yaml` (never the machine `~/.hsm/config.yaml`). Host defaults to alias. Optional flags: `--key`, `--port`, `--max-jobs`, `--enabled/--disabled`. On a registered remote it updates only the fields you pass (`backend`, `workdir`, `spec` … survive). A config file with comments is never rewritten: the YAML to paste is printed instead (exit 1). |
 | `hsm remote list` | Table of registered remotes. |
 | `hsm remote test <name> [more...]` / `--all` | Quick SSH ping (date + python --version + uptime). |
 | `hsm remote health <name> [more...]` / `--all` / `--watch` | Detailed health (load + disk + python). `--watch` polls. |
 | `hsm remote gpus <name> [more...]` / `--all` | `nvidia-smi` probe; shows memory + util + free/busy per GPU. |
-| `hsm remote clean <name>` / `--all-projects` / `-y` | `rm -rf` HSM's scratch on the remote: `<root>/<project>/`, or the whole `<root>/`. `<root>` is a `backend: slurm` remote's `workdir`, else `remote_root` (default `~/.hsm/runs`); `<project>` is the project root's dir name. Refuses a root that expands to `/`, `$HOME` (or above it) or a top-level dir. |
+| `hsm remote clean <name>` / `--all-projects` / `-y` | `rm -rf` HSM's scratch on the remote: `<root>/<project>/`, or the whole `<root>/`. `<root>` is a `backend: slurm` remote's `workdir`, else `remote_root` (default `~/.hsm/runs`); `<project>` is the project root's dir name (default mode needs a project config). Before any prompt it canonicalises the target on the remote (`realpath`) and refuses it if it is `/` or `$HOME` (or above it), or holds anything but HSM's `<project>/{code,sweeps,snapshots}`; the prompt shows the canonical path. `-y` skips only the prompt. |
 | `hsm remote remove <name>` | Unregister from the project config (same comment rule as `add`). |
 
 See [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md) for the full SSH workflow.
