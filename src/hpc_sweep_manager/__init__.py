@@ -1,7 +1,6 @@
 """HPC Sweep Manager - Automated hyperparameter sweeps on HPC systems."""
 
 from pathlib import Path
-from typing import Optional
 
 from .core.common.config import SweepConfig
 from .core.common.param_generator import ParameterGenerator

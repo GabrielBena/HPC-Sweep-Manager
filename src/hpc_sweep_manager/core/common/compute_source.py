@@ -297,4 +297,5 @@ class ComputeSource(ABC):
         return self.stats
 
     def __str__(self) -> str:
-        return f"{self.name} ({self.source_type}): {self.current_job_count}/{self.max_parallel_jobs} jobs"
+        jobs = f"{self.current_job_count}/{self.max_parallel_jobs}"
+        return f"{self.name} ({self.source_type}): {jobs} jobs"

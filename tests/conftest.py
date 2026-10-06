@@ -42,7 +42,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("overrides", nargs="*")
     args = parser.parse_args()
-    
+
     print(f"Training with args: {args.overrides}")
     time.sleep(random.uniform(1, 3))  # Simulate training
     print("Training completed successfully")

@@ -353,7 +353,7 @@ def build_array_submissions(
             f"Use distinct type names."
         )
     submissions: list[SubArraySubmission] = []
-    for plan, token in zip(plans, tokens):
+    for plan, token in zip(plans, tokens, strict=True):
         sub_spec = replace(
             effective_spec,
             gpu_type=plan.gpu_type,

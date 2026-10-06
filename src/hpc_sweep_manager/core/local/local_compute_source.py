@@ -478,4 +478,5 @@ class LocalComputeSource(ComputeSource):
                 logger.warning(f"Failed to update status for {job_id}: {e}")
 
     def __str__(self) -> str:
-        return f"Local:{self.name}: {self.current_job_count}/{self._slot_count} jobs (gpus={self._gpu_indices or 'none'})"
+        gpus = self._gpu_indices or "none"
+        return f"Local:{self.name}: {self.current_job_count}/{self._slot_count} jobs (gpus={gpus})"

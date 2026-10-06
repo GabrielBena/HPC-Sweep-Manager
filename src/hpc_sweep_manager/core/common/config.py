@@ -194,14 +194,16 @@ class SweepConfig:
                 for param_name, values in params.items():
                     if not isinstance(values, list):
                         errors.append(
-                            f"Paired parameter '{param_name}' in group '{group_name}' must be a list"
+                            f"Paired parameter '{param_name}' in group '{group_name}' "
+                            "must be a list"
                         )
                     else:
                         lengths.append(len(values))
 
             if lengths and not all(length == lengths[0] for length in lengths):
                 errors.append(
-                    f"All parameters in paired group {i} must have the same length. Found lengths: {lengths}"
+                    f"All parameters in paired group {i} must have the same length. "
+                    f"Found lengths: {lengths}"
                 )
 
         # cost_param must name a SWEPT param — a typo here would silently
@@ -459,7 +461,7 @@ class HSMConfig:
               mem: "16gb"
               gpus: 1               # per-task GPU count; LocalComputeSource partitions
                                     # nvidia-smi -L into slots of this size
-              visible_gpus: [1, 2, 3]  # allowlist; CLI --gpus overrides (see get_local_visible_gpus)
+              visible_gpus: [1, 2, 3]  # allowlist; CLI --gpus overrides it
               pre_script:
                 - "conda activate my-env"
         """

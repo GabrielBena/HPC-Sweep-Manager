@@ -127,7 +127,6 @@ async def test_submit_batch_array_mode(configured_source, tmp_path, fake_slurm):
     job_ids = await configured_source.submit_batch(params_list, sweep_id="sweep_test", mode="array")
 
     assert len(job_ids) == 1
-    array_id = job_ids[0]
 
     jobs = fake_slurm.jobs()
     assert len(jobs) == 1

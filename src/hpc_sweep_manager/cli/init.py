@@ -171,7 +171,7 @@ def _prompt_sweeps_root(candidates: list[tuple[Path, int]], console: Console) ->
 
 
 def _render_machine_config(sweeps_root: str | None) -> str:
-    """Render ``~/.hsm/config.yaml`` content. Active if ``sweeps_root`` given, else commented stub."""
+    """Render ``~/.hsm/config.yaml``: active if ``sweeps_root`` is given, else a commented stub."""
     header = (
         "# ~/.hsm/config.yaml — machine-wide HSM defaults\n"
         "#\n"
@@ -308,7 +308,8 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
             "# run `hsm docs` (HPC_EXECUTION) for the full schema.\n"
             "local:\n"
             "  gpus: 1                  # per-task GPU count; LocalComputeSource partitions\n"
-            f"                           #   the {gpu_count} detected GPU(s) into slots of this size\n"
+            f"                           #   the {gpu_count} detected GPU(s) into slots "
+            "of this size\n"
             f"{visible_hint}"
             "# Optional reach fields (commented — uncomment to use):\n"
             '#   walltime: "04:00:00"\n'
@@ -443,7 +444,7 @@ checkpoint is self-describing.
 | `local` | this machine (slot queue across CPUs/GPUs) |
 | `array` | one Slurm `sbatch --array` (submitted locally) |
 | `individual` | one local `sbatch` per parameter combo |
-| `--remote <alias>` | push over SSH to one host — bash, or `sbatch` if that remote is `backend: slurm` |
+| `--remote <alias>` | push over SSH to one host: bash, or `sbatch` for a `backend: slurm` remote |
 | `distributed` | fan across mixed children (local + SSH + SSH-Slurm) |
 | `auto` (default) | `array` if `sbatch` is on PATH, else `local` |
 
@@ -940,7 +941,8 @@ def _create_sweep_infrastructure(
             )
         if gpu_indices:
             console.print(
-                f"  🎯 Detected {len(gpu_indices)} GPU(s) — `local:` scaffold pre-seeded with `gpus: 1`"
+                f"  🎯 Detected {len(gpu_indices)} GPU(s) — `local:` scaffold "
+                "pre-seeded with `gpus: 1`"
             )
 
         # Create example sweep configuration

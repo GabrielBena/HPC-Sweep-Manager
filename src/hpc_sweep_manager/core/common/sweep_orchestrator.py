@@ -85,8 +85,10 @@ def spec_from_cli(
     2. Fields parsed out of ``--resources`` (legacy opaque string).
     3. The config block matching ``mode``:
 
-       - ``mode='local'`` → ``local:`` block (``walltime``/``cpus_per_task``/``mem``/``gpus``/``pre_script`` only).
-       - ``mode='array'`` or ``'individual'`` → ``slurm:`` block (full ResourceSpec including ``gpu_type``/``modules``/``qos``/``account``).
+       - ``mode='local'`` → ``local:`` block (``walltime``/``cpus_per_task``/``mem``/
+         ``gpus``/``pre_script`` only).
+       - ``mode='array'`` or ``'individual'`` → ``slurm:`` block (the full ResourceSpec,
+         including ``gpu_type``/``modules``/``qos``/``account``).
        - ``mode='remote'`` or ``'distributed'`` → *neither*. Per-remote spec
          lives under ``distributed.remotes.<alias>.spec`` and is layered in
          :func:`build_ssh_source`. CLI flags still apply on top.

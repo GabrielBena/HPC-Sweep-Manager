@@ -365,7 +365,8 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
             while True:
                 console.clear()
                 console.print(
-                    f"[bold]Remote Health Monitor — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold]\n"
+                    f"[bold]Remote Health Monitor — "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}[/bold]\n"
                 )
                 try:
                     show(asyncio.run(run_all()))

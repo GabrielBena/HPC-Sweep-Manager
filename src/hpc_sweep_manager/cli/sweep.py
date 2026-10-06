@@ -866,7 +866,8 @@ def run_sweep(
 
         if config.complete is not None:
             console.print(
-                "[red]`config.complete: <sweep_id>` (sweep-resume mode) is not supported in this build.[/red]"
+                "[red]`config.complete: <sweep_id>` (sweep-resume mode) is not supported "
+                "in this build.[/red]"
             )
             console.print(
                 "[yellow]The legacy completion runner was deleted in Pass B-heavy "
@@ -912,7 +913,8 @@ def run_sweep(
 
         if mode not in _ORCHESTRATOR_MODES:
             console.print(
-                f"[red]Unknown --mode {mode!r}. Expected one of {sorted(_ORCHESTRATOR_MODES)}.[/red]"
+                f"[red]Unknown --mode {mode!r}. "
+                f"Expected one of {sorted(_ORCHESTRATOR_MODES)}.[/red]"
             )
             return
 
@@ -2184,7 +2186,8 @@ def cleanup_cmd(ctx, older_than_days, keep_incomplete, yes, dry_run):
     console.print(f"[green]✓ Removed {removed} sweep dir(s).[/green]")
     if skipped:
         console.print(
-            f"[dim]Kept {len(skipped)} incomplete sweep(s) (use without --keep-incomplete to remove).[/dim]"
+            f"[dim]Kept {len(skipped)} incomplete sweep(s) "
+            "(use without --keep-incomplete to remove).[/dim]"
         )
 
 

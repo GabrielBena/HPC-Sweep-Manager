@@ -310,7 +310,8 @@ class SweepCompletionAnalyzer:
             actual_status = self._get_actual_task_status(task_id, verify_running)
             if actual_status and actual_status != status:
                 logger.warning(
-                    f"Status mismatch for {task_id}: mapping shows {status}, directory shows {actual_status}"
+                    f"Status mismatch for {task_id}: mapping shows {status}, "
+                    f"directory shows {actual_status}"
                 )
                 logger.info(f"Correcting {task_id} status: {status} -> {actual_status}")
                 status = actual_status
@@ -559,7 +560,7 @@ class SweepCompletionAnalyzer:
                     ]
                     if status_lines:
                         last_status_line = status_lines[-1]
-                        # Support both PBS array format (SUCCESS/FAILED) and local format (COMPLETED/FAILED)
+                        # The array format (SUCCESS/FAILED) or the local one (COMPLETED/FAILED)
                         if (
                             "Status: COMPLETED" in last_status_line
                             or "Status: SUCCESS" in last_status_line

@@ -63,7 +63,8 @@ def load_hsm_config_with_validation(console: Console, logger: logging.Logger) ->
         console.print(
             Panel(
                 "[red]HSM Configuration Not Found[/red]\n\n"
-                "No hsm_config.yaml file was found in the current directory or sweeps/ subdirectory.\n\n"
+                "No hsm_config.yaml file was found in the current directory "
+                "or sweeps/ subdirectory.\n\n"
                 "[bold]To fix this:[/bold]\n"
                 "1. Run [cyan]hsm init[/cyan] to initialize HSM in your project\n"
                 "2. Or ensure you're in the correct project directory",
