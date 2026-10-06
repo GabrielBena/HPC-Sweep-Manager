@@ -30,7 +30,10 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **A submission stopped partway is still tracked (S3).** An error or a Ctrl-C in the
   middle of a loop of `sbatch` calls used to leave the live jobs out of the
   manifest; it is now written before the error propagates, so `hsm sweep collect`
-  can re-attach.
+  can re-attach. (Inside a resumable chain the chain's own manifest is kept, and the
+  log names the jobs to cancel before `hsm sweep advance`.) A cluster whose
+  `MaxArraySize` is smaller than the sweep rejects the array at submission, and the
+  error now suggests `--mode individual`.
 - **A stale SSH agent no longer breaks the connection (X2).** When `SSH_AUTH_SOCK`
   pointed at an agent that no longer answers (often one forwarded by an old
   session), asyncssh waited in auth until the server reset the connection: HSM

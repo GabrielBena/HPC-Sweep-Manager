@@ -14,9 +14,9 @@ that doesn't itself have Slurm installed. This module does:
        remote's PATH, ``mkdir`` the per-sweep layout on the remote.
     2. ``submit_job()`` / ``_submit_array()``: render the existing
        :mod:`slurm_single` / :mod:`slurm_array` Jinja templates with the
-       REMOTE paths baked in, pipe the script to the remote via ``cat >``,
-       then ``ssh host "cd <sweep_dir> && sbatch <script>"`` — capturing
-       the job id from sbatch's stdout.
+       REMOTE paths baked in; write and submit each script over one channel
+       (``cat > <script> && sbatch <script>``) and read the job id from
+       sbatch's stdout. Slurm remotes default to one job array per sweep.
     3. Status: :class:`SlurmBase` (shared with the native source) asks one
        ``squeue -u <user>`` and one ``sacct`` per poll, whatever the job count, and
        never reads a failed call as a verdict.
@@ -227,8 +227,10 @@ class SSHSlurmComputeSource(SlurmBase):
         """Write a job script and submit it over one SSH channel; return the job id."""
         path = shlex.quote(script_path)
         result = await self._ssh_run(f"cat > {path} && sbatch {path}", input=script)
-        if (result.returncode or 0) != 0:
+        if result.returncode != 0:  # None: killed by a signal
             stderr = (result.stderr or "").strip() or "no stderr"
+            if "array" in stderr:  # e.g. above the cluster's MaxArraySize
+                stderr += " (too many tasks for one job array? try --mode individual)"
             raise RuntimeError(f"sbatch {script_path} failed on {self.host}: {stderr}")
         return parse_sbatch_job_id(result.stdout or "")
 
@@ -474,10 +476,19 @@ class SSHSlurmComputeSource(SlurmBase):
         except BaseException:
             # Submission is a loop of sbatch calls (one per task, or one per GPU type): a failure
             # or a Ctrl-C partway leaves earlier jobs live on the cluster. Persist them before
-            # re-raising, so `hsm sweep collect` can re-attach (field report #8, tracker S3).
+            # re-raising, so `hsm sweep collect` can re-attach (field report #8, tracker S3) —
+            # except in a resumable chain, whose manifest the driver owns: overwriting it would
+            # stop `advance` recognising the chain and let `collect` clean it up.
             if self.active_jobs:
                 live = list(self.active_jobs)
                 ids = " ".join(live) if len(live) <= 10 else "<the job_ids in .hsm_manifest.json>"
+                if resumable is not None:
+                    logger.error(
+                        f"chunk submission stopped partway: cancel {ids} (ssh {self.host} "
+                        f"scancel {ids}) before `hsm sweep advance {sweep_id}`, whose manifest "
+                        f"still names the previous chunk."
+                    )
+                    raise
                 logger.error(
                     f"submission stopped partway: {len(live)} job(s) already live on {self.host}. "
                     f"Writing the manifest so `hsm sweep collect {sweep_id}` can re-attach; "
