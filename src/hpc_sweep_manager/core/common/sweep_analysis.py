@@ -22,11 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
-from .yaml_loader import load_yaml
+from .yaml_loader import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +331,7 @@ class SweepCompletionAnalyzer:
         if status_fixes_count > 0:
             try:
                 with open(self.source_mapping_path, "w") as f:
-                    yaml.dump(self.source_mapping, f, default_flow_style=False, indent=2)
+                    f.write(dump_yaml(self.source_mapping))
                 logger.info(
                     f"Updated source_mapping.yaml with {status_fixes_count} status corrections"
                 )
@@ -466,8 +464,6 @@ class SweepCompletionAnalyzer:
         with actual task directory statuses.
         """
         try:
-            import yaml
-
             if not self.source_mapping_path.exists() or overwrite:
                 # Create initial source mapping if it doesn't exist
                 mapping_data = {
@@ -508,7 +504,7 @@ class SweepCompletionAnalyzer:
 
             # Save updated mapping
             with open(self.source_mapping_path, "w") as f:
-                yaml.dump(mapping_data, f, default_flow_style=False, indent=2)
+                f.write(dump_yaml(mapping_data))
 
             logger.info(f"Updated source_mapping.yaml with {len(task_statuses)} task statuses")
 

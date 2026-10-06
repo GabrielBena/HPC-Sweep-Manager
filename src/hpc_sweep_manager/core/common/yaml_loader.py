@@ -25,9 +25,8 @@ YAML12Loader.yaml_implicit_resolvers = {
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 # Underscores as YAML 1.1 and Python allow them (1_000), so such an int keeps its type.
-YAML12Loader.add_implicit_resolver(
-    _INT, re.compile(r"^[-+]?[0-9]+(?:_[0-9]+)*$"), list("-+0123456789")
-)
+_DECIMAL = re.compile(r"^[-+]?[0-9]+(?:_[0-9]+)*$")
+YAML12Loader.add_implicit_resolver(_INT, _DECIMAL, list("-+0123456789"))
 YAML12Loader.add_implicit_resolver(
     _FLOAT,
     re.compile(
@@ -36,8 +35,16 @@ YAML12Loader.add_implicit_resolver(
     ),
     list("-+.0123456789"),
 )
-# SafeLoader's int constructor reads a leading 0 as octal; YAML 1.2 decimal doesn't.
-YAML12Loader.add_constructor(_INT, lambda loader, node: int(loader.construct_scalar(node)))
+
+
+def _construct_int(loader: YAML12Loader, node: yaml.ScalarNode) -> int:
+    """Decimal, as YAML 1.2 reads it (SafeLoader reads ``010`` as octal 8); an explicit
+    ``!!int 0x10`` keeps SafeLoader's reading."""
+    value = loader.construct_scalar(node)
+    return int(value) if _DECIMAL.fullmatch(value) else loader.construct_yaml_int(node)
+
+
+YAML12Loader.add_constructor(_INT, _construct_int)
 
 
 def load_yaml(stream: Any) -> Any:

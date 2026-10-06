@@ -348,11 +348,17 @@ class TestHardenings:
                 params_list=[{"s": 1}, {"s": 2}], effective_spec=spec, prefix="sw"
             )
 
-    def test_two_part_base_walltime_rejected_in_multi_type(self):
+    @pytest.mark.parametrize("walltime", ["48:00", "UNLIMITED"])
+    def test_ambiguous_or_unbounded_base_walltime_rejected_in_multi_type(self, walltime):
         # parse_walltime reads "48:00" as 48 MINUTES — scaled across
         # sub-arrays that's a silent 60x under-provision.
-        with pytest.raises(ValueError, match="HH:MM:SS"):
-            plan_gpu_split(costs=[1.0], gpu_types=["a"], base_walltime="48:00")
+        with pytest.raises(ValueError, match="bounded H:M:S"):
+            plan_gpu_split(costs=[1.0], gpu_types=["a"], base_walltime=walltime)
+
+    @pytest.mark.parametrize(("walltime", "seconds"), [("1-12:00:00", 129600), ("90", 5400)])
+    def test_every_bounded_form_scales(self, walltime, seconds):
+        plans = plan_gpu_split(costs=[1.0], gpu_types=["a"], base_walltime=walltime)
+        assert parse_walltime(plans[0].walltime) == seconds
 
     def test_all_zero_costs_no_zerodivision(self):
         # Pure-API guard: task_costs never emits zeros, but direct callers can.

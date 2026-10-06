@@ -71,3 +71,24 @@ def test_dump_keeps_key_order_and_plain_values():
     data = {"z": 1, "a": {"walltime": "04:00:00", "lr": 0.001, "on": True}}
     assert load_yaml(dump_yaml(data)) == data
     assert dump_yaml(data).startswith("z: 1\na:\n")
+
+
+def test_an_explicit_int_tag_keeps_its_base():
+    assert load_yaml("v: !!int 0x10")["v"] == 16
+
+
+@pytest.mark.parametrize(
+    ("walltime", "seconds"),
+    [("90", 5400), ("30:00", 1800), ("12:00:00", 43200), ("2-00", 172800), ("1-00:30", 88200)],
+)
+def test_parse_walltime_reads_every_slurm_form(walltime, seconds):
+    from hpc_sweep_manager.core.common.utils import parse_walltime
+
+    assert parse_walltime(walltime) == seconds
+
+
+def test_an_unquoted_signal_grace_says_what_it_needs():
+    from hpc_sweep_manager.core.common.resumable import ResumableConfig
+
+    with pytest.raises(ValueError, match="signal_grace must be a whole number"):
+        ResumableConfig.from_dict({"signal_grace": "5:00"})

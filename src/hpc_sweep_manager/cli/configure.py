@@ -5,14 +5,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.table import Table
 
 from ..core.common.path_detector import PathDetector
-from ..core.common.yaml_loader import load_yaml
+from ..core.common.yaml_loader import dump_yaml, load_yaml
 
 
 def configure_sweep(
@@ -469,7 +468,7 @@ def _save_sweep_config(
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(output_file, "w") as f:
-            yaml.dump(sweep_config, f, default_flow_style=False, indent=2)
+            f.write(dump_yaml(sweep_config))
 
         console.print(f"\n[green]✅ Sweep configuration saved to: {output_file}[/green]")
         logger.info(f"Sweep configuration saved to {output_file}")

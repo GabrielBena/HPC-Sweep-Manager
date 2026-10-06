@@ -86,7 +86,13 @@ class ResumableConfig:
         # light coercion for the int knobs (YAML may hand us strings)
         for int_key in ("signal_grace", "max_chunks", "max_consecutive_failures"):
             if int_key in clean:
-                clean[int_key] = int(clean[int_key])
+                try:
+                    clean[int_key] = int(clean[int_key])
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"resumable.{int_key} must be a whole number (signal_grace in "
+                        f"seconds), got {clean[int_key]!r}"
+                    ) from None
         if "enabled" in clean:
             clean["enabled"] = bool(clean["enabled"])
         return cls(**clean)
