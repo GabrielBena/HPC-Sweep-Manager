@@ -73,12 +73,13 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `code/` dir with `--delete`, so tasks of an earlier sweep still queued on a
   cluster ran the newest code, and files tasks wrote in their working dir were
   deleted by the next push. Each sweep now pushes to `snapshots/<sweep_id>/`
-  (hard-linked against the previous one, so it is cheap) and its tasks run there;
-  `$HSM_CODE_DIR` names it in every wrapper (use it for `PYTHONPATH` in
-  `pre_script`). `code` stays a symlink to the newest snapshot, so paths hard-coded
-  to it behave as before; an existing `code/` dir is renamed to `code.pre-snapshots`,
-  never deleted. Snapshots older than 7 days whose sweep dir is gone are removed at
-  the next launch.
+  (hard-linked against the previous one, so it is cheap), its tasks run there, and
+  every wrapper exports `$HSM_CODE_DIR`. A snapshot lives as long as its sweep dir,
+  and with an `archive_dir` it is archived with the results. A `code/` dir from an
+  older HSM is left untouched (remove it once nothing runs from it), and a
+  `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
+  every HSM that launches on a remote together:** an older one keeps pushing to the
+  shared `code/` dir.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

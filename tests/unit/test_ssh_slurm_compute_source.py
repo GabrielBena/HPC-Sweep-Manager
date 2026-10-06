@@ -786,10 +786,11 @@ class TestCollectResults:
         assert len(src._rsync_calls) == 2
         pull = src._rsync_calls[-1]
         assert pull[0] == "rsync"
-        # Remote dir was cleaned.
+        # Remote dir was cleaned, with the sweep's own code snapshot (S4).
         rm_calls = [c for c in conn.run_calls if c["cmd"].startswith("rm -rf")]
         assert len(rm_calls) == 1
         assert src._remote_sweep_dir in rm_calls[0]["cmd"]
+        assert rm_calls[0]["cmd"].endswith("/snapshots/sweep_1")
 
     @pytest.mark.asyncio
     async def test_no_cleanup_on_failure(self, tmp_path):
@@ -831,6 +832,19 @@ class TestCollectResults:
 
 
 # ----------------------------------------------------------- workdir / archive
+
+
+class TestLegacyCodeDir:
+    @pytest.mark.asyncio
+    async def test_a_reattached_old_manifest_never_cleans_the_shared_code_dir(self, tmp_path):
+        # An old chain's manifest names the shared .../code dir: tasks of other sweeps use it.
+        conn = FakeConn()
+        src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
+        manifest = {"remote_sweep_dir": "/r/proj/sweeps/sw1", "remote_code_dir": "/r/proj/code"}
+        await src.reattach(tmp_path / "sw1", "sw1", manifest)
+        await src.collect_results()
+        rm_calls = [c["cmd"] for c in conn.run_calls if c["cmd"].startswith("rm -rf")]
+        assert rm_calls == ["rm -rf /r/proj/sweeps/sw1"]
 
 
 class TestStorageTier:
@@ -945,6 +959,7 @@ class TestStorageTier:
             if "rsync -a" in c["cmd"] and "/shares/payvand/hsm-archive/sw1" in c["cmd"]
         ]
         assert len(arch_calls) == 1
+        assert "/snapshots/sw1/ /shares/payvand/hsm-archive/sw1/code/" in arch_calls[0]["cmd"]
         # Sentinel was written.
         sentinel_calls = [
             c for c in conn.run_calls if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]

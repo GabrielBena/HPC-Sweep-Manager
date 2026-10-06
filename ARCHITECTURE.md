@@ -122,8 +122,8 @@ Key properties:
 - **Per-sweep code snapshots.** Each sweep pushes to
   `{remote_root}/{project}/snapshots/{sweep_id}/` with `--link-dest` against the
   previous snapshot (unchanged files are hard links), and its tasks run there, so
-  a later push can't change queued tasks' code. `code` is a symlink to the newest
-  snapshot. Per-sweep work lives at `{remote_root}/{project}/sweeps/{sweep_id}/`.
+  a later push can't change queued tasks' code; a snapshot lives as long as its
+  sweep dir. Per-sweep work lives at `{remote_root}/{project}/sweeps/{sweep_id}/`.
 
 - **Slot-based back-pressure.** `setup()` builds a fixed-size
   `asyncio.Queue` of slots (GPU index lists for GPU mode, `None` for CPU

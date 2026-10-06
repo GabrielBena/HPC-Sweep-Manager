@@ -45,6 +45,7 @@ import logging
 import re
 import shlex
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -76,10 +77,10 @@ from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
+    own_snapshot,
+    pin_code_refs,
     resolve_run_prefix,
     snapshot_prepare_cmd,
-    snapshot_publish_cmd,
-    warn_shared_code_refs,
 )
 
 logger = logging.getLogger(__name__)
@@ -340,8 +341,8 @@ class SSHSlurmComputeSource(SlurmBase):
         if rc != 0:
             self.stats.health_status = "unhealthy"
             return False
-        await self._ssh_run(snapshot_publish_cmd(project_root, sweep_id))
-        warn_shared_code_refs(self.default_spec.pre_script, self._project_name)
+        pre_script = pin_code_refs(self.default_spec.pre_script, self._project_name)
+        self.default_spec = replace(self.default_spec, pre_script=pre_script)
 
         self._run_prefix = resolve_run_prefix(self.conda_env, self.python_path)
         self.stats.health_status = "healthy"
@@ -537,8 +538,7 @@ class SSHSlurmComputeSource(SlurmBase):
         ``hsm sweep collect <id>`` works with no dependence on the original
         process's in-memory state (or even the current ``.hsm/config.yaml``).
         ``resumable_manifest``/``chain`` are the resumable-chain additions
-        (issue #12) — omitted for ordinary sweeps so their manifest stays
-        byte-identical.
+        (issue #12), omitted for ordinary sweeps.
         """
         manifest = {
             "sweep_id": self.sweep_id,
@@ -576,8 +576,8 @@ class SSHSlurmComputeSource(SlurmBase):
             # Store everything `hsm sweep advance` needs to re-submit the next
             # chunk without re-reading a possibly-changed .hsm/config.yaml: the
             # effective spec (the per-chunk walltime cap is reapplied at submit,
-            # so the FULL walltime here is correct), the train script, and the
-            # remote code dir (the rsynced mirror persists between chunks).
+            # so the FULL walltime here is correct) and the train script; the
+            # sweep's code snapshot (``remote_code_dir``) persists between chunks.
             manifest["spec"] = self.default_spec.to_dict()
             manifest["script_path"] = self.script_path
         if chain is not None:
@@ -616,6 +616,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self._remote_sweep_dir = manifest["remote_sweep_dir"]
         self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
+        self._remote_code_dir = manifest.get("remote_code_dir")
         self.slurm_user = await self._resolve_remote_path("$USER")
         return True
 
@@ -896,10 +897,8 @@ class SSHSlurmComputeSource(SlurmBase):
 
         if not any_failed and not self.keep_remote_on_success:
             try:
-                await self._ssh_run(
-                    f"rm -rf {shlex.quote(self._remote_sweep_dir)}",
-                    check=False,
-                )
+                dirs = (self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id))
+                await self._ssh_run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
@@ -945,6 +944,10 @@ class SSHSlurmComputeSource(SlurmBase):
             f"rsync -a {shlex.quote(self._remote_sweep_dir + '/')} "
             f"{shlex.quote(archive_target + '/')}"
         )
+        if snapshot := own_snapshot(self._remote_code_dir, self.sweep_id):
+            # The code the sweep ran goes with its results (a reproducibility record).
+            code_target = shlex.quote(f"{archive_target}/code/")
+            cmd += f" && rsync -a {shlex.quote(snapshot + '/')} {code_target}"
         logger.info(f"Archiving sweep on {self.host}: {self._remote_sweep_dir} -> {archive_target}")
         result = await self._ssh_run(cmd, check=False)
         if (result.returncode or 0) != 0:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
-import time
 
 import pytest
 
@@ -14,10 +12,11 @@ from hpc_sweep_manager.core.remote.push_exec import (
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
     normalize_gpu_allowlist,
+    own_snapshot,
     partition_gpu_slots,
+    pin_code_refs,
     resolve_run_prefix,
-    snapshot_publish_cmd,
-    warn_shared_code_refs,
+    snapshot_prepare_cmd,
 )
 
 
@@ -210,38 +209,38 @@ class TestCodeSnapshots:
 
     def test_the_push_hard_links_against_the_previous_snapshot(self):
         cmd = build_rsync_push_cmd("/p", "h", "/r/p/snapshots/s2", [], link_dest="/r/p/snapshots/s")
-
         assert "--link-dest=/r/p/snapshots/s" in cmd
         assert cmd[-1] == "h:/r/p/snapshots/s2/"
 
-    @staticmethod
-    def _publish(root, sweep_id):
-        subprocess.run(["bash", "-c", snapshot_publish_cmd(str(root), sweep_id)], check=True)
-
-    def test_publish_points_code_at_the_snapshot_and_keeps_the_legacy_dir(self, tmp_path):
+    def test_prepare_links_against_the_newest_code_and_never_touches_the_legacy_dir(self, tmp_path):
         root = tmp_path / "proj"
         (root / "code").mkdir(parents=True)
-        (root / "code" / "legacy.py").write_text("x")  # a queued pre-snapshot task's code
-        (root / "snapshots" / "s1").mkdir(parents=True)
-        self._publish(root, "s1")
-        assert os.readlink(root / "code") == "snapshots/s1"
-        assert (root / "code.pre-snapshots" / "legacy.py").exists()  # renamed, never deleted
-        (root / "snapshots" / "s2").mkdir()
-        self._publish(root, "s2")
-        assert os.readlink(root / "code") == "snapshots/s2"
+        (root / "code" / "legacy.py").write_text("x")
 
-    def test_publish_drops_only_old_snapshots_whose_sweep_is_gone(self, tmp_path):
-        root, month_ago = tmp_path / "proj", time.time() - 30 * 86400
-        for sid in ("live", "orphan", "young_orphan", "new"):
-            (root / "snapshots" / sid).mkdir(parents=True)
-        (root / "sweeps" / "live").mkdir(parents=True)
-        for sid in ("live", "orphan"):
-            os.utime(root / "snapshots" / sid, (month_ago, month_ago))
-        self._publish(root, "new")
-        kept = sorted(p.name for p in (root / "snapshots").iterdir())
-        # A task that entered through the `code` symlink may still run in a young orphan.
-        assert kept == ["live", "new", "young_orphan"]
+        def prepare(sweep_id):
+            cmd = snapshot_prepare_cmd(str(root), sweep_id, [f"{root}/sweeps/{sweep_id}/tasks"])
+            return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout
 
-    def test_a_pre_script_naming_the_shared_dir_is_flagged(self, caplog):
-        warn_shared_code_refs(["export PYTHONPATH=/scratch/runs/proj/code:$PYTHONPATH"], "proj")
+        assert prepare("s1").strip() == f"{root}/code/"  # the first snapshot's link base
+        assert prepare("s2").strip() == f"{root}/snapshots/s1/"
+        assert (root / "snapshots" / "s2").is_dir() and (root / "sweeps" / "s2" / "tasks").is_dir()
+        assert (root / "code" / "legacy.py").read_text() == "x"  # left alone
+
+    def test_pre_script_references_to_the_old_dir_are_pinned_to_the_snapshot(self, caplog):
+        lines = (
+            "export PYTHONPATH=/scratch/u/runs/proj/code:$PYTHONPATH",  # uzh's form
+            'export PYTHONPATH="$HOME/.hsm/runs/proj/code/sub"',  # athena's form, nested
+            "export DATA=/scratch/u/proj/codes:/data/other/code",  # neither is the old dir
+        )
+        assert pin_code_refs(lines, "proj") == (
+            "export PYTHONPATH=$HSM_CODE_DIR:$PYTHONPATH",
+            'export PYTHONPATH="$HSM_CODE_DIR/sub"',
+            "export DATA=/scratch/u/proj/codes:/data/other/code",
+        )
         assert "$HSM_CODE_DIR" in caplog.text
+
+    def test_a_cleanup_may_only_delete_the_sweep_s_own_snapshot(self):
+        assert own_snapshot("/r/p/snapshots/sw1", "sw1") == "/r/p/snapshots/sw1"
+        assert own_snapshot("/r/p/code", "sw1") is None  # an old manifest's shared dir
+        assert own_snapshot("/r/p/snapshots/sw2", "sw1") is None
+        assert own_snapshot(None, "sw1") is None

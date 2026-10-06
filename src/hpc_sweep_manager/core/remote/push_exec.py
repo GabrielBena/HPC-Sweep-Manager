@@ -1,7 +1,7 @@
 """Pure helpers for the push-based remote execution model.
 
-The push model: rsync the local project up to a rolling code dir on the
-remote, run ``[conda run -n env] python train.py <params>`` per task with
+The push model: rsync the local project up to the sweep's code snapshot on
+the remote, run ``[conda run -n env] python train.py <params>`` per task with
 ``CUDA_VISIBLE_DEVICES`` pinning, rsync results back. These functions build the
 commands and partition the GPU pool — kept pure (no I/O) so they're unit-tested
 without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
@@ -10,7 +10,7 @@ without a real remote; :class:`SSHComputeSource` wires them to an SSH channel.
 from __future__ import annotations
 
 import logging
-import shlex
+import re
 from collections.abc import Sequence
 
 logger = logging.getLogger(__name__)
@@ -177,42 +177,37 @@ def build_rsync_pull_cmd(
 
 
 # Per-sweep code snapshots (tracker S4). Each sweep pushes its code to
-# ``<project_root>/snapshots/<sweep_id>/`` and its tasks run from there, so a later push can never
-# change the code of tasks still queued. ``code`` stays a symlink to the newest snapshot, so a path
-# hard-coded to the old shared dir (a ``pre_script`` PYTHONPATH, a queued pre-snapshot task) keeps
-# working as it did; ``$HSM_CODE_DIR`` (exported by every wrapper) names the task's own snapshot.
+# ``<project_root>/snapshots/<sweep_id>/`` and its tasks run from there, so a later push never
+# changes the code of tasks still queued. A snapshot lives exactly as long as its sweep dir. A
+# ``code/`` dir left by an older HSM is never written to or deleted (tasks it launched may still use
+# it); it only serves as the first snapshot's ``--link-dest`` base.
+
+
+def own_snapshot(code_dir: str | None, sweep_id: str | None) -> str | None:
+    """``code_dir`` if it is this sweep's own snapshot, the only code dir a cleanup may delete."""
+    if code_dir and sweep_id and code_dir.endswith(f"/snapshots/{sweep_id}"):
+        return code_dir
+    return None
 
 
 def snapshot_prepare_cmd(project_root: str, sweep_id: str, sweep_dirs: Sequence[str]) -> str:
-    """Remote shell: print the newest existing snapshot (the ``--link-dest`` base, if any), then
-    create this sweep's snapshot dir and ``sweep_dirs``."""
+    """Remote shell: print the newest existing snapshot, or the legacy ``code/`` dir (the
+    ``--link-dest`` base), then create this sweep's snapshot dir and ``sweep_dirs``."""
     snaps = f"{project_root}/snapshots"
-    return f"ls -1d {snaps}/*/ 2>/dev/null | tail -1; mkdir -p {snaps}/{sweep_id} " + " ".join(
-        sweep_dirs
-    )
-
-
-def snapshot_publish_cmd(project_root: str, sweep_id: str, keep_days: int = 7) -> str:
-    """Remote shell, after the push: point ``code`` at this snapshot, then drop snapshots older
-    than ``keep_days`` whose sweep dir is gone.
-
-    A legacy real ``code/`` dir is renamed to ``code.pre-snapshots`` once, never deleted (queued
-    pre-snapshot tasks may still ``cd`` there). The age guard covers tasks that entered through the
-    ``code`` symlink: no snapshot younger than the longest walltime is removed under them.
-    """
-    root = shlex.quote(project_root)
     return (
-        f"cd {root} && {{ [ -L code ] || [ ! -e code ] || mv code code.pre-snapshots; }} && "
-        f"ln -sfn snapshots/{sweep_id} code && "
-        f"find snapshots -mindepth 1 -maxdepth 1 -type d -mtime +{keep_days} | "
-        'while read -r d; do [ -d "sweeps/${d#snapshots/}" ] || rm -rf "$d"; done'
+        f"ls -1d {project_root}/code/ {snaps}/*/ 2>/dev/null | tail -1; "
+        f"mkdir -p {snaps}/{sweep_id} " + " ".join(sweep_dirs)
     )
 
 
-def warn_shared_code_refs(pre_script: Sequence[str], project: str) -> None:
-    """Warn when ``pre_script`` names the old shared code dir instead of ``$HSM_CODE_DIR``."""
-    if any(f"/{project}/code" in line for line in pre_script):
+def pin_code_refs(pre_script: Sequence[str], project: str) -> tuple[str, ...]:
+    """Point ``pre_script``'s references to the old shared ``.../<project>/code`` dir at
+    ``$HSM_CODE_DIR``, the task's own snapshot, so a task never mixes two sweeps' code."""
+    old = re.compile(rf"[^\s:=\"']*/{re.escape(project)}/code(?=$|[\s:/\"'])")
+    pinned = tuple(old.sub("$HSM_CODE_DIR", line) for line in pre_script)
+    if pinned != tuple(pre_script):
         logger.warning(
-            f"pre_script mentions .../{project}/code, which now points at the newest sweep's code "
-            "snapshot; use $HSM_CODE_DIR for the code of the task's own sweep."
+            f"pre_script names the old shared .../{project}/code dir, which no longer receives "
+            "pushes; using $HSM_CODE_DIR (this sweep's code) instead. Write $HSM_CODE_DIR there."
         )
+    return pinned

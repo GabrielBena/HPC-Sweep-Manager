@@ -57,8 +57,8 @@ Replace `my-box` with whatever your alias is. HSM will:
    on the remote (excludes `.git`, `__pycache__`, etc.), hard-linked against the
    previous sweep's snapshot so only changed files cost transfer or space. Tasks
    run from their own sweep's snapshot: a later push never changes the code of
-   tasks still queued. `~/.hsm/runs/<project-name>/code` points at the newest
-   snapshot, and every wrapper exports `$HSM_CODE_DIR` (the task's own snapshot).
+   tasks still queued. Every wrapper exports `$HSM_CODE_DIR` (the task's own
+   snapshot).
 2. Probe `nvidia-smi` to discover GPUs.
 3. Partition them into per-task slots (1 task per GPU here, since
    `--gpus 1` is the allowlist and `--resources --gpus=1` is per-task).
@@ -396,12 +396,13 @@ config, example):
 
 ## Housekeeping
 
-Each sweep's code snapshot lives at `~/.hsm/runs/<project>/snapshots/<sweep_id>/`;
-hard links make them cheap, and a launch removes snapshots older than 7 days
-whose sweep dir is gone. Per-sweep dirs are auto-cleaned on success, kept on
-failure. A `code/` dir left by an older HSM is renamed to `code.pre-snapshots`
-on the first launch (never deleted: tasks queued before the upgrade may still
-use it).
+Each sweep's code snapshot lives at `~/.hsm/runs/<project>/snapshots/<sweep_id>/`
+(hard links make it cheap) for as long as its sweep dir: both are removed on
+success and kept on failure. With an `archive_dir`, the snapshot is archived
+with the results (`<archive>/<sweep_id>/code/`). A `code/` dir left by an older
+HSM is never written to or deleted (tasks it launched may still use it); remove
+it yourself once nothing runs from it. A `pre_script` that still names
+`.../<project>/code` is pointed at `$HSM_CODE_DIR`, with a warning.
 
 To wipe everything HSM left on a remote:
 
