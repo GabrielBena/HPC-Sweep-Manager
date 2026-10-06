@@ -54,7 +54,7 @@ class ParameterGenerator:
 
         combinations = []
         for combo in itertools.product(*values):
-            combinations.append(dict(zip(names, combo)))
+            combinations.append(dict(zip(names, combo, strict=True)))
 
         return combinations
 
@@ -86,8 +86,8 @@ class ParameterGenerator:
             param_values = [flat_group[name] for name in param_names]
 
             group_combinations = []
-            for combination in zip(*param_values):
-                combo_dict = dict(zip(param_names, combination))
+            for combination in zip(*param_values, strict=True):
+                combo_dict = dict(zip(param_names, combination, strict=True))
                 group_combinations.append(combo_dict)
 
             group_combinations_list.append(group_combinations)

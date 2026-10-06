@@ -38,7 +38,7 @@ class FakeConn:
 
 @pytest.fixture
 def fake_ssh(monkeypatch):
-    """Replace create_ssh_connection with a fake-conn factory that records the host it would dial."""
+    """Swap create_ssh_connection for a fake-conn factory recording the host it would dial."""
     state = {"last_host": None, "last_key": None, "last_port": None, "conn": None}
 
     async def _fake_connect(host, ssh_key=None, ssh_port=None):

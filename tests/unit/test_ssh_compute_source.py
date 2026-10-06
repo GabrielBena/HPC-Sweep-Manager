@@ -509,7 +509,7 @@ class TestCollectResults:
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn)
         await src.setup(tmp_path / "sweep", "test_sweep")
-        job_id = await src.submit_job({"i": 1}, "task_001", "test_sweep")
+        await src.submit_job({"i": 1}, "task_001", "test_sweep")
         fake_conn.processes[0].finish(exit_status=0)
         await src.wait_for_all()
 
