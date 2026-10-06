@@ -65,7 +65,6 @@ from ..hpc.gpu_planner import (
     normalize_speed_factors,
     replace_sub_walltime,
 )
-from ..hpc.scheduler_queue import parse_reservations_output
 from ..hpc.slurm_base import SlurmBase
 from ..hpc.slurm_protocol import (
     format_signal,
@@ -352,35 +351,7 @@ class SSHSlurmComputeSource(SlurmBase):
             f"(remote_sweep_dir={self._remote_sweep_dir}, "
             f"run_prefix={self._run_prefix!r})"
         )
-        await self._check_reservations()
         return True
-
-    async def _check_reservations(self) -> None:
-        """Warn at submit if the cluster has any Slurm reservation.
-
-        The field-report trap: a task held behind a maintenance reservation
-        (e.g. 06:00–18:00) outlived the launcher and stranded the sweep. Best-
-        effort — never fails setup; just surfaces the window + the recovery path
-        (``hsm sweep collect``, now that T0/T1 keep partial progress).
-        """
-        try:
-            result = await self._ssh_run("scontrol show reservations", check=False)
-        except Exception:  # noqa: BLE001
-            return
-        if (result.returncode or 0) != 0:
-            return
-        reservations = parse_reservations_output(result.stdout or "")
-        if not reservations:
-            return
-        names = "; ".join(f"{r.name} ({r.start_time}→{r.end_time})" for r in reservations[:3])
-        more = "" if len(reservations) <= 3 else f" (+{len(reservations) - 3} more)"
-        logger.warning(
-            f"{len(reservations)} Slurm reservation(s) on {self.host}: {names}"
-            f"{more}. A task held behind a reservation can outlive this "
-            f"launcher; if `hsm sweep run` exits before everything finishes, "
-            f"run `hsm sweep collect {self.sweep_id}` later to pull/archive "
-            f"the rest."
-        )
 
     # ----------------------------------------------------------------- submit
     async def submit_job(
@@ -395,7 +366,7 @@ class SSHSlurmComputeSource(SlurmBase):
             raise RuntimeError(
                 f"SSHSlurmComputeSource {self.name!r} not set up; call setup() first"
             )
-        effective = self._effective_spec(spec)
+        effective = await self._off_gpu_nodes(self._effective_spec(spec))
         directives = render_sbatch_directives(effective)
         remote_task_dir = f"{self._remote_tasks_dir}/{job_name}"
 
@@ -452,6 +423,8 @@ class SSHSlurmComputeSource(SlurmBase):
         dependency: str | None = None,
         resumable: ResumableContext | None = None,
     ) -> list[str]:
+        cap = resumable.config.chunk_walltime if resumable else None
+        await self._warn_reservations(cap or self._effective_spec(spec).walltime)
         if resumable is not None and mode != "array":
             raise ValueError(
                 f"resumable chains use array mode (one chunk = one Slurm array); got mode={mode!r}"
@@ -690,7 +663,7 @@ class SSHSlurmComputeSource(SlurmBase):
             raise RuntimeError(
                 f"SSHSlurmComputeSource {self.name!r} not set up; call setup() first"
             )
-        effective = self._effective_spec(spec)
+        effective = await self._off_gpu_nodes(self._effective_spec(spec))
         submissions = build_array_submissions(
             params_list=params_list,
             effective_spec=effective,

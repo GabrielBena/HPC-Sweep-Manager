@@ -125,9 +125,12 @@ slurm:
   pre_script:                # arbitrary shell commands before the training script
     - "source ~/.bashrc"
     - "conda activate my-env"
-  extra_directives:          # any extra #SBATCH directive
+  extra_directives:          # any extra #SBATCH directive (`exclude` → `--exclude`)
     mail-type: FAIL
     mail-user: me@example.com
+  cpu_only_nodes: true       # default for a job without GPUs: HSM adds the partition's
+                             # GPU nodes to --exclude (their CPUs belong to GPU jobs).
+                             # Set false to allow them.
   array_throttle: 50         # at most 50 array tasks at once: --array=1-K%50. On a shared
                              # account, fair share is per account: throttle big arrays.
   qos_whitelist:             # optional guard — errors on submit if --qos isn't in this list
