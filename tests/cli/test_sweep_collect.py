@@ -7,6 +7,7 @@ fake rsync, so the re-attach → sacct-classify → pull/archive flow runs offli
 from __future__ import annotations
 
 import io
+from functools import partialmethod
 
 import pytest
 from rich.console import Console
@@ -61,6 +62,14 @@ def _manifest(tmp_path, *, job_ids, archive_dir=None):
         "keep_remote_on_success": False,
         "job_ids": job_ids,
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_adopt_pause(monkeypatch):
+    # adopt() waits 20 s between polls for accounting to catch up; tests don't.
+    monkeypatch.setattr(
+        SSHSlurmComputeSource, "adopt", partialmethod(SSHSlurmComputeSource.adopt, pause=0)
+    )
 
 
 @pytest.fixture
@@ -120,7 +129,7 @@ class TestCollectViaManifest:
         # maintenance reservation, not yet in sacct) must be treated as running —
         # NEVER classified COMPLETED via the sacct fallback and then deleted.
         conn, rsync_calls = patched
-        conn.add("squeue --me", _Result(0, stdout="2 PENDING\n"))  # job 2 queued, 1 gone
+        conn.add("squeue -u", _Result(0, stdout="2 PENDING\n"))  # job 2 queued, 1 gone
         conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))  # job 1 done
         buf = io.StringIO()
         await _collect_via_manifest(
@@ -170,11 +179,13 @@ class TestCollectViaManifest:
         assert not any(c.startswith("rm -rf") for c in conn.run_calls)
 
     @pytest.mark.asyncio
-    async def test_slurm_outage_pulls_only(self, tmp_path, patched):
-        # Tracker S1: with slurmctld unreachable, squeue fails; collect must not read that as
-        # "every job finished" and archive + rm -rf the live sweep dir.
+    @pytest.mark.parametrize("failing", ["squeue -u", "sacct"])
+    async def test_slurm_outage_pulls_only(self, tmp_path, patched, failing):
+        # Tracker S1: with slurmctld (squeue) or slurmdbd (sacct) unreachable, collect must not
+        # read "every job finished" and archive + rm -rf the live sweep dir.
         conn, rsync_calls = patched
-        conn.add("squeue --me", _Result(1, stderr="Unable to contact slurm controller"))
+        for _ in range(3):
+            conn.add(failing, _Result(1, stderr="Unable to contact slurm controller/database"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -182,4 +193,4 @@ class TestCollectViaManifest:
             Console(file=buf, width=200),
         )
         assert "still running" in buf.getvalue()
-        assert not any(c.startswith(("sacct", "rm -rf")) for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.run_calls)

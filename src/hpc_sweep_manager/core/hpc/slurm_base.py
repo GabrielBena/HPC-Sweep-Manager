@@ -1,15 +1,17 @@
 """What the native and SSH-driven Slurm sources share: one status refresh.
 
-Each poll asks the scheduler twice, whatever the number of jobs: one ``squeue --me`` for the jobs
-still queued, one ``sacct`` for the ones that left. A failed call is never a verdict. When squeue
-fails (slurmctld down, a maintenance) no job changes state that cycle; a job that left the queue
-waits for sacct to name its terminal state, and is assumed COMPLETED only after ``SACCT_GRACE``
-polls without one (accounting disabled). Subclasses provide :meth:`_sh`, the one transport seam.
+Each poll asks the scheduler twice, whatever the number of jobs: one ``squeue -u <user>`` for the
+jobs still queued, one ``sacct`` for the ones that left. A failed call is never a verdict: when
+squeue or sacct fails (slurmctld or slurmdbd down, a maintenance) no job changes state that cycle.
+A job that left the queue waits for sacct to name its terminal state; it is assumed COMPLETED only
+when accounting has no answer for it (no rows, or accounting absent) on ``SACCT_GRACE`` polls in a
+row. Subclasses provide :meth:`_sh`, the one transport seam, and may set :attr:`slurm_user`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import getpass
 import logging
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
@@ -20,9 +22,13 @@ from .slurm_protocol import SLURM_STATE_MAP
 
 logger = logging.getLogger(__name__)
 
-# Polls a job may sit outside squeue without a sacct verdict before it is assumed COMPLETED.
+# Polls in a row a job may be out of squeue with no accounting record before it counts as done.
 SACCT_GRACE = 3
-SQUEUE_ARGV = ["squeue", "--me", "-h", "-o", "%i %T"]
+
+
+def accounting_absent(rc: int, err: str) -> bool:
+    """True when sacct can't answer at all (missing, or accounting disabled), not merely failing."""
+    return rc == 127 or "accounting storage is disabled" in err
 
 
 def queued_states(live: Iterable[str], squeue_out: str) -> dict[str, str]:
@@ -65,9 +71,11 @@ def sacct_verdicts(gone: Iterable[str], sacct_out: str) -> dict[str, str]:
 class SlurmBase(ComputeSource):
     """A :class:`ComputeSource` whose jobs live in a Slurm scheduler."""
 
+    slurm_user: str | None = None  # whose queue to read; defaults to the local user
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._sacct_misses: dict[str, int] = {}  # job -> polls out of squeue with no sacct verdict
+        self._sacct_misses: dict[str, int] = {}  # job -> polls in a row with no accounting record
 
     @abstractmethod
     async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
@@ -77,14 +85,20 @@ class SlurmBase(ComputeSource):
         live = list(self.active_jobs)
         if not live:
             return
-        rc, out, err = await self._sh(SQUEUE_ARGV)
+        user = self.slurm_user or getpass.getuser()
+        rc, out, err = await self._sh(["squeue", "-u", user, "-h", "-o", "%i %T"])
         if rc != 0:
             logger.warning(f"squeue failed (rc={rc}): {err.strip()}; job states kept")
             return
         states = queued_states(live, out)
+        for job in states:
+            self._sacct_misses.pop(job, None)
         gone = [job for job in live if job not in states]
         if gone:
             rc, out, err = await self._sh(["sacct", *sacct_args(gone)])
+            if rc != 0 and not accounting_absent(rc, err):
+                logger.warning(f"sacct failed (rc={rc}): {err.strip()}; job states kept")
+                gone = []
             verdicts = sacct_verdicts(gone, out) if rc == 0 else {}
             for job in gone:
                 if job in verdicts:
@@ -94,26 +108,27 @@ class SlurmBase(ComputeSource):
                 misses = self._sacct_misses[job] = self._sacct_misses.get(job, 0) + 1
                 if misses >= SACCT_GRACE:
                     logger.warning(
-                        f"job {job} left the queue and sacct gave no state for {misses} polls "
-                        f"(rc={rc}: {err.strip()}); assuming COMPLETED, verify it"
+                        f"job {job} left the queue and accounting has no record of it after "
+                        f"{misses} polls; assuming COMPLETED, verify it"
                     )
                     states[job] = "COMPLETED"
         for job, state in states.items():
             self.update_job_status(job, state)
 
     async def get_job_status(self, job_id: str) -> str:
-        await self.update_all_job_statuses()
+        """The state the last refresh saw (refresh with :meth:`update_all_job_statuses`)."""
         info = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
         return info.status if info else "UNKNOWN"
 
-    async def adopt(self, job_ids: Sequence[str], pause: float = 2.0) -> dict[str, str]:
+    async def adopt(self, job_ids: Sequence[str], pause: float = 20.0) -> dict[str, str]:
         """Track already-submitted jobs (a re-attach) and return their settled statuses.
 
-        Polls up to ``SACCT_GRACE`` times, until every job is either queued or named by sacct, so
-        a fresh process reaches the same verdict a live launcher would.
+        Polls up to ``SACCT_GRACE`` times, ``pause`` apart, until every job is either queued or
+        named by sacct, so a fresh process reaches the verdict a live launcher would. A job Slurm
+        couldn't be asked about stays ``UNKNOWN``.
         """
         for job in job_ids:
-            self.active_jobs.setdefault(job, JobInfo(job, job, {}, self.name))
+            self.active_jobs.setdefault(job, JobInfo(job, job, {}, self.name, status="UNKNOWN"))
         for poll in range(SACCT_GRACE):
             await self.update_all_job_statuses()
             if not self._sacct_misses.keys() & self.active_jobs.keys():

@@ -102,14 +102,36 @@ class TestRefresh:
         assert src.calls == ["squeue"] * 5  # sacct is never asked to guess
         assert src.active_jobs["1"].status == "PENDING"
 
-    @pytest.mark.parametrize("sacct_reply", [(1, "", "DB connection refused"), (0, "", "")])
-    async def test_no_sacct_verdict_waits_out_the_grace(self, sacct_reply):
+    async def test_a_failing_sacct_changes_nothing(self):
+        # slurmdbd down while slurmctld is up: a failed sacct is not "no record".
+        src = ScriptedSlurm([GONE, (1, "", "Problem talking to the database")] * 5)
+        for _ in range(5):
+            await src.update_all_job_statuses()
+        assert src.active_jobs["1"].status == "PENDING"
+
+    @pytest.mark.parametrize(
+        "sacct_reply",
+        [
+            (0, "", ""),
+            (127, "", "sacct: not found"),
+            (1, "", "Slurm accounting storage is disabled"),
+        ],
+    )
+    async def test_no_accounting_record_waits_out_the_grace(self, sacct_reply):
         src = ScriptedSlurm([GONE, sacct_reply] * SACCT_GRACE)
         for _ in range(SACCT_GRACE - 1):
             await src.update_all_job_statuses()
             assert "1" in src.active_jobs
         await src.update_all_job_statuses()
         assert src.completed_jobs["1"].status == "COMPLETED"
+
+    async def test_the_grace_counts_polls_in_a_row(self):
+        # Two misses, seen queued again, then two misses: never three in a row.
+        replies = [GONE, (0, "", "")] * 2 + [(0, "1 RUNNING", "")] + [GONE, (0, "", "")] * 2
+        src = ScriptedSlurm(replies)
+        for _ in range(5):
+            await src.update_all_job_statuses()
+        assert "1" in src.active_jobs
 
     async def test_a_verdict_resets_the_grace(self):
         src = ScriptedSlurm([GONE, GONE, GONE, (0, "1|RUNNING", ""), GONE, GONE, GONE, GONE])
@@ -135,3 +157,14 @@ class TestRefresh:
     async def test_adopt_keeps_a_queued_job_running(self):
         src = ScriptedSlurm([(0, "7_[1-9] PENDING", "")], jobs=())
         assert await src.adopt(["7"], pause=0) == {"7": "PENDING"}
+
+    async def test_adopt_during_an_outage_says_unknown(self):
+        src = ScriptedSlurm([OUTAGE], jobs=())
+        assert await src.adopt(["7"], pause=0) == {"7": "UNKNOWN"}
+
+    async def test_get_job_status_never_polls(self):
+        # A per-job loop must not burn through the grace (one refresh per call used to).
+        src = ScriptedSlurm([])
+        assert await src.get_job_status("1") == "PENDING"
+        assert await src.get_job_status("2") == "UNKNOWN"
+        assert src.calls == []

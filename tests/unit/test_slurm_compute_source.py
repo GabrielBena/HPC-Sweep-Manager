@@ -7,6 +7,8 @@ focus on directive rendering, spec resolution, and QOS validation.
 
 from __future__ import annotations
 
+import getpass
+
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
@@ -175,14 +177,18 @@ class TestNativeTransport:
     @pytest.mark.asyncio
     async def test_gone_from_squeue_and_failed_in_sacct(self, monkeypatch):
         calls = self._patch_run(monkeypatch, {"squeue": (0, ""), "sacct": (0, "123|FAILED\n")})
-        assert await self._tracking().get_job_status("123") == "FAILED"
+        src = self._tracking()
+        await src.update_all_job_statuses()
+        assert src.completed_jobs["123"].status == "FAILED"
         assert [c[0] for c in calls] == ["squeue", "sacct"]
-        assert "--me" in calls[0]
+        assert calls[0][1:3] == ["-u", getpass.getuser()]
 
     @pytest.mark.asyncio
     async def test_still_queued_never_asks_sacct(self, monkeypatch):
         calls = self._patch_run(monkeypatch, {"squeue": (0, "123 RUNNING\n")})
-        assert await self._tracking().get_job_status("123") == "RUNNING"
+        src = self._tracking()
+        await src.update_all_job_statuses()
+        assert await src.get_job_status("123") == "RUNNING"
         assert [c[0] for c in calls] == ["squeue"]
 
     @pytest.mark.asyncio

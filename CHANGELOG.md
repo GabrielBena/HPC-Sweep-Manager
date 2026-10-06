@@ -11,10 +11,11 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **A Slurm outage could delete a live sweep dir (S1).** When `squeue` failed
   (rc≠0) and `sacct` failed too, a job was taken as COMPLETED; the launcher (or
   `hsm sweep collect`) then archived and `rm -rf`'d the remote sweep dir while
-  tasks were still queued. A failed call is now never a verdict: squeue rc≠0
-  changes no state that cycle, and a job that left the queue waits for sacct to
-  name its terminal state (COMPLETED is assumed only after 3 polls without one).
-- **Status polling is batched for every Slurm source (S2).** One `squeue --me` and
+  tasks were still queued. A failed call is now never a verdict: a failing squeue
+  or sacct changes no state that cycle, and a job that left the queue waits for
+  sacct to name its terminal state. COMPLETED is assumed only when accounting has
+  no record of the job (no rows, or accounting absent) on 3 polls in a row.
+- **Status polling is batched for every Slurm source (S2).** One `squeue -u <user>` and
   one `sacct` per poll, shared by the native and SSH-driven sources
   (`core/hpc/slurm_base.py`); it was one `squeue` (+ `sacct`) per job per cycle,
   600 SSH channels a cycle at 600 jobs. `collect` and `advance` use the same

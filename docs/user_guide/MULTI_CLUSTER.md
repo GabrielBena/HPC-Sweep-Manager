@@ -250,7 +250,7 @@ slots and S3IT has 32 jobs sitting PENDING, anahita keeps churning
 through the remaining work. You only see head-of-line behavior when
 *every* child is at `max_parallel_jobs`.
 
-Status polling itself is cheap: every Slurm source asks one `squeue --me`
+Status polling itself is cheap: every Slurm source asks one `squeue -u <user>`
 and one `sacct` per poll cycle, whatever the number of jobs in flight. A
 failed `squeue` or `sacct` (a controller outage, a maintenance) changes no
 job's state, so it can't end a sweep early. Only individual submission is

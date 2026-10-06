@@ -10,6 +10,7 @@ No real cluster, no real ssh, no real subprocess.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -17,7 +18,6 @@ import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
-from hpc_sweep_manager.core.hpc.slurm_base import SACCT_GRACE
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
     SSHSlurmComputeSource,
     build_ssh_slurm_source,
@@ -444,35 +444,35 @@ class TestStatus:
     @pytest.mark.asyncio
     async def test_one_squeue_and_one_sacct_on_the_wire(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("squeue --me", _Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n"))
+        conn.add("squeue -u", _Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n"))
         conn.add("sacct", _Result(0, stdout="101|FAILED\n102|COMPLETED\n"))
         src = await self._tracking(tmp_path, conn, "100", "101", "102")
         await src.update_all_job_statuses()
         wire = [c["cmd"] for c in conn.run_calls if c["cmd"].startswith(("squeue", "sacct"))]
-        assert wire == ["squeue --me -h -o '%i %T'", "sacct -j 101,102 -n -X -P -o JobID,State"]
+        assert wire == ["squeue -u gbena -h -o '%i %T'", "sacct -j 101,102 -n -X -P -o JobID,State"]
         assert src.active_jobs["100"].status == "RUNNING"
         assert src.completed_jobs["101"].status == "FAILED"
         assert src.completed_jobs["102"].status == "COMPLETED"
 
     @pytest.mark.asyncio
-    async def test_an_outage_never_finishes_a_job(self, tmp_path):
-        # Tracker S1: squeue and sacct both failing (slurmctld + slurmdbd down) read as
-        # COMPLETED, and collect then archived and rm -rf'd the live sweep dir.
+    @pytest.mark.parametrize("failing", ["squeue -u", "sacct"])
+    async def test_an_outage_never_ends_the_wait(self, tmp_path, failing):
+        # Tracker S1: squeue (slurmctld) or sacct (slurmdbd) failing read as COMPLETED, so the
+        # launcher went on to collect, archive and rm -rf a live sweep dir.
         conn = FakeConn(responder=_setup_ok_responder())
-        for _ in range(SACCT_GRACE + 2):
-            conn.add("squeue --me", _Result(1, stderr="Unable to contact slurm controller"))
+        for _ in range(200):
+            conn.add(failing, _Result(1, stderr="Unable to contact slurm controller/database"))
         src = await self._tracking(tmp_path, conn, "777")
-        for _ in range(SACCT_GRACE + 2):
-            await src.update_all_job_statuses()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(src.wait_for_all(poll_interval=0.001), timeout=0.2)
         assert "777" in src.active_jobs
-        assert not any(c["cmd"].startswith(("sacct", "rm -rf")) for c in conn.run_calls)
 
     @pytest.mark.asyncio
     async def test_a_signal_killed_command_is_a_failure(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("squeue --me", _Result(None))
+        conn.add("squeue -u", _Result(None))
         src = await self._tracking(tmp_path, conn)
-        assert (await src._sh(["squeue", "--me"]))[0] == 255
+        assert (await src._sh(["squeue", "-u", "gbena"]))[0] == 255
 
 
 class TestReservationWarning:
@@ -619,8 +619,8 @@ class TestContinuousPull:
         await src.submit_job({"s": 0}, "task_0", "sweep_1")
         pulls_before = len(src._rsync_calls)  # 1 (the setup push)
         # Cycle 1: still RUNNING. Cycle 2: gone from squeue, sacct=COMPLETED.
-        conn.add("squeue --me", _Result(0, stdout="1 RUNNING\n"))
-        conn.add("squeue --me", _Result(0, stdout=""))
+        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
+        conn.add("squeue -u", _Result(0, stdout=""))
         conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
         final = await src.wait_for_all(poll_interval=0)
         assert final == {"1": "COMPLETED"}
@@ -642,9 +642,9 @@ class TestContinuousPull:
         await src.submit_job({"s": 0}, "task_0", "sweep_1")
         pulls_before = len(src._rsync_calls)
         # Still running, then done — only ONE incremental pull (on completion).
-        conn.add("squeue --me", _Result(0, stdout="1 RUNNING\n"))
-        conn.add("squeue --me", _Result(0, stdout="1 RUNNING\n"))
-        conn.add("squeue --me", _Result(0, stdout=""))
+        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
+        conn.add("squeue -u", _Result(0, stdout="1 RUNNING\n"))
+        conn.add("squeue -u", _Result(0, stdout=""))
         conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
         await src.wait_for_all(poll_interval=0)
         assert len(src._rsync_calls) - pulls_before == 1

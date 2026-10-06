@@ -18,7 +18,7 @@ that doesn't itself have Slurm installed. This module does:
        then ``ssh host "cd <sweep_dir> && sbatch <script>"`` — capturing
        the job id from sbatch's stdout.
     3. Status: :class:`SlurmBase` (shared with the native source) asks one
-       ``squeue --me`` and one ``sacct`` per poll, whatever the job count, and
+       ``squeue -u <user>`` and one ``sacct`` per poll, whatever the job count, and
        never reads a failed call as a verdict.
     4. ``collect_results()``: rsync the remote ``tasks/`` tree back to
        the local sweep dir; on full-success, ``rm -rf`` the remote sweep
@@ -298,6 +298,7 @@ class SSHSlurmComputeSource(SlurmBase):
         # locally) and the archive target (shlex-quoted) point at real paths —
         # the docs promise this expansion (HPC_EXECUTION.md).
         resolved_root = await self._resolve_remote_path(active_root)
+        self.slurm_user = await self._resolve_remote_path("$USER")  # whose squeue to read
         self._resolved_archive_dir = (
             await self._resolve_remote_path(self.archive_dir) if self.archive_dir else None
         )
@@ -602,6 +603,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self._remote_sweep_dir = manifest["remote_sweep_dir"]
         self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
+        self.slurm_user = await self._resolve_remote_path("$USER")
         return True
 
     @classmethod

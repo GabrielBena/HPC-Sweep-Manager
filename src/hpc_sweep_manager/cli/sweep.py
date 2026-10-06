@@ -1131,7 +1131,9 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             rc = await source._pull_tasks()
             console.print(
                 f"[yellow]{len(terminal)}/{len(job_ids)} job(s){task_hint} terminal; "
-                f"{len(running)} still running.[/yellow]"
+                f"{len(running)} still running"
+                + (" (Slurm didn't answer for some)" if "UNKNOWN" in statuses.values() else "")
+                + ".[/yellow]"
             )
             console.print(
                 f"Pulled tasks/ → {sweep_dir / 'tasks'} (rc={rc}). "
