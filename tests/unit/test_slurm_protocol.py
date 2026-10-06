@@ -127,12 +127,8 @@ class TestRenderChainDirectives:
         from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
         from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
 
-        spec = ResourceSpec(
-            walltime="23:00:00", extra_directives=(("--exclusive", ""),)
-        )
-        out = render_sbatch_directives(
-            spec, dependency="afterany:9:10", signal="B:TERM@120"
-        )
+        spec = ResourceSpec(walltime="23:00:00", extra_directives=(("--exclusive", ""),))
+        out = render_sbatch_directives(spec, dependency="afterany:9:10", signal="B:TERM@120")
         lines = out.splitlines()
         assert lines.index("#SBATCH --exclusive") < lines.index(
             "#SBATCH --dependency=afterany:9:10"

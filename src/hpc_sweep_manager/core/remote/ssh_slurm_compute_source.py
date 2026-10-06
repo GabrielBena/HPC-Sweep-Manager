@@ -40,13 +40,14 @@ without a real cluster.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import json
 import logging
-from pathlib import Path
 import re
 import shlex
-from typing import Any, Dict, List, Optional, Sequence
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from ..common.chain import ChainState
 from ..common.compute_source import (
@@ -59,7 +60,6 @@ from ..common.compute_source import (
 from ..common.resource_spec import ResourceSpec
 from ..common.resumable import ChunkProgress, ResumableConfig, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
-from ..hpc.scheduler_queue import parse_reservations_output
 from ..hpc.gpu_planner import (
     SubArraySubmission,
     build_array_submissions,
@@ -67,6 +67,7 @@ from ..hpc.gpu_planner import (
     normalize_speed_factors,
     replace_sub_walltime,
 )
+from ..hpc.scheduler_queue import parse_reservations_output
 from ..hpc.slurm_protocol import (
     SLURM_STATE_MAP,
     format_signal,
@@ -95,23 +96,23 @@ class SSHSlurmComputeSource(ComputeSource):
     def __init__(
         self,
         name: str,
-        host: Optional[str] = None,
-        ssh_key: Optional[str] = None,
-        ssh_port: Optional[int] = None,
-        conda_env: Optional[str] = None,
-        python_path: Optional[str] = None,
+        host: str | None = None,
+        ssh_key: str | None = None,
+        ssh_port: int | None = None,
+        conda_env: str | None = None,
+        python_path: str | None = None,
         project_dir: str = ".",
         script_path: str = "",
         remote_root: str = "~/.hsm/runs",
-        workdir: Optional[str] = None,
-        archive_dir: Optional[str] = None,
+        workdir: str | None = None,
+        archive_dir: str | None = None,
         archive_on: str = "completed",
         max_parallel_jobs: int = 0,
-        default_spec: Optional[ResourceSpec] = None,
-        rsync_excludes: Optional[Sequence[str]] = None,
+        default_spec: ResourceSpec | None = None,
+        rsync_excludes: Sequence[str] | None = None,
         keep_remote_on_success: bool = False,
-        qos_whitelist: Optional[frozenset[str]] = None,
-        speed_factors: Optional[Dict[str, float]] = None,
+        qos_whitelist: frozenset[str] | None = None,
+        speed_factors: dict[str, float] | None = None,
     ):
         # max_parallel_jobs=0 -> "no client-side cap" (Slurm's own scheduler
         # decides). Matches SlurmComputeSource's convention.
@@ -145,8 +146,7 @@ class SSHSlurmComputeSource(ComputeSource):
         self.archive_dir = archive_dir.rstrip("/") if archive_dir else None
         if archive_on not in ("completed", "always", "never"):
             raise ValueError(
-                f"archive_on must be 'completed', 'always', or 'never'; "
-                f"got {archive_on!r}"
+                f"archive_on must be 'completed', 'always', or 'never'; got {archive_on!r}"
             )
         self.archive_on = archive_on
         self.default_spec = default_spec or ResourceSpec()
@@ -166,23 +166,23 @@ class SSHSlurmComputeSource(ComputeSource):
         # Populated by setup()
         self._conn: Any = None
         self._project_name = Path(self.project_dir).name or "project"
-        self._remote_code_dir: Optional[str] = None
-        self._remote_sweep_dir: Optional[str] = None
-        self._remote_tasks_dir: Optional[str] = None
-        self._remote_logs_dir: Optional[str] = None
-        self._remote_scripts_dir: Optional[str] = None
+        self._remote_code_dir: str | None = None
+        self._remote_sweep_dir: str | None = None
+        self._remote_tasks_dir: str | None = None
+        self._remote_logs_dir: str | None = None
+        self._remote_scripts_dir: str | None = None
         # archive_dir with $USER/$HOME/~ expanded on the remote (set in setup()).
-        self._resolved_archive_dir: Optional[str] = None
-        self.sweep_dir: Optional[Path] = None
-        self.sweep_id: Optional[str] = None
+        self._resolved_archive_dir: str | None = None
+        self.sweep_dir: Path | None = None
+        self.sweep_id: str | None = None
         self._run_prefix: str = "python"
         # Resumable chains (issue #12): the driver sets _pull_excludes so the
         # incremental + final tasks/ pulls skip the heavy checkpoint subdir
         # (it rides the cheap server-side archive instead of the WAN). The
         # config/state are restored by from_manifest for `hsm sweep advance`.
         self._pull_excludes: tuple[str, ...] = ()
-        self._resumable_config: Optional[ResumableConfig] = None
-        self._chain_state: Optional[ChainState] = None
+        self._resumable_config: ResumableConfig | None = None
+        self._chain_state: ChainState | None = None
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
@@ -191,7 +191,7 @@ class SSHSlurmComputeSource(ComputeSource):
 
         return await create_ssh_connection(self.host, self.ssh_key, self.ssh_port)
 
-    async def _run_rsync(self, cmd: List[str]) -> int:
+    async def _run_rsync(self, cmd: list[str]) -> int:
         """Run an rsync command and return its exit code. Overridden in tests."""
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -207,7 +207,7 @@ class SSHSlurmComputeSource(ComputeSource):
         return proc.returncode or 0
 
     # ---------------------------------------------------------------- helpers
-    def _effective_spec(self, spec: Optional[ResourceSpec]) -> ResourceSpec:
+    def _effective_spec(self, spec: ResourceSpec | None) -> ResourceSpec:
         merged = self.default_spec.merge(spec)
         if (
             merged.qos is not None
@@ -215,8 +215,7 @@ class SSHSlurmComputeSource(ComputeSource):
             and merged.qos not in self.qos_whitelist
         ):
             raise ValueError(
-                f"qos={merged.qos!r} is not in the whitelist "
-                f"{sorted(self.qos_whitelist)}"
+                f"qos={merged.qos!r} is not in the whitelist {sorted(self.qos_whitelist)}"
             )
         return merged
 
@@ -304,14 +303,10 @@ class SSHSlurmComputeSource(ComputeSource):
         # the docs promise this expansion (HPC_EXECUTION.md).
         resolved_root = await self._resolve_remote_path(active_root)
         self._resolved_archive_dir = (
-            await self._resolve_remote_path(self.archive_dir)
-            if self.archive_dir
-            else None
+            await self._resolve_remote_path(self.archive_dir) if self.archive_dir else None
         )
         self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = (
-            f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
-        )
+        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
         self._remote_tasks_dir = f"{self._remote_sweep_dir}/tasks"
         self._remote_logs_dir = f"{self._remote_sweep_dir}/logs"
         self._remote_scripts_dir = f"{self._remote_sweep_dir}/scripts"
@@ -355,9 +350,7 @@ class SSHSlurmComputeSource(ComputeSource):
         (``hsm sweep collect``, now that T0/T1 keep partial progress).
         """
         try:
-            result = await self._ssh_run(
-                "scontrol show reservations", check=False
-            )
+            result = await self._ssh_run("scontrol show reservations", check=False)
         except Exception:  # noqa: BLE001
             return
         if (result.returncode or 0) != 0:
@@ -365,9 +358,7 @@ class SSHSlurmComputeSource(ComputeSource):
         reservations = parse_reservations_output(result.stdout or "")
         if not reservations:
             return
-        names = "; ".join(
-            f"{r.name} ({r.start_time}→{r.end_time})" for r in reservations[:3]
-        )
+        names = "; ".join(f"{r.name} ({r.start_time}→{r.end_time})" for r in reservations[:3])
         more = "" if len(reservations) <= 3 else f" (+{len(reservations) - 3} more)"
         logger.warning(
             f"{len(reservations)} Slurm reservation(s) on {self.host}: {names}"
@@ -380,11 +371,11 @@ class SSHSlurmComputeSource(ComputeSource):
     # ----------------------------------------------------------------- submit
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         if self._conn is None or self._remote_sweep_dir is None:
             raise RuntimeError(
@@ -418,14 +409,10 @@ class SSHSlurmComputeSource(ComputeSource):
         remote_script_path = f"{self._remote_scripts_dir}/{job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)
 
-        result = await self._ssh_run(
-            f"sbatch {shlex.quote(remote_script_path)}", check=False
-        )
+        result = await self._ssh_run(f"sbatch {shlex.quote(remote_script_path)}", check=False)
         if (result.returncode or 0) != 0:
             stderr = (result.stderr or "").strip() or "no stderr"
-            raise RuntimeError(
-                f"sbatch failed for {job_name} on {self.host}: {stderr}"
-            )
+            raise RuntimeError(f"sbatch failed for {job_name} on {self.host}: {stderr}")
         job_id = parse_sbatch_job_id(result.stdout or "")
 
         # Local mirror task dir so collect_results() can write into it.
@@ -442,29 +429,25 @@ class SSHSlurmComputeSource(ComputeSource):
             task_dir=str(local_task_dir),
         )
         self.stats.total_submitted += 1
-        logger.info(
-            f"Submitted Slurm job {job_id} ({job_name}) on {self.host} "
-            f"via SSH"
-        )
+        logger.info(f"Submitted Slurm job {job_id} ({job_name}) on {self.host} via SSH")
         return job_id
 
     async def submit_batch(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
         mode: SubmissionMode = "individual",
-        spec: Optional[ResourceSpec] = None,
-        wandb_group: Optional[str] = None,
-        job_name_prefix: Optional[str] = None,
-        costs: Optional[Sequence[float]] = None,
+        spec: ResourceSpec | None = None,
+        wandb_group: str | None = None,
+        job_name_prefix: str | None = None,
+        costs: Sequence[float] | None = None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
-    ) -> List[str]:
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
+    ) -> list[str]:
         if resumable is not None and mode != "array":
             raise ValueError(
-                "resumable chains use array mode (one chunk = one Slurm array); "
-                f"got mode={mode!r}"
+                f"resumable chains use array mode (one chunk = one Slurm array); got mode={mode!r}"
             )
         if mode == "array":
             try:
@@ -517,9 +500,9 @@ class SSHSlurmComputeSource(ComputeSource):
     async def persist_chain_manifest(
         self,
         *,
-        resumable: Dict[str, Any],
-        chain: Dict[str, Any],
-        job_ids: List[str],
+        resumable: dict[str, Any],
+        chain: dict[str, Any],
+        job_ids: list[str],
         num_tasks: int,
     ) -> None:
         """Re-write the manifest with the resumable config + chain state so a
@@ -530,12 +513,12 @@ class SSHSlurmComputeSource(ComputeSource):
 
     async def _write_manifest(
         self,
-        job_ids: List[str],
+        job_ids: list[str],
         submission_mode: str,
         num_tasks: int,
         *,
-        resumable_manifest: Optional[Dict[str, Any]] = None,
-        chain: Optional[Dict[str, Any]] = None,
+        resumable_manifest: dict[str, Any] | None = None,
+        chain: dict[str, Any] | None = None,
     ) -> None:
         """Persist everything a fresh client needs to re-attach this sweep.
 
@@ -573,10 +556,7 @@ class SSHSlurmComputeSource(ComputeSource):
             # sweeps legitimately have several arrays).
             "jobs": jobs_manifest_entries(
                 job_ids,
-                {
-                    jid: (info.params or {})
-                    for jid, info in self.active_jobs.items()
-                },
+                {jid: (info.params or {}) for jid, info in self.active_jobs.items()},
             ),
             "submitted_at": datetime.now().isoformat(),
         }
@@ -606,7 +586,7 @@ class SSHSlurmComputeSource(ComputeSource):
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"could not write remote manifest: {e}")
 
-    async def reattach(self, sweep_dir: Path, sweep_id: str, manifest: Dict[str, Any]) -> bool:
+    async def reattach(self, sweep_dir: Path, sweep_id: str, manifest: dict[str, Any]) -> bool:
         """Reconnect to an already-submitted sweep WITHOUT re-pushing code.
 
         Used by ``hsm sweep collect`` after the launcher died: trusts the
@@ -624,14 +604,12 @@ class SSHSlurmComputeSource(ComputeSource):
             logger.error(f"SSH connection to {self.host} failed: {e}")
             return False
         self._remote_sweep_dir = manifest["remote_sweep_dir"]
-        self._remote_tasks_dir = manifest.get(
-            "remote_tasks_dir", f"{self._remote_sweep_dir}/tasks"
-        )
+        self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
         return True
 
     @classmethod
-    def from_manifest(cls, manifest: Dict[str, Any]) -> "SSHSlurmComputeSource":
+    def from_manifest(cls, manifest: dict[str, Any]) -> SSHSlurmComputeSource:
         """Reconstruct a source from a ``.hsm_manifest.json`` for re-attach.
 
         Carries no dependence on the current ``.hsm/config.yaml`` — the manifest
@@ -664,23 +642,21 @@ class SSHSlurmComputeSource(ComputeSource):
         rblock = manifest.get("resumable")
         if rblock:
             inst._resumable_config = ResumableConfig.from_manifest(rblock)
-            inst._chain_state = ChainState.from_dict(
-                (manifest.get("chain") or {}).get("state")
-            )
+            inst._chain_state = ChainState.from_dict((manifest.get("chain") or {}).get("state"))
         return inst
 
     async def _submit_array(
         self,
-        params_list: List[Dict[str, Any]],
+        params_list: list[dict[str, Any]],
         sweep_id: str,
-        spec: Optional[ResourceSpec],
-        wandb_group: Optional[str],
-        job_name_prefix: Optional[str],
-        costs: Optional[Sequence[float]] = None,
+        spec: ResourceSpec | None,
+        wandb_group: str | None,
+        job_name_prefix: str | None,
+        costs: Sequence[float] | None = None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
-    ) -> List[str]:
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
+    ) -> list[str]:
         """Submit the sweep as 1..K Slurm arrays.
 
         Single-type specs submit exactly one array (today's behavior).
@@ -724,15 +700,13 @@ class SSHSlurmComputeSource(ComputeSource):
         self,
         sub: SubArraySubmission,
         sweep_id: str,
-        wandb_group: Optional[str],
+        wandb_group: str | None,
         *,
-        dependency: Optional[str] = None,
-        resumable: Optional[ResumableContext] = None,
+        dependency: str | None = None,
+        resumable: ResumableContext | None = None,
     ) -> str:
         signal = format_signal(resumable.config.signal_grace) if resumable else None
-        directives = render_sbatch_directives(
-            sub.spec, dependency=dependency, signal=signal
-        )
+        directives = render_sbatch_directives(sub.spec, dependency=dependency, signal=signal)
 
         # Per-(sub-)array params file — written to the remote sweep dir so
         # the array template's $SLURM_ARRAY_TASK_ID python helper can find
@@ -740,9 +714,7 @@ class SSHSlurmComputeSource(ComputeSource):
         # original 1..N position so tasks/task_%04d stays globally
         # numbered). The local mirror is created on collect_results().
         remote_params_file = f"{self._remote_sweep_dir}/{sub.params_filename}"
-        await self._write_remote_file(
-            remote_params_file, json.dumps(list(sub.entries), indent=2)
-        )
+        await self._write_remote_file(remote_params_file, json.dumps(list(sub.entries), indent=2))
 
         rcfg = resumable.config if resumable else None
         script_content = render_template(
@@ -771,20 +743,16 @@ class SSHSlurmComputeSource(ComputeSource):
         remote_script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
         await self._write_remote_file(remote_script_path, script_content)
 
-        result = await self._ssh_run(
-            f"sbatch {shlex.quote(remote_script_path)}", check=False
-        )
+        result = await self._ssh_run(f"sbatch {shlex.quote(remote_script_path)}", check=False)
         if (result.returncode or 0) != 0:
             stderr = (result.stderr or "").strip() or "no stderr"
-            raise RuntimeError(
-                f"sbatch (array) failed on {self.host}: {stderr}"
-            )
+            raise RuntimeError(f"sbatch (array) failed on {self.host}: {stderr}")
         job_id = parse_sbatch_job_id(result.stdout or "")
 
         local_tasks_dir = self.sweep_dir / "tasks"  # type: ignore[union-attr]
         local_tasks_dir.mkdir(parents=True, exist_ok=True)
 
-        params: Dict[str, Any] = {"_array_size": len(sub.entries)}
+        params: dict[str, Any] = {"_array_size": len(sub.entries)}
         if sub.gpu_type:
             params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
@@ -814,9 +782,7 @@ class SSHSlurmComputeSource(ComputeSource):
         or job unknown), preserving the old optimistic behavior on clusters
         that genuinely can't tell us better.
         """
-        result = await self._ssh_run(
-            f"sacct -j {shlex.quote(job_id)} -n -X -o State", check=False
-        )
+        result = await self._ssh_run(f"sacct -j {shlex.quote(job_id)} -n -X -o State", check=False)
         rc = result.returncode or 0
         state = parse_sacct_state(result.stdout or "") if rc == 0 else None
         if state is None:
@@ -837,9 +803,7 @@ class SSHSlurmComputeSource(ComputeSource):
         return state
 
     async def get_job_status(self, job_id: str) -> str:
-        result = await self._ssh_run(
-            f"squeue -j {shlex.quote(job_id)} -h -o '%T'", check=False
-        )
+        result = await self._ssh_run(f"squeue -j {shlex.quote(job_id)} -h -o '%T'", check=False)
         if (result.returncode or 0) != 0 or not (result.stdout or "").strip():
             # Gone from the queue — ask sacct for the actual terminal state
             # rather than assuming success (queue-absence ≠ completion).
@@ -865,10 +829,8 @@ class SSHSlurmComputeSource(ComputeSource):
         if not live:
             return
         joined = ",".join(shlex.quote(j) for j in live)
-        result = await self._ssh_run(
-            f"squeue -j {joined} -h -o '%i %T'", check=False
-        )
-        seen: Dict[str, str] = {}
+        result = await self._ssh_run(f"squeue -j {joined} -h -o '%i %T'", check=False)
+        seen: dict[str, str] = {}
         for line in (result.stdout or "").splitlines():
             line = line.strip()
             if not line:
@@ -888,9 +850,7 @@ class SSHSlurmComputeSource(ComputeSource):
                 self.update_job_status(jid, status)
 
     async def cancel_job(self, job_id: str) -> bool:
-        result = await self._ssh_run(
-            f"scancel {shlex.quote(job_id)}", check=False
-        )
+        result = await self._ssh_run(f"scancel {shlex.quote(job_id)}", check=False)
         success = (result.returncode or 0) == 0
         if success and job_id in self.active_jobs:
             self.update_job_status(job_id, "CANCELLED")
@@ -950,7 +910,7 @@ class SSHSlurmComputeSource(ComputeSource):
             m = re.search(r"task_(\d+)/[^/]+$", line.strip())
             if m:
                 done.add(int(m.group(1)))
-        mtime: Optional[float] = None
+        mtime: float | None = None
         tail = after.strip().splitlines()
         if tail:
             try:
@@ -962,8 +922,8 @@ class SSHSlurmComputeSource(ComputeSource):
     async def wait_for_all(
         self,
         poll_interval: float = 5.0,
-        on_progress: Optional[ProgressCallback] = None,
-    ) -> Dict[str, str]:
+        on_progress: ProgressCallback | None = None,
+    ) -> dict[str, str]:
         """Poll like the base loop, but rsync-pull ``tasks/`` whenever a job
         newly reaches a terminal state (T1).
 
@@ -974,7 +934,7 @@ class SSHSlurmComputeSource(ComputeSource):
         — these mid-flight pulls are additive and idempotent, never a
         replacement. Mirrors :meth:`ComputeSource.wait_for_all`; kept in sync.
         """
-        final_statuses: Dict[str, str] = {}
+        final_statuses: dict[str, str] = {}
         for job_id, info in list(self.completed_jobs.items()):
             final_statuses[job_id] = info.status
 
@@ -1006,12 +966,10 @@ class SSHSlurmComputeSource(ComputeSource):
         return final_statuses
 
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         if self._remote_sweep_dir is None or self.sweep_dir is None:
-            logger.warning(
-                f"collect_results called before setup on {self.name}"
-            )
+            logger.warning(f"collect_results called before setup on {self.name}")
             return False
 
         # Resumable chains (issue #12): between chunks pull partial progress but
@@ -1021,9 +979,7 @@ class SSHSlurmComputeSource(ComputeSource):
             rc = await self._pull_tasks()
             return rc == 0
 
-        any_failed = any(
-            j.status == "FAILED" for j in self.completed_jobs.values()
-        )
+        any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
 
         # Archive FIRST (server-side rsync /scratch → /shares — the durable
         # safety net) then pull tasks/ back to anahita. The archive uses
@@ -1042,10 +998,7 @@ class SSHSlurmComputeSource(ComputeSource):
                     f"rm -rf {shlex.quote(self._remote_sweep_dir)}",
                     check=False,
                 )
-                logger.info(
-                    f"Cleaned remote sweep dir {self._remote_sweep_dir} on "
-                    f"{self.host}"
-                )
+                logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
         elif any_failed:
@@ -1090,10 +1043,7 @@ class SSHSlurmComputeSource(ComputeSource):
             f"rsync -a {shlex.quote(self._remote_sweep_dir + '/')} "
             f"{shlex.quote(archive_target + '/')}"
         )
-        logger.info(
-            f"Archiving sweep on {self.host}: "
-            f"{self._remote_sweep_dir} -> {archive_target}"
-        )
+        logger.info(f"Archiving sweep on {self.host}: {self._remote_sweep_dir} -> {archive_target}")
         result = await self._ssh_run(cmd, check=False)
         if (result.returncode or 0) != 0:
             stderr = (result.stderr or "").strip() or "no stderr"
@@ -1115,8 +1065,8 @@ class SSHSlurmComputeSource(ComputeSource):
         logger.info(f"Archive sentinel written: {sentinel_path}")
 
     # -------------------------------------------------------------- health
-    async def health_check(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
+    async def health_check(self) -> dict[str, Any]:
+        info: dict[str, Any] = {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "host": self.host,
@@ -1159,10 +1109,7 @@ class SSHSlurmComputeSource(ComputeSource):
             self._conn = None
 
     def __str__(self) -> str:
-        return (
-            f"SSHSlurm:{self.name} ({self.host}): "
-            f"{self.current_job_count} active jobs"
-        )
+        return f"SSHSlurm:{self.name} ({self.host}): {self.current_job_count} active jobs"
 
 
 # ---------------------------------------------------------- config factory
@@ -1171,13 +1118,13 @@ class SSHSlurmComputeSource(ComputeSource):
 def build_ssh_slurm_source(
     *,
     name: str,
-    remote_cfg: Optional[Dict[str, Any]] = None,
-    distributed_cfg: Optional[Dict[str, Any]] = None,
+    remote_cfg: dict[str, Any] | None = None,
+    distributed_cfg: dict[str, Any] | None = None,
     project_dir: str,
     script_path: str,
-    default_spec: Optional[ResourceSpec] = None,
-    conda_env_override: Optional[str] = None,
-) -> "SSHSlurmComputeSource":
+    default_spec: ResourceSpec | None = None,
+    conda_env_override: str | None = None,
+) -> SSHSlurmComputeSource:
     """Build an :class:`SSHSlurmComputeSource` from local ``.hsm/config.yaml``.
 
     Resolves precedence per field:
@@ -1222,15 +1169,11 @@ def build_ssh_slurm_source(
                 f"level (sibling of `spec:`), not inside it — ignoring the "
                 f"misplaced entry. Move it up one level."
             )
-            remote_spec_dict = {
-                k: v for k, v in remote_spec_dict.items() if k != "speed_factors"
-            }
+            remote_spec_dict = {k: v for k, v in remote_spec_dict.items() if k != "speed_factors"}
         try:
             per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
         except (TypeError, ValueError) as e:
-            logger.warning(
-                f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring."
-            )
+            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
             per_remote_spec = None
     else:
         per_remote_spec = None
@@ -1243,21 +1186,15 @@ def build_ssh_slurm_source(
         if conda_env_override is not None
         else remote_cfg.get("conda_env", distributed_cfg.get("conda_env"))
     )
-    python_path = remote_cfg.get(
-        "python_path", distributed_cfg.get("python_path", "python")
-    )
+    python_path = remote_cfg.get("python_path", distributed_cfg.get("python_path", "python"))
 
-    remote_root = remote_cfg.get(
-        "remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs")
-    )
+    remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
     # Storage-tier awareness: workdir overrides remote_root for the active
     # run; archive_dir is the durable target on completion. Both opt-in.
     workdir = remote_cfg.get("workdir")
     archive_dir = remote_cfg.get("archive_dir")
     archive_on = str(remote_cfg.get("archive_on", "completed"))
-    rsync_excludes = remote_cfg.get(
-        "rsync_excludes", distributed_cfg.get("rsync_excludes")
-    )
+    rsync_excludes = remote_cfg.get("rsync_excludes", distributed_cfg.get("rsync_excludes"))
     keep_remote_on_success = bool(
         remote_cfg.get(
             "keep_remote_on_success",
@@ -1266,7 +1203,7 @@ def build_ssh_slurm_source(
     )
 
     qos_whitelist_raw = remote_cfg.get("qos_whitelist")
-    qos_whitelist: Optional[frozenset[str]]
+    qos_whitelist: frozenset[str] | None
     if qos_whitelist_raw and isinstance(qos_whitelist_raw, (list, tuple, set)):
         qos_whitelist = frozenset(str(q) for q in qos_whitelist_raw)
     else:

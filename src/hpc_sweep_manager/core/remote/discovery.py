@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 try:
     import asyncssh
@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - asyncssh is a hard runtime dep
 logger = logging.getLogger(__name__)
 
 
-def expand_ssh_key_path(ssh_key_path: str) -> Optional[str]:
+def expand_ssh_key_path(ssh_key_path: str) -> str | None:
     """Expand ``~`` / env vars in an ssh key path; return absolute or None if missing."""
     if not ssh_key_path:
         return None
@@ -36,9 +36,7 @@ def expand_ssh_key_path(ssh_key_path: str) -> Optional[str]:
     return None
 
 
-async def create_ssh_connection(
-    host: str, ssh_key: Optional[str] = None, ssh_port: Optional[int] = None
-):
+async def create_ssh_connection(host: str, ssh_key: str | None = None, ssh_port: int | None = None):
     """Open an SSH connection, reusing the user's ``~/.ssh/config`` when present.
 
     ``host`` may be a plain hostname, a ``user@host`` string, or an alias
@@ -51,7 +49,7 @@ async def create_ssh_connection(
     """
     logger.debug(f"Attempting SSH connection to {host}")
 
-    connection_kwargs: Dict[str, Any] = {"host": host}
+    connection_kwargs: dict[str, Any] = {"host": host}
 
     # Hand asyncssh the user's ssh config so aliases resolve like `ssh <alias>`.
     ssh_config_path = os.path.expanduser("~/.ssh/config")

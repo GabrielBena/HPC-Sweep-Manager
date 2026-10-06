@@ -10,20 +10,16 @@ No real cluster, no real ssh, no real subprocess.
 
 from __future__ import annotations
 
-import asyncio
 import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
-from hpc_sweep_manager.core.remote import ssh_slurm_compute_source as mod
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
     SSHSlurmComputeSource,
     build_ssh_slurm_source,
 )
-
 
 # ---------------------------------------------------------------------- fakes
 
@@ -34,7 +30,7 @@ class _Result:
         returncode: int = 0,
         stdout: str = "",
         stderr: str = "",
-        exit_status: Optional[int] = None,
+        exit_status: int | None = None,
     ):
         self.returncode = returncode
         self.stdout = stdout
@@ -55,11 +51,11 @@ class FakeConn:
 
     def __init__(
         self,
-        responder: Optional[List[tuple[str, _Result]]] = None,
+        responder: list[tuple[str, _Result]] | None = None,
         home: str = "/u/home/gbena",
-        user: Optional[str] = None,
+        user: str | None = None,
     ):
-        self.run_calls: List[Dict[str, Any]] = []
+        self.run_calls: list[dict[str, Any]] = []
         self.closed = False
         self._responder = responder or []
         # Used to simulate remote-shell expansion of `echo <path>` (the seam
@@ -72,7 +68,7 @@ class FakeConn:
         self._responder.append((substring, result))
 
     def _expand_echo(self, cmd: str) -> str:
-        arg = cmd[len("echo "):].strip().strip('"').strip("'")
+        arg = cmd[len("echo ") :].strip().strip('"').strip("'")
         if arg.startswith("~"):
             arg = self._home + arg[1:]
         arg = arg.replace("${HOME}", self._home).replace("$HOME", self._home)
@@ -83,7 +79,7 @@ class FakeConn:
         self,
         cmd: str,
         *,
-        input: Optional[str] = None,
+        input: str | None = None,
         check: bool = False,
     ) -> _Result:
         self.run_calls.append({"cmd": cmd, "input": input, "check": check})
@@ -115,18 +111,18 @@ class _StubSrc(SSHSlurmComputeSource):
     ):
         super().__init__(*args, **kwargs)
         self._fake_conn = fake_conn
-        self._rsync_calls: List[List[str]] = []
+        self._rsync_calls: list[list[str]] = []
         self._rsync_rc = rsync_rc
 
     async def _open_connection(self):
         return self._fake_conn
 
-    async def _run_rsync(self, cmd: List[str]) -> int:
+    async def _run_rsync(self, cmd: list[str]) -> int:
         self._rsync_calls.append(cmd)
         return self._rsync_rc
 
 
-def _setup_ok_responder(home: str = "/u/home/gbena") -> List[tuple[str, _Result]]:
+def _setup_ok_responder(home: str = "/u/home/gbena") -> list[tuple[str, _Result]]:
     """Default responder for a successful setup() lifecycle.
 
     Path expansion (`echo <path>`) is handled generically by FakeConn now —
@@ -161,10 +157,7 @@ class TestSetup:
         # Tilde expansion happened — remote paths are absolute.
         project_name = tmp_path.name
         assert src._remote_code_dir == f"/home/gbena/.hsm/runs/{project_name}/code"
-        assert (
-            src._remote_sweep_dir
-            == f"/home/gbena/.hsm/runs/{project_name}/sweeps/sweep_x"
-        )
+        assert src._remote_sweep_dir == f"/home/gbena/.hsm/runs/{project_name}/sweeps/sweep_x"
         # mkdir issued once with all four dirs.
         mkdir_calls = [c for c in conn.run_calls if c["cmd"].startswith("mkdir -p")]
         assert len(mkdir_calls) == 1
@@ -231,9 +224,7 @@ class TestSubmit:
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
-        jid = await src.submit_job(
-            params={"seed": 0}, job_name="task_0", sweep_id="sweep_1"
-        )
+        jid = await src.submit_job(params={"seed": 0}, job_name="task_0", sweep_id="sweep_1")
         assert jid == "12345"
         # The rendered script was cat-piped to the remote scripts dir.
         cat_calls = [c for c in conn.run_calls if c["cmd"].startswith("cat > ")]
@@ -264,9 +255,7 @@ class TestSubmit:
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         with pytest.raises(RuntimeError, match="sbatch failed"):
-            await src.submit_job(
-                params={"seed": 0}, job_name="task_0", sweep_id="sweep_1"
-            )
+            await src.submit_job(params={"seed": 0}, job_name="task_0", sweep_id="sweep_1")
 
     @pytest.mark.asyncio
     async def test_submit_array_writes_params_and_returns_id(self, tmp_path):
@@ -291,7 +280,8 @@ class TestSubmit:
         # parameter_combinations.json was written via cat-pipe to the
         # remote sweep dir.
         cat_params = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if c["cmd"].startswith("cat > ") and "parameter_combinations" in c["cmd"]
         ]
         assert len(cat_params) == 1
@@ -312,9 +302,7 @@ class TestSubmit:
             host="uzh",
             project_dir=str(tmp_path),
             script_path="train.py",
-            default_spec=ResourceSpec(
-                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
-            ),
+            default_spec=ResourceSpec(walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")),
             speed_factors={"a100": 1.0, "h200": 0.5},
             fake_conn=conn,
         )
@@ -331,7 +319,8 @@ class TestSubmit:
         # Two params files, one per type, with array-local `index` and
         # original `global_index` (union covers every task exactly once).
         cat_params = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if c["cmd"].startswith("cat > ") and "parameter_combinations_" in c["cmd"]
         ]
         assert len(cat_params) == 2
@@ -344,7 +333,8 @@ class TestSubmit:
 
         # Rendered scripts carry per-type --gres and SCALED walltime.
         cat_scripts = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if c["cmd"].startswith("cat > ") and c["cmd"].rstrip("'\"").endswith(".slurm")
         ]
         assert len(cat_scripts) == 2
@@ -381,9 +371,7 @@ class TestSubmit:
             host="uzh",
             project_dir=str(tmp_path),
             script_path="train.py",
-            default_spec=ResourceSpec(
-                walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")
-            ),
+            default_spec=ResourceSpec(walltime="10:00:00", gpus=1, gpu_type=("A100", "H200")),
             speed_factors={"a100": 1.0, "h200": 0.5},
             fake_conn=conn,
         )
@@ -414,21 +402,24 @@ class TestSubmit:
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         with pytest.raises(ValueError, match="array mode"):
-            await src.submit_batch(
-                params_list=[{"seed": 0}], sweep_id="sweep_1", mode="individual"
-            )
+            await src.submit_batch(params_list=[{"seed": 0}], sweep_id="sweep_1", mode="individual")
 
     @pytest.mark.asyncio
     async def test_submit_array_rejects_empty(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         with pytest.raises(ValueError, match="empty array"):
             await src.submit_batch(
-                params_list=[], sweep_id="sweep_1", mode="array",
+                params_list=[],
+                sweep_id="sweep_1",
+                mode="array",
             )
 
 
@@ -441,7 +432,10 @@ class TestStatus:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("squeue -j", _Result(0, stdout="RUNNING\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -453,7 +447,10 @@ class TestStatus:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("squeue -j", _Result(0, stdout="\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -467,7 +464,10 @@ class TestStatus:
         conn.add("squeue -j", _Result(0, stdout="\n"))
         conn.add("sacct", _Result(0, stdout="FAILED\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -479,7 +479,10 @@ class TestStatus:
         conn.add("squeue -j", _Result(0, stdout="\n"))
         conn.add("sacct", _Result(0, stdout="COMPLETED\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -492,7 +495,10 @@ class TestStatus:
         conn.add("squeue -j", _Result(0, stdout="\n"))
         conn.add("sacct", _Result(0, stdout=""))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -506,7 +512,10 @@ class TestStatus:
         conn.add("squeue -j", _Result(0, stdout="\n"))
         conn.add("sacct", _Result(0, stdout="RUNNING\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -517,7 +526,10 @@ class TestStatus:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 200\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -534,15 +546,16 @@ class TestStatus:
         # Two sbatch submissions, then one batched squeue response.
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         jid_a = await src.submit_job({"s": 0}, "task_0", "sweep_1")
         # Re-arm sbatch responder for the second submission.
-        conn._responder.append(
-            ("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
-        )
+        conn._responder.append(("sbatch", _Result(0, stdout="Submitted batch job 101\n")))
         jid_b = await src.submit_job({"s": 1}, "task_1", "sweep_1")
         assert {jid_a, jid_b} == {"100", "101"}
         # Now the batched squeue: 100 is still RUNNING, 101 has finished
@@ -554,9 +567,7 @@ class TestStatus:
         # Exactly one squeue call hit the wire — not two.
         # Use `startswith` to avoid matching setup's `command -v ... squeue ...`
         # pre-flight check, which contains the substring "squeue".
-        squeue_calls = [
-            c for c in conn.run_calls if c["cmd"].startswith("squeue ")
-        ]
+        squeue_calls = [c for c in conn.run_calls if c["cmd"].startswith("squeue ")]
         assert len(squeue_calls) == 1
         assert "100" in squeue_calls[0]["cmd"]
         assert "101" in squeue_calls[0]["cmd"]
@@ -580,7 +591,10 @@ class TestReservationWarning:
             ),
         )
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         with caplog.at_level(logging.WARNING):
@@ -595,7 +609,10 @@ class TestReservationWarning:
         # Default responder → scontrol returns empty → no warning.
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         with caplog.at_level(logging.WARNING):
@@ -610,7 +627,10 @@ class TestManifest:
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 5\n"))
         sweep_dir = tmp_path / "sweeps" / "outputs" / "sw1"
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/$USER/hsm-runs",
             archive_dir="/shares/$USER/arch",
             fake_conn=conn,
@@ -629,17 +649,24 @@ class TestManifest:
         assert m["resolved_archive_dir"] == "/shares/gbena/arch"
         # Remote manifest cat-piped too.
         remote_manifest = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if c["cmd"].startswith("cat > ") and ".hsm_manifest.json" in c["cmd"]
         ]
         assert len(remote_manifest) == 1
 
     def test_from_manifest_reconstructs_source(self, tmp_path):
         m = {
-            "name": "uzh", "host": "uzh", "ssh_key": "/k", "ssh_port": 2222,
-            "conda_env": "cpvr", "project_dir": str(tmp_path),
-            "remote_root": "~/.hsm/runs", "workdir": "/scratch/gbena/hsm-runs",
-            "archive_dir": "/shares/gbena/arch", "archive_on": "always",
+            "name": "uzh",
+            "host": "uzh",
+            "ssh_key": "/k",
+            "ssh_port": 2222,
+            "conda_env": "cpvr",
+            "project_dir": str(tmp_path),
+            "remote_root": "~/.hsm/runs",
+            "workdir": "/scratch/gbena/hsm-runs",
+            "archive_dir": "/shares/gbena/arch",
+            "archive_on": "always",
             "keep_remote_on_success": True,
         }
         src = SSHSlurmComputeSource.from_manifest(m)
@@ -653,7 +680,10 @@ class TestManifest:
     async def test_reattach_sets_paths_without_pushing(self, tmp_path):
         conn = FakeConn(responder=[])
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="",
             fake_conn=conn,
         )
         m = {
@@ -677,7 +707,10 @@ class TestContinuousPull:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -697,7 +730,10 @@ class TestContinuousPull:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -722,7 +758,10 @@ class TestCancel:
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 42\n"))
         conn.add("scancel", _Result(0))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -741,7 +780,10 @@ class TestCollectResults:
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
         conn.add("rm -rf", _Result(0))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -764,7 +806,10 @@ class TestCollectResults:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
@@ -780,7 +825,10 @@ class TestCollectResults:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             keep_remote_on_success=True,
             fake_conn=conn,
         )
@@ -812,18 +860,13 @@ class TestStorageTier:
         # /scratch is absolute → no tilde expansion happens, but the
         # layout uses /scratch instead of $HOME/.hsm/runs.
         project_name = tmp_path.name
-        assert (
-            src._remote_sweep_dir
-            == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
-        )
+        assert src._remote_sweep_dir == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
 
     @pytest.mark.asyncio
     async def test_workdir_user_var_expanded(self, tmp_path):
         # #1 fix: $USER in workdir must expand on the remote, not land as a
         # literal "$USER" directory in the rsync destination.
-        conn = FakeConn(
-            responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena"
-        )
+        conn = FakeConn(responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena")
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -834,10 +877,7 @@ class TestStorageTier:
         )
         await src.setup(tmp_path / "sweep", "sweep_w")
         project_name = tmp_path.name
-        assert (
-            src._remote_sweep_dir
-            == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
-        )
+        assert src._remote_sweep_dir == f"/scratch/gbena/hsm-runs/{project_name}/sweeps/sweep_w"
         # The rsync push destination is the expanded path (no literal $USER).
         push = src._rsync_calls[0]
         assert any("/scratch/gbena/hsm-runs" in a for a in push)
@@ -845,12 +885,13 @@ class TestStorageTier:
 
     @pytest.mark.asyncio
     async def test_archive_dir_user_var_expanded(self, tmp_path):
-        conn = FakeConn(
-            responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena"
-        )
+        conn = FakeConn(responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena")
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/$USER/hsm-runs",
             archive_dir="/shares/$USER/hsm-archive",
             archive_on="always",
@@ -863,7 +904,8 @@ class TestStorageTier:
         await src.collect_results()
         # The archive command targets the expanded path, never literal $USER.
         arch = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if "rsync -a" in c["cmd"] and "/shares/gbena/hsm-archive/sw1" in c["cmd"]
         ]
         assert len(arch) == 1
@@ -883,8 +925,7 @@ class TestStorageTier:
         await src.setup(tmp_path / "sweep", "sweep_w")
         project_name = tmp_path.name
         assert (
-            src._remote_sweep_dir
-            == f"/u/home/gbena/scratch/hsm-runs/{project_name}/sweeps/sweep_w"
+            src._remote_sweep_dir == f"/u/home/gbena/scratch/hsm-runs/{project_name}/sweeps/sweep_w"
         )
 
     @pytest.mark.asyncio
@@ -894,7 +935,10 @@ class TestStorageTier:
         # The archive cmd issues "mkdir -p <archive>/<id> && rsync ..." —
         # match the leading "mkdir -p" + the "rsync" parts of it.
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             archive_dir="/shares/payvand/hsm-archive",
             archive_on="completed",
@@ -906,14 +950,14 @@ class TestStorageTier:
         await src.collect_results()
         # Look for the archive command — it contains the archive_dir path.
         arch_calls = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if "rsync -a" in c["cmd"] and "/shares/payvand/hsm-archive/sw1" in c["cmd"]
         ]
         assert len(arch_calls) == 1
         # Sentinel was written.
         sentinel_calls = [
-            c for c in conn.run_calls
-            if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]
+            c for c in conn.run_calls if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]
         ]
         assert len(sentinel_calls) == 1
         assert "archived_at:" in sentinel_calls[0]["input"]
@@ -925,7 +969,10 @@ class TestStorageTier:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             archive_dir="/shares/payvand/hsm-archive",
             archive_on="completed",
@@ -936,8 +983,7 @@ class TestStorageTier:
         src.update_job_status(jid, "FAILED")
         await src.collect_results()
         arch_calls = [
-            c for c in conn.run_calls
-            if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
+            c for c in conn.run_calls if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
         ]
         assert arch_calls == []
 
@@ -946,7 +992,10 @@ class TestStorageTier:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             archive_dir="/shares/payvand/hsm-archive",
             archive_on="always",
@@ -957,14 +1006,12 @@ class TestStorageTier:
         src.update_job_status(jid, "FAILED")
         await src.collect_results()
         arch_calls = [
-            c for c in conn.run_calls
-            if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
+            c for c in conn.run_calls if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
         ]
         assert len(arch_calls) == 1
         # Sentinel records the failure.
         sentinel = [
-            c for c in conn.run_calls
-            if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]
+            c for c in conn.run_calls if c["cmd"].startswith("cat > ") and ".archived" in c["cmd"]
         ][0]
         assert "any_failed: True" in sentinel["input"]
 
@@ -973,7 +1020,10 @@ class TestStorageTier:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             archive_dir="/shares/payvand/hsm-archive",
             archive_on="never",
@@ -984,8 +1034,7 @@ class TestStorageTier:
         src.update_job_status(jid, "COMPLETED")
         await src.collect_results()
         arch_calls = [
-            c for c in conn.run_calls
-            if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
+            c for c in conn.run_calls if "rsync -a" in c["cmd"] and "/shares/payvand" in c["cmd"]
         ]
         assert arch_calls == []
 
@@ -994,7 +1043,10 @@ class TestStorageTier:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             # archive_dir omitted
             fake_conn=conn,
@@ -1004,8 +1056,7 @@ class TestStorageTier:
         src.update_job_status(jid, "COMPLETED")
         await src.collect_results()
         arch_calls = [
-            c for c in conn.run_calls
-            if c["cmd"].startswith("mkdir -p") and "rsync -a" in c["cmd"]
+            c for c in conn.run_calls if c["cmd"].startswith("mkdir -p") and "rsync -a" in c["cmd"]
         ]
         assert arch_calls == []
 
@@ -1015,7 +1066,10 @@ class TestStorageTier:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             workdir="/scratch/gbena/hsm-runs",
             archive_dir="/shares/payvand/hsm-archive",
             fake_conn=conn,
@@ -1044,7 +1098,10 @@ class TestStorageTier:
     def test_invalid_archive_on_raises(self, tmp_path):
         with pytest.raises(ValueError, match="archive_on"):
             SSHSlurmComputeSource(
-                name="x", host="x", project_dir=str(tmp_path), script_path="t.py",
+                name="x",
+                host="x",
+                project_dir=str(tmp_path),
+                script_path="t.py",
                 archive_on="sometimes",
             )
 
@@ -1057,7 +1114,10 @@ class TestQosWhitelist:
     async def test_disallowed_qos_raises(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             default_spec=ResourceSpec(walltime="1:00:00"),
             qos_whitelist=frozenset({"normal", "medium"}),
             fake_conn=conn,
@@ -1065,7 +1125,9 @@ class TestQosWhitelist:
         await src.setup(tmp_path / "sweep", "sweep_1")
         with pytest.raises(ValueError, match="qos="):
             await src.submit_job(
-                {"s": 0}, "task_0", "sweep_1",
+                {"s": 0},
+                "task_0",
+                "sweep_1",
                 spec=ResourceSpec(qos="lowprio"),
             )
 
@@ -1074,14 +1136,19 @@ class TestQosWhitelist:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
             default_spec=ResourceSpec(walltime="1:00:00"),
             qos_whitelist=frozenset({"normal", "medium"}),
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         jid = await src.submit_job(
-            {"s": 0}, "task_0", "sweep_1",
+            {"s": 0},
+            "task_0",
+            "sweep_1",
             spec=ResourceSpec(qos="normal"),
         )
         assert jid == "1"
@@ -1225,7 +1292,8 @@ class TestResumableSubmit:
 
     def _rendered(self, conn):
         scripts = [
-            c for c in conn.run_calls
+            c
+            for c in conn.run_calls
             if c["cmd"].startswith("cat > ") and c["cmd"].rstrip("'\"").endswith(".slurm")
         ]
         return "\n".join(c["input"] for c in scripts)
@@ -1286,22 +1354,32 @@ class TestResumableSubmit:
         conn0.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
         s0 = await self._make_src(tmp_path / "a", conn0)
         await s0.submit_batch(
-            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
-            job_name_prefix="sw", resumable=self._ctx(0),
+            params_list=[{"seed": 0}],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            resumable=self._ctx(0),
         )
         conn1 = FakeConn(responder=_setup_ok_responder())
         conn1.add("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
         s1 = await self._make_src(tmp_path / "b", conn1)
         await s1.submit_batch(
-            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
-            job_name_prefix="sw", dependency="afterany:100", resumable=self._ctx(1),
+            params_list=[{"seed": 0}],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            dependency="afterany:100",
+            resumable=self._ctx(1),
         )
+
         # The params file (hydra overrides) is byte-identical across chunks.
         def _params(conn):
             return [
-                c["input"] for c in conn.run_calls
+                c["input"]
+                for c in conn.run_calls
                 if c["cmd"].startswith("cat > ") and "parameter_combinations" in c["cmd"]
             ][0]
+
         assert _params(conn0) == _params(conn1)
 
     @pytest.mark.asyncio
@@ -1309,9 +1387,7 @@ class TestResumableSubmit:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 222\n"))
-        src = await self._make_src(
-            tmp_path, conn, gpus=1, gpu_type=("A100", "H200")
-        )
+        src = await self._make_src(tmp_path, conn, gpus=1, gpu_type=("A100", "H200"))
         src.speed_factors = {"a100": 1.0, "h200": 0.5}
         ids = await src.submit_batch(
             params_list=[{"seed": i} for i in range(4)],
@@ -1338,7 +1414,9 @@ class TestResumableSubmit:
         src = await self._make_src(tmp_path, conn)
         with pytest.raises(ValueError, match="array mode"):
             await src.submit_batch(
-                params_list=[{"seed": 0}], sweep_id="sw", mode="individual",
+                params_list=[{"seed": 0}],
+                sweep_id="sw",
+                mode="individual",
                 resumable=self._ctx(0),
             )
 
@@ -1350,14 +1428,21 @@ class TestResumableSubmit:
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
         src = await self._make_src(tmp_path, conn)
         await src.submit_batch(
-            params_list=[{"seed": 0}], sweep_id="sw", mode="array",
-            job_name_prefix="sw", resumable=self._ctx(0),
+            params_list=[{"seed": 0}],
+            sweep_id="sw",
+            mode="array",
+            job_name_prefix="sw",
+            resumable=self._ctx(0),
         )
         assert not (src.sweep_dir / ".hsm_manifest.json").exists()
         # ...but persist_chain_manifest writes it (with the chain block).
         await src.persist_chain_manifest(
             resumable=self._ctx(0).config.to_manifest(),
-            chain={"state": {"chunk_index": 0}, "chunks": [{"index": 0, "job_ids": ["100"]}], "num_tasks": 1},
+            chain={
+                "state": {"chunk_index": 0},
+                "chunks": [{"index": 0, "job_ids": ["100"]}],
+                "num_tasks": 1,
+            },
             job_ids=["100"],
             num_tasks=1,
         )
@@ -1373,20 +1458,18 @@ class TestChunkProgress:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("find", _Result(0, stdout=stdout))
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path),
-            script_path="train.py", fake_conn=conn,
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            fake_conn=conn,
         )
         await src.setup(tmp_path / "sw", "sw")
         return src
 
     @pytest.mark.asyncio
     async def test_parses_done_indices_and_mtime(self, tmp_path):
-        out = (
-            "/r/sw/tasks/task_1/.hsm_done\n"
-            "/r/sw/tasks/task_3/.hsm_done\n"
-            "HSM_SEP\n"
-            "1700000100.2\n"
-        )
+        out = "/r/sw/tasks/task_1/.hsm_done\n/r/sw/tasks/task_3/.hsm_done\nHSM_SEP\n1700000100.2\n"
         src = await self._src(tmp_path, out)
         prog = await src.chunk_progress(3, done_sentinel=".hsm_done", checkpoint_subdir="resume")
         assert prog.done_indices == frozenset({1, 3})
@@ -1431,20 +1514,32 @@ class TestChainManifestRoundTrip:
 
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
-            name="uzh", host="uzh", project_dir=str(tmp_path), script_path="train.py",
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
             default_spec=ResourceSpec(
-                walltime="48:00:00", gpus=1, gpu_type="V100",
-                qos="normal", partition="lowprio",
+                walltime="48:00:00",
+                gpus=1,
+                gpu_type="V100",
+                qos="normal",
+                partition="lowprio",
             ),
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sweeps" / "outputs" / "sw", "sw")
         await src.persist_chain_manifest(
             resumable=ResumableConfig(enabled=True, chunk_walltime="23:00:00").to_manifest(),
-            chain={"state": {"chunk_index": 1}, "chunks": [{"index": 0, "job_ids": ["100"]}],
-                   "num_tasks": 2, "last_done_count": 1, "last_checkpoint_mtime": 9.0,
-                   "wandb_group": "grp"},
-            job_ids=["100"], num_tasks=2,
+            chain={
+                "state": {"chunk_index": 1},
+                "chunks": [{"index": 0, "job_ids": ["100"]}],
+                "num_tasks": 2,
+                "last_done_count": 1,
+                "last_checkpoint_mtime": 9.0,
+                "wandb_group": "grp",
+            },
+            job_ids=["100"],
+            num_tasks=2,
         )
         manifest = json.loads((src.sweep_dir / ".hsm_manifest.json").read_text())
         assert manifest["spec"]["gpu_type"] == "V100"

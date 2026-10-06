@@ -15,13 +15,12 @@ show users what they have; users manually re-submit if they need to
 retry tasks.
 """
 
-import asyncio
-from datetime import datetime
 import json
 import logging
-from pathlib import Path
 import re
-from typing import Any, Dict, List, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -91,7 +90,7 @@ class SweepCompletionAnalyzer:
 
     def analyze_from_task_directories(
         self, overwrite_source_mapping: bool = False, verify_running: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze completion status by directly scanning task directories.
 
         This method works independently of source_mapping.yaml and is ideal for
@@ -250,7 +249,7 @@ class SweepCompletionAnalyzer:
 
     def analyze_completion_status(
         self, overwrite_source_mapping: bool = False, verify_running: bool = True
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze the completion status of the sweep.
 
         Uses source_mapping.yaml if available, otherwise falls back to
@@ -406,7 +405,7 @@ class SweepCompletionAnalyzer:
             "status_fixes_made": status_fixes_count > 0,
         }
 
-    def _get_combinations_for_tasks(self, task_ids: List[str]) -> List[Dict[str, Any]]:
+    def _get_combinations_for_tasks(self, task_ids: list[str]) -> list[dict[str, Any]]:
         """Get parameter combinations for given task IDs."""
         combinations = []
 
@@ -423,7 +422,7 @@ class SweepCompletionAnalyzer:
 
         return combinations
 
-    def _verify_task_completion(self, completed_task_ids: List[str]) -> List[Dict[str, Any]]:
+    def _verify_task_completion(self, completed_task_ids: list[str]) -> list[dict[str, Any]]:
         """Verify that completed tasks actually have valid results."""
         verified_combinations = []
         tasks_dir = self.sweep_dir / "tasks"
@@ -457,7 +456,7 @@ class SweepCompletionAnalyzer:
         return verified_combinations
 
     def _update_source_mapping_from_directories(
-        self, task_statuses: Dict[str, str], overwrite: bool = False
+        self, task_statuses: dict[str, str], overwrite: bool = False
     ):
         """Update source_mapping.yaml with actual task statuses from directories.
 
@@ -514,7 +513,7 @@ class SweepCompletionAnalyzer:
         except Exception as e:
             logger.warning(f"Could not update source mapping from directories: {e}")
 
-    def _params_to_key(self, params: Dict[str, Any]) -> str:
+    def _params_to_key(self, params: dict[str, Any]) -> str:
         """Convert parameters to a hashable key for comparison."""
         # Sort keys for consistent comparison
         items = []
@@ -679,7 +678,8 @@ class SweepCompletionAnalyzer:
         # If we got here, we couldn't verify the task is running
         return False
 
-def find_incomplete_sweeps(sweeps_root: Path = None) -> List[Dict[str, Any]]:
+
+def find_incomplete_sweeps(sweeps_root: Path = None) -> list[dict[str, Any]]:
     """Find all incomplete sweeps in the outputs directory."""
     if sweeps_root is None:
         sweeps_root = Path("sweeps/outputs")

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -61,7 +61,7 @@ class MockChild(ComputeSource):
     async def cleanup(self) -> None:
         self.cleanup_called = True
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"status": self._health, "timestamp": datetime.now().isoformat()}
 
 
@@ -71,9 +71,7 @@ class TestConstruction:
         assert src.source_type == "distributed"
 
     def test_capacity_aggregates_children(self):
-        src = DistributedComputeSource(
-            child_sources=[MockChild("a", 3), MockChild("b", 5)]
-        )
+        src = DistributedComputeSource(child_sources=[MockChild("a", 3), MockChild("b", 5)])
         assert src.max_parallel_jobs == 8
 
     def test_no_children_defaults_to_one_slot(self):
@@ -163,9 +161,7 @@ class TestWaitAndHealth:
         assert result["total_sources"] == 2
 
     async def test_health_check_all_unhealthy(self):
-        src = DistributedComputeSource(
-            child_sources=[MockChild("a", health="unhealthy")]
-        )
+        src = DistributedComputeSource(child_sources=[MockChild("a", health="unhealthy")])
         result = await src.health_check()
         assert result["status"] == "unhealthy"
 

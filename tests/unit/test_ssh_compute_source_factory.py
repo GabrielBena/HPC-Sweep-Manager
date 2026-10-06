@@ -81,7 +81,7 @@ class TestBuildSshSource:
             "ssh_key": "~/.ssh/foo",
             "ssh_port": 2222,
             "max_parallel_jobs": 8,
-            "conda_env": "lab-cpu",         # overrides global
+            "conda_env": "lab-cpu",  # overrides global
             "remote_root": "~/.hsm/anahita",  # overrides global
             "gpus": [0, 2],
             "keep_remote_on_success": True,
@@ -151,7 +151,6 @@ class TestBuildSshSource:
     def test_rsync_excludes_extends_defaults(self):
         # Per-remote excludes are layered ON TOP of DEFAULT_RSYNC_EXCLUDES, not
         # a replacement — otherwise adding `outputs/` would silently push `.git`.
-        from hpc_sweep_manager.core.remote.push_exec import DEFAULT_RSYNC_EXCLUDES
 
         src = build_ssh_source(
             name="anahita",
@@ -166,7 +165,5 @@ class TestBuildSshSource:
 
     def test_default_spec_passed_through(self):
         spec = ResourceSpec(gpus=2, modules=("foo",))
-        src = build_ssh_source(
-            name="anahita", default_spec=spec, **self.DEFAULTS
-        )
+        src = build_ssh_source(name="anahita", default_spec=spec, **self.DEFAULTS)
         assert src.default_spec is spec

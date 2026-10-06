@@ -15,13 +15,14 @@ uses, so a task directory looks the same regardless of backend.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import logging
 import os
-from pathlib import Path
 import re
 import signal
-from typing import Any, Dict, List, Optional, Sequence, Union
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
@@ -31,7 +32,7 @@ from ..remote.push_exec import resolve_run_prefix
 logger = logging.getLogger(__name__)
 
 
-async def _detect_gpus() -> List[int]:
+async def _detect_gpus() -> list[int]:
     """Return GPU indices reported by ``nvidia-smi -L``, or [] if unavailable."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -45,7 +46,7 @@ async def _detect_gpus() -> List[int]:
     stdout, _ = await proc.communicate()
     if proc.returncode != 0:
         return []
-    indices: List[int] = []
+    indices: list[int] = []
     for line in stdout.decode("utf-8", errors="replace").splitlines():
         m = re.match(r"GPU\s+(\d+):", line)
         if m:
@@ -55,7 +56,7 @@ async def _detect_gpus() -> List[int]:
 
 def compute_gpu_slots(
     gpu_indices: Sequence[int], gpus_per_job: int, max_parallel_jobs: int
-) -> tuple[List[List[int]], int, bool]:
+) -> tuple[list[list[int]], int, bool]:
     """Partition a GPU allowlist into per-job slots (pure: no detection, no I/O).
 
     Returns ``(gpu_slots, slot_count, gpu_mode)``. ``gpu_mode`` is True only
@@ -83,9 +84,9 @@ class LocalComputeSource(ComputeSource):
         python_path: str = "python",
         script_path: str = "",
         project_dir: str = ".",
-        default_spec: Optional[ResourceSpec] = None,
-        visible_gpus: Union[None, int, Sequence[int]] = None,
-        conda_env: Optional[str] = None,
+        default_spec: ResourceSpec | None = None,
+        visible_gpus: None | int | Sequence[int] = None,
+        conda_env: str | None = None,
     ):
         """Build a local slot-queue compute source.
 
@@ -118,18 +119,18 @@ class LocalComputeSource(ComputeSource):
         self.project_dir = project_dir
         self.default_spec = default_spec or ResourceSpec()
         self._visible_gpus = visible_gpus
-        self.sweep_dir: Optional[Path] = None
-        self.sweep_id: Optional[str] = None
+        self.sweep_dir: Path | None = None
+        self.sweep_id: str | None = None
         # GPU bookkeeping (populated in setup)
-        self._gpu_indices: List[int] = []
+        self._gpu_indices: list[int] = []
         # Each slot is either a list of GPU indices to expose, or None for CPU.
-        self._slot_queue: Optional[asyncio.Queue] = None
+        self._slot_queue: asyncio.Queue | None = None
         self._slot_count: int = max_parallel_jobs
         # Job bookkeeping
-        self._processes: Dict[str, asyncio.subprocess.Process] = {}
-        self._monitors: Dict[str, asyncio.Task] = {}
+        self._processes: dict[str, asyncio.subprocess.Process] = {}
+        self._monitors: dict[str, asyncio.Task] = {}
         self._job_counter: int = 0
-        self._counter_lock: Optional[asyncio.Lock] = None
+        self._counter_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------ setup
 
@@ -194,7 +195,7 @@ class LocalComputeSource(ComputeSource):
         self.stats.last_health_check = datetime.now()
         return True
 
-    async def plan_layout(self) -> Dict[str, Any]:
+    async def plan_layout(self) -> dict[str, Any]:
         """Preview the GPU/slot layout with no side effects (no dirs, no queue).
 
         Mirrors what :meth:`setup` computes — detects GPUs, applies the
@@ -211,9 +212,7 @@ class LocalComputeSource(ComputeSource):
         else:
             visible = detected
         gpus_per_job = self.default_spec.gpus or 0
-        _, slot_count, gpu_mode = compute_gpu_slots(
-            visible, gpus_per_job, self.max_parallel_jobs
-        )
+        _, slot_count, gpu_mode = compute_gpu_slots(visible, gpus_per_job, self.max_parallel_jobs)
         return {
             "detected_gpus": detected,
             "visible_gpus": visible,
@@ -240,16 +239,14 @@ class LocalComputeSource(ComputeSource):
 
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         if self.sweep_dir is None or self._slot_queue is None:
-            raise RuntimeError(
-                f"LocalComputeSource {self.name!r} not set up; call setup() first"
-            )
+            raise RuntimeError(f"LocalComputeSource {self.name!r} not set up; call setup() first")
         # Local execution doesn't enforce walltime / memory / partition. The
         # spec contributes modules + pre_script + (implicitly) gpus via the
         # slot pool wired in setup().
@@ -388,14 +385,14 @@ class LocalComputeSource(ComputeSource):
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:  # pragma: no cover
+            except TimeoutError:  # pragma: no cover
                 logger.warning(f"Local job {job_id} did not exit after SIGKILL")
         return True
 
@@ -403,7 +400,7 @@ class LocalComputeSource(ComputeSource):
         self,
         poll_interval: float = 5.0,
         on_progress=None,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Wait by directly awaiting the monitor tasks of all active jobs.
 
         Overrides the base class's polling loop because we have a stronger
@@ -433,14 +430,14 @@ class LocalComputeSource(ComputeSource):
         return {jid: info.status for jid, info in self.completed_jobs.items()}
 
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         # Local jobs write outputs into self.sweep_dir/tasks/* directly.
         # (defer_cleanup is a resumable-chain no-op here — nothing to tear down.)
         return True
 
-    async def health_check(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
+    async def health_check(self) -> dict[str, Any]:
+        info: dict[str, Any] = {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "active_jobs": len(self.active_jobs),

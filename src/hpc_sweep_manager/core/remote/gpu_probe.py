@@ -9,9 +9,8 @@ connection opened through :func:`create_ssh_connection`, so it honors
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
-from typing import List, Optional
+from dataclasses import dataclass
 
 from .discovery import create_ssh_connection
 
@@ -21,9 +20,7 @@ logger = logging.getLogger(__name__)
 # parser can't drift apart.
 _QUERY_FIELDS = ("index", "name", "memory.used", "memory.total", "utilization.gpu")
 NVIDIA_SMI_QUERY = (
-    "nvidia-smi --query-gpu="
-    + ",".join(_QUERY_FIELDS)
-    + " --format=csv,noheader,nounits"
+    "nvidia-smi --query-gpu=" + ",".join(_QUERY_FIELDS) + " --format=csv,noheader,nounits"
 )
 
 # A GPU counts as "free" when it's essentially idle and nearly empty.
@@ -52,14 +49,14 @@ class GpuInfo:
         return self.mem_total_mb / 1024.0
 
 
-def parse_nvidia_smi_csv(text: str) -> List[GpuInfo]:
+def parse_nvidia_smi_csv(text: str) -> list[GpuInfo]:
     """Parse ``nvidia-smi --query-gpu=...,--format=csv,noheader,nounits`` output.
 
     Each non-empty line is ``index, name, mem_used, mem_total, util``. Lines
     that don't parse (unexpected column count / non-numeric) are skipped with a
     debug log rather than raising — a half-readable probe still beats none.
     """
-    gpus: List[GpuInfo] = []
+    gpus: list[GpuInfo] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -85,8 +82,8 @@ def parse_nvidia_smi_csv(text: str) -> List[GpuInfo]:
 
 
 async def probe_gpus(
-    host: str, ssh_key: Optional[str] = None, ssh_port: Optional[int] = None
-) -> List[GpuInfo]:
+    host: str, ssh_key: str | None = None, ssh_port: int | None = None
+) -> list[GpuInfo]:
     """Connect to ``host`` and return its GPUs.
 
     Returns an empty list if the box has no NVIDIA GPUs / no ``nvidia-smi``

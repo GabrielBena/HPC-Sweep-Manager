@@ -1,14 +1,14 @@
 """Distributed job manager for multi-source job execution."""
 
 import asyncio
+import logging
+import signal
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import logging
 from pathlib import Path
-import signal
-import sys
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..remote.ssh_compute_source import SSHComputeSource
@@ -71,15 +71,15 @@ class DistributedJobManager:
         self.show_progress = show_progress
 
         # Compute sources
-        self.sources: List[ComputeSource] = []
-        self.source_by_name: Dict[str, ComputeSource] = {}
+        self.sources: list[ComputeSource] = []
+        self.source_by_name: dict[str, ComputeSource] = {}
 
         # Job tracking
         self.job_queue = asyncio.PriorityQueue()
-        self.all_jobs: Dict[str, JobInfo] = {}  # job_id -> job_info
-        self.job_to_source: Dict[str, str] = {}  # job_id -> source_name
-        self.task_to_source: Dict[str, str] = {}  # task_name -> source_name
-        self.failed_jobs: Dict[str, int] = {}  # job_id -> retry_count
+        self.all_jobs: dict[str, JobInfo] = {}  # job_id -> job_info
+        self.job_to_source: dict[str, str] = {}  # job_id -> source_name
+        self.task_to_source: dict[str, str] = {}  # task_name -> source_name
+        self.failed_jobs: dict[str, int] = {}  # job_id -> retry_count
 
         # Execution state
         self.total_jobs_planned = 0
@@ -182,7 +182,7 @@ class DistributedJobManager:
                     asyncio.wait_for(self._async_cleanup_on_signal(), timeout=25.0)
                 )
                 logger.info("Signal cleanup completed successfully")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Signal cleanup timed out after 25 seconds")
             except Exception as e:
                 logger.error(f"Error during async signal cleanup: {e}")
@@ -221,7 +221,7 @@ class DistributedJobManager:
             try:
                 await asyncio.wait_for(self.cleanup(), timeout=10.0)
                 logger.info("Compute source cleanup completed")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Compute source cleanup timed out")
             except Exception as e:
                 logger.warning(f"Compute source cleanup failed: {e}")
@@ -316,10 +316,10 @@ class DistributedJobManager:
 
     async def submit_distributed_sweep(
         self,
-        param_combinations: List[Dict[str, Any]],
+        param_combinations: list[dict[str, Any]],
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-    ) -> List[str]:
+        wandb_group: str | None = None,
+    ) -> list[str]:
         """Submit a complete sweep for distributed execution."""
         self.total_jobs_planned = len(param_combinations)
         self._running = True
@@ -443,7 +443,7 @@ class DistributedJobManager:
                             priority,
                             (job_info, sweep_id, wandb_group, task_name),
                         ) = await asyncio.wait_for(self.job_queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
 
                     # Find available compute source
@@ -520,7 +520,7 @@ class DistributedJobManager:
         finally:
             logger.debug("Job distribution task completed")
 
-    async def _select_compute_source(self) -> Optional[ComputeSource]:
+    async def _select_compute_source(self) -> ComputeSource | None:
         """Select an available compute source based on the configured strategy."""
         available_sources = [
             s for s in self.sources if s.is_available and s.name not in self.disabled_sources
@@ -742,7 +742,7 @@ class DistributedJobManager:
                 except asyncio.CancelledError:
                     pass
 
-    async def cancel_all_jobs(self) -> Dict[str, int]:
+    async def cancel_all_jobs(self) -> dict[str, int]:
         """Cancel all running jobs across all sources."""
         self._cancelled = True
         self._running = False
@@ -811,7 +811,7 @@ class DistributedJobManager:
 
         logger.debug("Distributed job manager cleanup completed")
 
-    def get_distributed_stats(self) -> Dict[str, Any]:
+    def get_distributed_stats(self) -> dict[str, Any]:
         """Get comprehensive statistics for the distributed sweep."""
         source_stats = {}
         for source in self.sources:
@@ -1060,8 +1060,8 @@ class DistributedJobManager:
                                 )
 
                                 if should_overwrite:
-                                    from datetime import datetime
                                     import shutil
+                                    from datetime import datetime
 
                                     # Create backup of existing directory
                                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

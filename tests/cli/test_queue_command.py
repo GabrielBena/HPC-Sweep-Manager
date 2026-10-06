@@ -9,7 +9,6 @@ against a FakeConn via a monkeypatched ``create_ssh_connection``.
 from __future__ import annotations
 
 import io
-from typing import List, Optional
 
 import click
 import pytest
@@ -40,14 +39,27 @@ def _console_buf() -> tuple[Console, io.StringIO]:
     return Console(file=buf, width=200, no_color=True), buf
 
 
-def _job(job_id: str, state: str = "PENDING", gpu_count: int = 1,
-         gpu_type: Optional[str] = None, task_count: int = 1,
-         reason: str = "(Priority)") -> QueueJob:
+def _job(
+    job_id: str,
+    state: str = "PENDING",
+    gpu_count: int = 1,
+    gpu_type: str | None = None,
+    task_count: int = 1,
+    reason: str = "(Priority)",
+) -> QueueJob:
     return QueueJob(
-        job_id=job_id, name=f"name_{job_id}", user="gbena", state=state,
-        reason=reason, partition="standard", tres_per_node="",
-        expected_start="N/A", priority=0, gpu_count=gpu_count,
-        gpu_type=gpu_type, task_count=task_count,
+        job_id=job_id,
+        name=f"name_{job_id}",
+        user="gbena",
+        state=state,
+        reason=reason,
+        partition="standard",
+        tres_per_node="",
+        expected_start="N/A",
+        priority=0,
+        gpu_count=gpu_count,
+        gpu_type=gpu_type,
+        task_count=task_count,
     )
 
 
@@ -66,8 +78,16 @@ class TestResolveQueueTarget:
         assert target == {"alias": "uzh", "host": "uzh", "ssh_key": None, "ssh_port": None}
 
     def test_explicit_alias_registered_resolves_fields(self, monkeypatch):
-        cfg = _config({"uzh": {"backend": "slurm", "host": "cluster.example.ch",
-                               "ssh_key": "/k", "ssh_port": 2222}})
+        cfg = _config(
+            {
+                "uzh": {
+                    "backend": "slurm",
+                    "host": "cluster.example.ch",
+                    "ssh_key": "/k",
+                    "ssh_port": 2222,
+                }
+            }
+        )
         monkeypatch.setattr(queue_cli.HSMConfig, "load", classmethod(lambda cls, *a, **k: cfg))
         console, _ = _console_buf()
         target = _resolve_queue_target("uzh", console)
@@ -82,10 +102,12 @@ class TestResolveQueueTarget:
 
     def test_sole_slurm_remote_auto_used_with_note(self, monkeypatch):
         monkeypatch.setattr(queue_cli, "slurm_available", lambda: False)
-        cfg = _config({
-            "uzh": {"backend": "slurm"},
-            "box": {"backend": "ssh"},  # not a candidate
-        })
+        cfg = _config(
+            {
+                "uzh": {"backend": "slurm"},
+                "box": {"backend": "ssh"},  # not a candidate
+            }
+        )
         monkeypatch.setattr(queue_cli.HSMConfig, "load", classmethod(lambda cls, *a, **k: cfg))
         console, buf = _console_buf()
         target = _resolve_queue_target(None, console)
@@ -124,14 +146,14 @@ class _Result:
 
 class FakeConn:
     def __init__(self):
-        self.run_calls: List[str] = []
+        self.run_calls: list[str] = []
         self.closed = False
-        self._responder: List[tuple] = []
+        self._responder: list[tuple] = []
 
     def add(self, sub: str, res: _Result) -> None:
         self._responder.append((sub, res))
 
-    async def run(self, cmd: str, *, input: Optional[str] = None, check: bool = False):
+    async def run(self, cmd: str, *, input: str | None = None, check: bool = False):
         self.run_calls.append(cmd)
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:
@@ -147,8 +169,17 @@ class FakeConn:
 
 
 _ROW = "\t".join(
-    ["3703585_14", "sweep_x_array", "gbena", "RUNNING", "u24-chaiam0-615",
-     "standard", "gres/gpu:A100:1", "2026-06-04T09:05:27", "106515"]
+    [
+        "3703585_14",
+        "sweep_x_array",
+        "gbena",
+        "RUNNING",
+        "u24-chaiam0-615",
+        "standard",
+        "gres/gpu:A100:1",
+        "2026-06-04T09:05:27",
+        "106515",
+    ]
 )
 
 _TARGET = {"alias": "uzh", "host": "uzh", "ssh_key": None, "ssh_port": None}
@@ -181,7 +212,9 @@ class TestRunQueueCommandRemote:
             return user, await q.list_user_jobs(user)
 
         _run_queue_command(
-            console, _TARGET, gather,
+            console,
+            _TARGET,
+            gather,
             lambda data: _render_mine(console, data[0], data[1]),
         )
         out = buf.getvalue()
@@ -272,7 +305,9 @@ class TestRunQueueCommandRemote:
             return user, await q.list_user_jobs(user)
 
         _run_queue_command(
-            console, None, gather,
+            console,
+            None,
+            gather,
             lambda data: _render_mine(console, data[0], data[1]),
         )
         assert seen["user"] == "gbena"
@@ -286,10 +321,14 @@ class TestRenderMine:
     def test_collapsed_array_shows_task_count(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)  # no sweeps/outputs → empty sweep index
         console, buf = _console_buf()
-        _render_mine(console, "gbena", [
-            _job("3710878_[690-1920]", task_count=1231, gpu_count=0),
-            _job("3703585_14", state="RUNNING", gpu_type="A100"),
-        ])
+        _render_mine(
+            console,
+            "gbena",
+            [
+                _job("3710878_[690-1920]", task_count=1231, gpu_count=0),
+                _job("3703585_14", state="RUNNING", gpu_type="A100"),
+            ],
+        )
         out = buf.getvalue()
         assert "×1231" in out
         assert "2 queue rows · 1232 tasks" in out
@@ -394,14 +433,33 @@ class TestRenderPosition:
         assert "QOSMaxJobsPerUserLimit" in out  # legend mentions the QoS cap
 
 
-def _grp(base: str, running: int = 0, pending: int = 0, completed=None,
-         failed=None, total=None, gpu_type=None, is_array: bool = True,
-         nodes: tuple = (), reason: str = "") -> JobGroup:
+def _grp(
+    base: str,
+    running: int = 0,
+    pending: int = 0,
+    completed=None,
+    failed=None,
+    total=None,
+    gpu_type=None,
+    is_array: bool = True,
+    nodes: tuple = (),
+    reason: str = "",
+) -> JobGroup:
     return JobGroup(
-        base_id=base, name=f"name_{base}", user="gbena", partition="standard",
-        gpu_count=1 if gpu_type else 0, gpu_type=gpu_type, is_array=is_array,
-        running=running, pending=pending, nodes=nodes, reason=reason,
-        completed=completed, failed=failed, total=total,
+        base_id=base,
+        name=f"name_{base}",
+        user="gbena",
+        partition="standard",
+        gpu_count=1 if gpu_type else 0,
+        gpu_type=gpu_type,
+        is_array=is_array,
+        running=running,
+        pending=pending,
+        nodes=nodes,
+        reason=reason,
+        completed=completed,
+        failed=failed,
+        total=total,
     )
 
 
@@ -409,10 +467,22 @@ class TestRenderMineGrouped:
     def test_failed_surfaced_with_progress_and_footer(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         console, buf = _console_buf()
-        _render_mine_grouped(console, "gbena", [
-            _grp("3703585", running=9, pending=4, completed=8, failed=1,
-                 total=22, gpu_type="A100", nodes=("a", "b", "c")),
-        ])
+        _render_mine_grouped(
+            console,
+            "gbena",
+            [
+                _grp(
+                    "3703585",
+                    running=9,
+                    pending=4,
+                    completed=8,
+                    failed=1,
+                    total=22,
+                    gpu_type="A100",
+                    nodes=("a", "b", "c"),
+                ),
+            ],
+        )
         out = buf.getvalue()
         assert "✓8" in out
         assert "✗1" in out  # the whole point: failed tasks are in your face
@@ -424,9 +494,13 @@ class TestRenderMineGrouped:
     def test_zero_failed_omitted(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         console, buf = _console_buf()
-        _render_mine_grouped(console, "gbena", [
-            _grp("1", running=5, completed=5, failed=0, total=10),
-        ])
+        _render_mine_grouped(
+            console,
+            "gbena",
+            [
+                _grp("1", running=5, completed=5, failed=0, total=10),
+            ],
+        )
         out = buf.getvalue()
         assert "✗" not in out
         assert "FAILED" not in out
@@ -465,10 +539,14 @@ class TestRenderMineGrouped:
     def test_single_job_and_footer_counts(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         console, buf = _console_buf()
-        _render_mine_grouped(console, "gbena", [
-            _grp("1", running=3, pending=7, completed=2, failed=0, total=12),
-            _grp("2", pending=1, is_array=False, reason="(Resources)"),
-        ])
+        _render_mine_grouped(
+            console,
+            "gbena",
+            [
+                _grp("1", running=3, pending=7, completed=2, failed=0, total=12),
+                _grp("2", pending=1, is_array=False, reason="(Resources)"),
+            ],
+        )
         out = buf.getvalue()
         assert "1 array(s)" in out
         assert "1 single job(s)" in out
@@ -495,7 +573,9 @@ class TestRenderMineGrouped:
             return user, enrich_groups_with_accounting(groups, states)
 
         _run_queue_command(
-            console, _TARGET, gather,
+            console,
+            _TARGET,
+            gather,
             lambda d: _render_mine_grouped(console, d[0], d[1]),
         )
         out = buf.getvalue()
@@ -610,19 +690,32 @@ class TestChainLabel:
     def test_chain_label_in_index(self, tmp_path):
         from hpc_sweep_manager.cli.queue import _build_sweep_meta_index
 
-        self._write(tmp_path, "swc", {
-            "sweep_id": "swc", "backend": "slurm",
-            "job_ids": ["500"], "num_tasks": 4,
-            "resumable": {"enabled": True, "chunk_walltime": "23:00:00", "max_chunks": 10},
-            "chain": {"state": {"chunk_index": 1}, "chunks": [], "num_tasks": 4},
-        })
+        self._write(
+            tmp_path,
+            "swc",
+            {
+                "sweep_id": "swc",
+                "backend": "slurm",
+                "job_ids": ["500"],
+                "num_tasks": 4,
+                "resumable": {"enabled": True, "chunk_walltime": "23:00:00", "max_chunks": 10},
+                "chain": {"state": {"chunk_index": 1}, "chunks": [], "num_tasks": 4},
+            },
+        )
         index = _build_sweep_meta_index(tmp_path / "sweeps" / "outputs")
         assert index["500"] == ("swc", 4, "chunk 2/10")
 
     def test_no_label_for_ordinary_sweep(self, tmp_path):
         from hpc_sweep_manager.cli.queue import _manifest_chain_meta
 
-        d = self._write(tmp_path, "swn", {
-            "sweep_id": "swn", "backend": "slurm", "job_ids": ["1"], "num_tasks": 1,
-        })
+        d = self._write(
+            tmp_path,
+            "swn",
+            {
+                "sweep_id": "swn",
+                "backend": "slurm",
+                "job_ids": ["1"],
+                "num_tasks": 1,
+            },
+        )
         assert _manifest_chain_meta(d) is None

@@ -13,8 +13,8 @@ from __future__ import annotations
 import io
 import logging
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 from rich.console import Console
 
 from hpc_sweep_manager.cli import init as init_mod
@@ -76,14 +76,10 @@ class TestNonInteractiveInitSucceeds:
 
     def test_real_failure_exits_nonzero(self, project, monkeypatch):
         # The inverse lie: a real failure used to print ❌ but exit 0.
-        monkeypatch.setattr(
-            init_mod, "_create_sweep_infrastructure", lambda *a, **k: False
-        )
+        monkeypatch.setattr(init_mod, "_create_sweep_infrastructure", lambda *a, **k: False)
         buf = io.StringIO()
         obj = {"console": Console(file=buf, width=200), "logger": _null_logger()}
-        res = CliRunner().invoke(
-            init_cmd, ["--project-root", str(project)], obj=obj
-        )
+        res = CliRunner().invoke(init_cmd, ["--project-root", str(project)], obj=obj)
         assert res.exit_code != 0
         assert "Project initialization failed" in buf.getvalue()
 

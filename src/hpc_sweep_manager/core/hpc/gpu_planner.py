@@ -30,11 +30,12 @@ Semantics (user-facing docs: HPC_EXECUTION.md):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import logging
 import math
 import re
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any
 
 from ..common.resource_spec import ResourceSpec
 from ..common.utils import format_walltime, parse_walltime
@@ -50,15 +51,15 @@ class GpuTypePlan:
 
     gpu_type: str  # cased as configured — rendered verbatim into --gres
     indices: tuple[int, ...]  # 0-based positions into the original params_list
-    walltime: Optional[str]  # scaled HH:MM:SS, or None when no base walltime
+    walltime: str | None  # scaled HH:MM:SS, or None when no base walltime
     speed_factor: float
 
 
 def normalize_speed_factors(
-    factors: Optional[Mapping[Any, Any]],
+    factors: Mapping[Any, Any] | None,
     *,
     warn_context: str = "speed_factors",
-) -> Optional[Dict[str, float]]:
+) -> dict[str, float] | None:
     """Validate + normalize a speed_factors mapping (the ONE implementation).
 
     Lowercased string keys, float values; entries that are non-numeric,
@@ -75,26 +76,23 @@ def normalize_speed_factors(
             f"got {type(factors).__name__}. Ignoring."
         )
         return None
-    out: Dict[str, float] = {}
+    out: dict[str, float] = {}
     for k, v in factors.items():
         try:
             f = float(v)
         except (TypeError, ValueError):
-            logger.warning(
-                f"{warn_context}[{k!r}] is not a number ({v!r}). Ignoring entry."
-            )
+            logger.warning(f"{warn_context}[{k!r}] is not a number ({v!r}). Ignoring entry.")
             continue
         if f <= 0 or not math.isfinite(f):
             logger.warning(
-                f"{warn_context}[{k!r}] must be a finite number > 0, got {f}. "
-                f"Ignoring entry."
+                f"{warn_context}[{k!r}] must be a finite number > 0, got {f}. Ignoring entry."
             )
             continue
         out[str(k).lower()] = f
     return out or None
 
 
-def _lookup_cost_map(raw: Any, cost_map: Mapping[Any, Any]) -> Optional[float]:
+def _lookup_cost_map(raw: Any, cost_map: Mapping[Any, Any]) -> float | None:
     """Tolerant cost_map lookup: exact key first, then string-equal match
     (YAML round-trips can turn int keys into strings and vice versa).
     Booleans are excluded — `True == 1` would silently match an int key."""
@@ -113,9 +111,9 @@ def _lookup_cost_map(raw: Any, cost_map: Mapping[Any, Any]) -> Optional[float]:
 
 def task_costs(
     params_list: Sequence[Mapping[str, Any]],
-    cost_param: Optional[str],
-    cost_map: Optional[Mapping[Any, Any]] = None,
-) -> List[float]:
+    cost_param: str | None,
+    cost_map: Mapping[Any, Any] | None = None,
+) -> list[float]:
     """Per-task relative costs read from the swept param named ``cost_param``.
 
     With ``cost_map``, the param's value is translated (e.g.
@@ -134,11 +132,11 @@ def task_costs(
     """
     if not cost_param:
         return [1.0] * len(params_list)
-    costs: List[Optional[float]] = []
-    defaulted: List[int] = []
+    costs: list[float | None] = []
+    defaulted: list[int] = []
     for i, params in enumerate(params_list):
         raw = params.get(cost_param)
-        value: Optional[float] = None
+        value: float | None = None
         if raw is not None:
             if cost_map:
                 value = _lookup_cost_map(raw, cost_map)
@@ -169,9 +167,9 @@ def plan_gpu_split(
     *,
     costs: Sequence[float],
     gpu_types: Sequence[str],
-    speed_factors: Optional[Mapping[str, Any]] = None,
-    base_walltime: Optional[str] = None,
-) -> List[GpuTypePlan]:
+    speed_factors: Mapping[str, Any] | None = None,
+    base_walltime: str | None = None,
+) -> list[GpuTypePlan]:
     """Partition tasks across GPU types — greedy LPT on uniform machines.
 
     Returns one :class:`GpuTypePlan` per type that received work (types left
@@ -190,20 +188,16 @@ def plan_gpu_split(
             f"is a list, got {base_walltime!r} (ambiguous — '48:00' would "
             f"mean 48 minutes, not 48 hours)"
         )
-    factors_norm = {
-        str(k).lower(): float(v) for k, v in (speed_factors or {}).items()
-    }
-    bins: List[dict] = []
-    missing: List[str] = []
+    factors_norm = {str(k).lower(): float(v) for k, v in (speed_factors or {}).items()}
+    bins: list[dict] = []
+    missing: list[str] = []
     for t in gpu_types:
         factor = factors_norm.get(t.lower())
         if factor is None:
             missing.append(t)
             factor = 1.0
         if factor <= 0 or not math.isfinite(factor):
-            raise ValueError(
-                f"plan_gpu_split: speed factor for {t!r} must be > 0, got {factor}"
-            )
+            raise ValueError(f"plan_gpu_split: speed factor for {t!r} must be > 0, got {factor}")
         bins.append({"type": t, "factor": factor, "indices": [], "load": 0.0})
     if missing and factors_norm:
         # The user IS using speed factors but didn't cover these types —
@@ -237,7 +231,7 @@ def plan_gpu_split(
     max_cost = max(costs) if costs else 1.0
     if max_cost <= 0:
         max_cost = 1.0  # pure-API guard: explicit all-zero costs must not ZeroDivide
-    plans: List[GpuTypePlan] = []
+    plans: list[GpuTypePlan] = []
     for b in bins:
         if not b["indices"]:
             logger.info(
@@ -275,7 +269,7 @@ class SubArraySubmission:
     # ({"index": array-local 1..k, "global_index": original 1..N, "params": {...}}, ...)
     entries: tuple[dict, ...]
     spec: ResourceSpec  # scalarized: gpu_type str|None, walltime already scaled
-    gpu_type: Optional[str]  # None on the single-type path
+    gpu_type: str | None  # None on the single-type path
     # The factor the planner actually used (incl. defaults) — display layers
     # must read THIS, not re-derive it from config (drift risk).
     speed_factor: float = 1.0
@@ -303,9 +297,9 @@ def build_array_submissions(
     params_list: Sequence[Mapping[str, Any]],
     effective_spec: ResourceSpec,
     prefix: str,
-    speed_factors: Optional[Mapping[str, Any]] = None,
-    costs: Optional[Sequence[float]] = None,
-) -> List[SubArraySubmission]:
+    speed_factors: Mapping[str, Any] | None = None,
+    costs: Sequence[float] | None = None,
+) -> list[SubArraySubmission]:
     """Turn one logical array submission into 1..K concrete ones.
 
     Single-type specs (str/None ``gpu_type``) yield EXACTLY today's shapes —
@@ -319,8 +313,7 @@ def build_array_submissions(
     """
     if not isinstance(effective_spec.gpu_type, tuple):
         entries = tuple(
-            {"index": i + 1, "global_index": i + 1, "params": p}
-            for i, p in enumerate(params_list)
+            {"index": i + 1, "global_index": i + 1, "params": p} for i, p in enumerate(params_list)
         )
         return [
             SubArraySubmission(
@@ -333,13 +326,12 @@ def build_array_submissions(
         ]
 
     if costs is None:
-        cost_seq: List[float] = [1.0] * len(params_list)
+        cost_seq: list[float] = [1.0] * len(params_list)
     else:
         cost_seq = [float(c) for c in costs]
         if len(cost_seq) != len(params_list):
             raise ValueError(
-                f"build_array_submissions: {len(cost_seq)} costs for "
-                f"{len(params_list)} tasks"
+                f"build_array_submissions: {len(cost_seq)} costs for {len(params_list)} tasks"
             )
     plans = plan_gpu_split(
         costs=cost_seq,
@@ -360,7 +352,7 @@ def build_array_submissions(
             f"— their params files/job names would overwrite each other. "
             f"Use distinct type names."
         )
-    submissions: List[SubArraySubmission] = []
+    submissions: list[SubArraySubmission] = []
     for plan, token in zip(plans, tokens):
         sub_spec = replace(
             effective_spec,
@@ -386,13 +378,13 @@ def build_array_submissions(
 
 def jobs_manifest_entries(
     job_ids: Sequence[str], jobinfo_params: Mapping[str, Mapping[str, Any]]
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Per-job manifest entries (`jobs:`) from submitted JobInfo params.
 
     Gives downstream consumers (queue linkage, collect) per-job task counts
     and gpu types — the `len(job_ids)==1` heuristic stops being load-bearing.
     """
-    out: List[Dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for jid in job_ids:
         p = jobinfo_params.get(jid) or {}
         out.append(

@@ -48,8 +48,9 @@ class TestAdvanceCommandGuards:
         assert "No manifest" in res.output
 
     def test_not_a_resumable_chain(self, tmp_path):
-        from click.testing import CliRunner
         from pathlib import Path
+
+        from click.testing import CliRunner
 
         runner = CliRunner()
         with runner.isolated_filesystem():
@@ -62,8 +63,9 @@ class TestAdvanceCommandGuards:
         assert "not a resumable chain" in res.output
 
     def test_collect_refuses_resumable_chain(self, tmp_path):
-        from click.testing import CliRunner
         from pathlib import Path
+
+        from click.testing import CliRunner
 
         runner = CliRunner()
         with runner.isolated_filesystem():

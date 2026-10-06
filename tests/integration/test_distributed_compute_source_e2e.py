@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import pytest
 
@@ -16,7 +16,6 @@ from hpc_sweep_manager.core.common.compute_source import ComputeSource, JobInfo
 from hpc_sweep_manager.core.distributed.distributed_compute_source import (
     DistributedComputeSource,
 )
-
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -57,7 +56,7 @@ class AutoCompleteChild(ComputeSource):
     async def cleanup(self) -> None:
         return None
 
-    async def health_check(self) -> Dict[str, Any]:
+    async def health_check(self) -> dict[str, Any]:
         return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 

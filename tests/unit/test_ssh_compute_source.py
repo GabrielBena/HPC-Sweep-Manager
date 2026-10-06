@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
-from hpc_sweep_manager.core.remote import ssh_compute_source as ssh_mod
 from hpc_sweep_manager.core.remote.ssh_compute_source import SSHComputeSource
-
 
 # ---------------------------------------------------------------------- fakes
 
@@ -32,7 +30,13 @@ NVIDIA_SMI_SAMPLE_4_GPUS = (
 class _Result:
     """Mimic asyncssh's `SSHCompletedProcess` / process result enough for our use."""
 
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "", exit_status: Optional[int] = None):
+    def __init__(
+        self,
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        exit_status: int | None = None,
+    ):
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
@@ -52,7 +56,7 @@ class FakeProc:
     def __init__(self, cmd: str):
         self.cmd = cmd
         self._done = asyncio.Event()
-        self.exit_status: Optional[int] = None
+        self.exit_status: int | None = None
         self.terminated = False
         self.killed = False
 
@@ -84,13 +88,13 @@ class FakeConn:
     """Records run() / create_process() calls so tests can assert on them."""
 
     def __init__(self, *, gpu_csv: str = "", nvidia_smi_rc: int = 0):
-        self.run_calls: List[Dict[str, Any]] = []
-        self.processes: List[FakeProc] = []
+        self.run_calls: list[dict[str, Any]] = []
+        self.processes: list[FakeProc] = []
         self.closed = False
         self._gpu_csv = gpu_csv
         self._nvidia_smi_rc = nvidia_smi_rc
 
-    async def run(self, cmd: str, *, input: Optional[str] = None, check: bool = False) -> _Result:
+    async def run(self, cmd: str, *, input: str | None = None, check: bool = False) -> _Result:
         self.run_calls.append({"cmd": cmd, "input": input, "check": check})
         if "nvidia-smi" in cmd:
             return _Result(returncode=self._nvidia_smi_rc, stdout=self._gpu_csv)
@@ -116,20 +120,20 @@ class _StubSSH(SSHComputeSource):
     def __init__(self, *args, fake_conn: FakeConn, rsync_rc: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
         self._fake_conn = fake_conn
-        self._rsync_calls: List[List[str]] = []
+        self._rsync_calls: list[list[str]] = []
         self._rsync_rc = rsync_rc
 
     async def _open_connection(self) -> Any:
         return self._fake_conn
 
-    async def _run_rsync(self, cmd: List[str]) -> int:
+    async def _run_rsync(self, cmd: list[str]) -> int:
         self._rsync_calls.append(cmd)
         return self._rsync_rc
 
 
 def _make_src(tmp_path: Path, **kwargs) -> _StubSSH:
     fake_conn = kwargs.pop("fake_conn", None) or FakeConn()
-    defaults: Dict[str, Any] = dict(
+    defaults: dict[str, Any] = dict(
         name="anahita",
         max_parallel_jobs=2,
         conda_env="lab",
@@ -238,7 +242,7 @@ class TestSetup:
             async def run(self, cmd, *, input=None, check=False):
                 self.run_calls.append({"cmd": cmd, "input": input, "check": check})
                 if cmd.startswith("echo "):
-                    arg = cmd[len("echo "):].strip()
+                    arg = cmd[len("echo ") :].strip()
                     if arg.startswith("~"):
                         arg = "/home/gbena" + arg[1:]
                     arg = arg.replace("$HOME", "/home/gbena").replace("$USER", "gbena")

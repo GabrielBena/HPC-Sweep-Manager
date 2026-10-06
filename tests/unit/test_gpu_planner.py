@@ -12,13 +12,11 @@ import pytest
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.common.utils import parse_walltime
 from hpc_sweep_manager.core.hpc.gpu_planner import (
-    GpuTypePlan,
     build_array_submissions,
     jobs_manifest_entries,
     plan_gpu_split,
     task_costs,
 )
-
 
 # ------------------------------------------------------------------ task_costs
 
@@ -57,7 +55,9 @@ class TestTaskCosts:
         # The review's EXP B: a defaulted task alone in a bin used to get
         # walltime = base × (1/global_max). Now it carries max cost.
         costs = task_costs(
-            [{"T": 16}, {"T": 16}, {"T": 5}], "T", {16: 23.0}  # 5 missing!
+            [{"T": 16}, {"T": 16}, {"T": 5}],
+            "T",
+            {16: 23.0},  # 5 missing!
         )
         assert costs == [23.0, 23.0, 23.0]
         plans = plan_gpu_split(
@@ -130,9 +130,7 @@ class TestPlanGpuSplitUniform:
         # default to 1.0 → over-assigned work + under-provisioned walltime
         # → mass TIMEOUT. A partial map is a config bug: refuse.
         with pytest.raises(ValueError, match="no entry for gpu type.*TIMEOUT"):
-            plan_gpu_split(
-                costs=[1.0, 1.0], gpu_types=["a", "b"], speed_factors={"a": 1.0}
-            )
+            plan_gpu_split(costs=[1.0, 1.0], gpu_types=["a", "b"], speed_factors={"a": 1.0})
 
     def test_no_factor_map_warns_naming_timeout(self, caplog):
         # No map at all = "all types equally fast" — allowed, but the
@@ -144,9 +142,7 @@ class TestPlanGpuSplitUniform:
 
     def test_invalid_factor_raises(self):
         with pytest.raises(ValueError, match="must be > 0"):
-            plan_gpu_split(
-                costs=[1.0], gpu_types=["a"], speed_factors={"a": 0}
-            )
+            plan_gpu_split(costs=[1.0], gpu_types=["a"], speed_factors={"a": 0})
 
     def test_empty_types_raises(self):
         with pytest.raises(ValueError, match="non-empty"):
@@ -154,9 +150,7 @@ class TestPlanGpuSplitUniform:
 
     def test_factor_keys_case_insensitive_type_case_preserved(self):
         # Config says lowercase, GRES needs the cased form (gotcha #6).
-        plans = plan_gpu_split(
-            costs=[1.0], gpu_types=["A100"], speed_factors={"a100": 2.0}
-        )
+        plans = plan_gpu_split(costs=[1.0], gpu_types=["A100"], speed_factors={"a100": 2.0})
         assert plans[0].gpu_type == "A100"
         assert plans[0].speed_factor == 2.0
 
@@ -184,9 +178,7 @@ class TestPlanGpuSplitLPT:
             gpu_types=["A100", "H200"],
             speed_factors={"a100": 1.0, "h200": 0.4},
         )
-        makespan = max(
-            sum(self._COSTS[i] for i in p.indices) * p.speed_factor for p in plans
-        )
+        makespan = max(sum(self._COSTS[i] for i in p.indices) * p.speed_factor for p in plans)
         all_on_a100 = sum(self._COSTS) * 1.0
         assert makespan < all_on_a100
 
@@ -254,9 +246,7 @@ class TestBuildArraySubmissions:
 
     def test_single_type_is_legacy_shape(self):
         spec = ResourceSpec(gpus=1, gpu_type="H100", walltime="02:00:00")
-        subs = build_array_submissions(
-            params_list=self._PARAMS, effective_spec=spec, prefix="sw"
-        )
+        subs = build_array_submissions(params_list=self._PARAMS, effective_spec=spec, prefix="sw")
         assert len(subs) == 1
         sub = subs[0]
         assert sub.job_name == "sw_array"
@@ -283,15 +273,11 @@ class TestBuildArraySubmissions:
             # Scalarized spec, renderable directly.
             assert isinstance(sub.spec.gpu_type, str)
             # index is array-local 1..k; global_index keeps original position.
-            assert [e["index"] for e in sub.entries] == list(
-                range(1, len(sub.entries) + 1)
-            )
+            assert [e["index"] for e in sub.entries] == list(range(1, len(sub.entries) + 1))
             for e in sub.entries:
                 assert self._PARAMS[e["global_index"] - 1] == e["params"]
         # Union of global indices covers every task exactly once.
-        all_globals = sorted(
-            e["global_index"] for s in subs for e in s.entries
-        )
+        all_globals = sorted(e["global_index"] for s in subs for e in s.entries)
         assert all_globals == [1, 2, 3, 4]
 
     def test_multi_type_scales_walltime_per_sub_spec(self):
@@ -318,9 +304,7 @@ class TestBuildArraySubmissions:
 
     def test_unsafe_type_token_sanitized(self):
         spec = ResourceSpec(gpus=1, gpu_type=("weird type!", "ok"))
-        subs = build_array_submissions(
-            params_list=self._PARAMS, effective_spec=spec, prefix="sw"
-        )
+        subs = build_array_submissions(params_list=self._PARAMS, effective_spec=spec, prefix="sw")
         names = {s.job_name for s in subs}
         assert "sw_array_weirdtype" in names
         # The SPEC keeps the original string (rendered into --gres verbatim).
@@ -367,15 +351,11 @@ class TestHardenings:
         # parse_walltime reads "48:00" as 48 MINUTES — scaled across
         # sub-arrays that's a silent 60x under-provision.
         with pytest.raises(ValueError, match="HH:MM:SS"):
-            plan_gpu_split(
-                costs=[1.0], gpu_types=["a"], base_walltime="48:00"
-            )
+            plan_gpu_split(costs=[1.0], gpu_types=["a"], base_walltime="48:00")
 
     def test_all_zero_costs_no_zerodivision(self):
         # Pure-API guard: task_costs never emits zeros, but direct callers can.
-        plans = plan_gpu_split(
-            costs=[0.0, 0.0], gpu_types=["a"], base_walltime="01:00:00"
-        )
+        plans = plan_gpu_split(costs=[0.0, 0.0], gpu_types=["a"], base_walltime="01:00:00")
         assert plans[0].walltime is not None  # didn't raise
 
     def test_submission_carries_planner_speed_factor(self):
@@ -424,18 +404,14 @@ class TestSweepConfigCostParamValidation:
     def test_cost_param_must_be_swept(self):
         from hpc_sweep_manager.core.common.config import SweepConfig
 
-        cfg = SweepConfig.from_dict(
-            {"sweep": {"grid": {"a": [1, 2]}, "cost_param": "typo.T"}}
-        )
+        cfg = SweepConfig.from_dict({"sweep": {"grid": {"a": [1, 2]}, "cost_param": "typo.T"}})
         errors = cfg.validate()
         assert any("cost_param" in e for e in errors)
 
     def test_cost_param_in_grid_ok(self):
         from hpc_sweep_manager.core.common.config import SweepConfig
 
-        cfg = SweepConfig.from_dict(
-            {"sweep": {"grid": {"T": [1, 2]}, "cost_param": "T"}}
-        )
+        cfg = SweepConfig.from_dict({"sweep": {"grid": {"T": [1, 2]}, "cost_param": "T"}})
         assert cfg.validate() == []
 
     def test_cost_param_in_paired_ok(self):

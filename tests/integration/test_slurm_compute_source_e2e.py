@@ -9,15 +9,12 @@ a real Slurm cluster.
 
 from __future__ import annotations
 
-import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
-
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -89,9 +86,7 @@ async def test_wait_for_all_observes_completion(configured_source, tmp_path, fak
     assert job_id in configured_source.completed_jobs
 
 
-async def test_wait_for_all_reports_failed_via_sacct(
-    configured_source, tmp_path, fake_slurm
-):
+async def test_wait_for_all_reports_failed_via_sacct(configured_source, tmp_path, fake_slurm):
     """#4 regression: a job that ends FAILED must be reported FAILED, not
     COMPLETED. Once a job leaves squeue, HSM consults sacct for the real
     terminal state (queue-absence is not success)."""
@@ -129,9 +124,7 @@ async def test_submit_batch_array_mode(configured_source, tmp_path, fake_slurm):
     await configured_source.setup(sweep_dir, "sweep_test")
 
     params_list = [{"lr": 0.001}, {"lr": 0.01}, {"lr": 0.1}, {"lr": 1.0}]
-    job_ids = await configured_source.submit_batch(
-        params_list, sweep_id="sweep_test", mode="array"
-    )
+    job_ids = await configured_source.submit_batch(params_list, sweep_id="sweep_test", mode="array")
 
     assert len(job_ids) == 1
     array_id = job_ids[0]
@@ -155,7 +148,9 @@ async def test_submit_batch_array_mode(configured_source, tmp_path, fake_slurm):
     assert "$SLURM_ARRAY_TASK_ID" in content
 
 
-async def test_individual_mode_falls_back_to_default_submit_batch(configured_source, tmp_path, fake_slurm):
+async def test_individual_mode_falls_back_to_default_submit_batch(
+    configured_source, tmp_path, fake_slurm
+):
     sweep_dir = tmp_path / "sweep_test"
     sweep_dir.mkdir()
     await configured_source.setup(sweep_dir, "sweep_test")
@@ -183,14 +178,18 @@ async def test_qos_whitelist_enforced(tmp_path, fake_slurm):
     # Bad QOS is rejected before sbatch is ever invoked.
     with pytest.raises(ValueError, match="qos='special'"):
         await s3it_source.submit_job(
-            {"x": 1}, "task_001", "sweep_test",
+            {"x": 1},
+            "task_001",
+            "sweep_test",
             spec=ResourceSpec(qos="special"),
         )
     assert fake_slurm.jobs() == []
 
     # Good QOS works.
     await s3it_source.submit_job(
-        {"x": 1}, "task_001", "sweep_test",
+        {"x": 1},
+        "task_001",
+        "sweep_test",
         spec=ResourceSpec(qos="normal"),
     )
     jobs = fake_slurm.jobs()
@@ -217,9 +216,7 @@ async def test_modules_and_pre_script_render_into_array(tmp_path, fake_slurm):
         ),
     )
     await src.setup(sweep_dir, "sweep_test")
-    await src.submit_batch(
-        [{"lr": 0.001}, {"lr": 0.01}], sweep_id="sweep_test", mode="array"
-    )
+    await src.submit_batch([{"lr": 0.001}, {"lr": 0.01}], sweep_id="sweep_test", mode="array")
 
     script_path = sweep_dir / "scripts" / "sweep_test_array.slurm"
     content = script_path.read_text()

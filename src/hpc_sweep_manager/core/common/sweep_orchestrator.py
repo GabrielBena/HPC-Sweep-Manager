@@ -17,11 +17,12 @@ fold in once the SSH + distributed backends finish their own refactor.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import logging
 import shutil
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any
 
 from .chain import ChainConfig, ChainDecision, ChainState, ChunkOutcome, decide_next
 from .compute_source import ComputeSource, SubmissionMode
@@ -33,9 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Mode strings the orchestrator accepts. Completion runs still route through
 # the legacy path (they need starting-task-number propagation); see cli/sweep.py.
-SUPPORTED_MODES = frozenset(
-    {"local", "auto", "array", "individual", "distributed", "remote"}
-)
+SUPPORTED_MODES = frozenset({"local", "auto", "array", "individual", "distributed", "remote"})
 
 
 @dataclass
@@ -154,7 +153,7 @@ def build_compute_source(
     parallel_jobs: int | None = None,
     qos_whitelist: frozenset[str] | None = None,
     remote_alias: str | None = None,
-    gpus_override: Union[None, int, Sequence[int]] = None,
+    gpus_override: None | int | Sequence[int] = None,
     conda_env_override: str | None = None,
     remote_submission: SubmissionMode | None = None,
     resumable: bool = False,
@@ -202,7 +201,9 @@ def build_compute_source(
                 "(set distributed.enabled: true)"
             )
         if not distributed_cfg.get("remotes") and not distributed_cfg.get("local_max_jobs"):
-            raise RuntimeError("No compute sources configured under distributed: in hsm_config.yaml")
+            raise RuntimeError(
+                "No compute sources configured under distributed: in hsm_config.yaml"
+            )
 
         source = DistributedComputeSource(hsm_config=hsm_config, show_progress=False)
         # Distributed always fans out individual jobs across child sources.
@@ -212,9 +213,7 @@ def build_compute_source(
         if not remote_alias:
             raise RuntimeError("--mode remote requires --remote <alias>")
         # Lookup precedence: registered remote → bare ssh-config alias (empty cfg).
-        distributed_cfg = dict(
-            hsm_config.config_data.get("distributed", {}) if hsm_config else {}
-        )
+        distributed_cfg = dict(hsm_config.config_data.get("distributed", {}) if hsm_config else {})
         # paths.conda_env is the lowest-priority fallback for the SSH
         # factories. Per-remote / distributed.conda_env still win because
         # we only inject when absent.
@@ -226,8 +225,7 @@ def build_compute_source(
         remote_cfg = registered.get(remote_alias, {})
         if remote_alias not in registered:
             logger.info(
-                f"Remote {remote_alias!r} not in hsm_config — using bare "
-                f"~/.ssh/config alias"
+                f"Remote {remote_alias!r} not in hsm_config — using bare ~/.ssh/config alias"
             )
 
         # Dispatch on the per-remote `backend:` field (default `ssh`).
@@ -341,9 +339,7 @@ def build_compute_source(
         if effective_qos_whitelist is None and hsm_config is not None:
             effective_qos_whitelist = hsm_config.get_slurm_qos_whitelist()
 
-        speed_factors = (
-            hsm_config.get_slurm_speed_factors() if hsm_config is not None else None
-        )
+        speed_factors = hsm_config.get_slurm_speed_factors() if hsm_config is not None else None
         source = SlurmComputeSource(
             python_path=python_path,
             script_path=script_path,
@@ -371,8 +367,8 @@ async def run_sweep_async(
     job_name_prefix: str | None = None,
     wait: bool = True,
     poll_interval: float = 10.0,
-    on_progress: Optional[Callable[[int, int], None]] = None,
-    costs: Optional[list[float]] = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    costs: list[float] | None = None,
 ) -> SweepResult:
     """Drive a sweep through setup → submit_batch → wait_for_all.
 
@@ -383,9 +379,7 @@ async def run_sweep_async(
     placement — see ``core/hpc/gpu_planner``.
     """
     if not await source.setup(sweep_dir, sweep_id):
-        raise RuntimeError(
-            f"setup() failed for source {source.name!r} ({source.source_type})"
-        )
+        raise RuntimeError(f"setup() failed for source {source.name!r} ({source.source_type})")
 
     job_ids = await source.submit_batch(
         params_list=params_list,
@@ -409,13 +403,9 @@ async def run_sweep_async(
         try:
             ok = await source.collect_results()
             if not ok:
-                logger.warning(
-                    f"collect_results returned False for source {source.name!r}"
-                )
+                logger.warning(f"collect_results returned False for source {source.name!r}")
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                f"collect_results raised for source {source.name!r}: {e}"
-            )
+            logger.warning(f"collect_results raised for source {source.name!r}: {e}")
         try:
             await source.cleanup()
         except Exception as e:  # noqa: BLE001
@@ -443,8 +433,8 @@ async def run_resumable_sweep_async(
     wandb_group: str | None = None,
     job_name_prefix: str | None = None,
     poll_interval: float = 10.0,
-    on_progress: Optional[Callable[[int, int], None]] = None,
-    costs: Optional[list[float]] = None,
+    on_progress: Callable[[int, int], None] | None = None,
+    costs: list[float] | None = None,
     chain_state: ChainState | None = None,
     do_setup: bool = True,
     initial_job_ids: list[str] | None = None,
@@ -476,8 +466,7 @@ async def run_resumable_sweep_async(
         # A zero-task chain would otherwise report a vacuous DONE (done_count >=
         # 0) and archive+clean an empty remote — surface the misconfig instead.
         raise ValueError(
-            "resumable chain has 0 tasks — nothing to run (check the sweep grid "
-            "/ --max-runs)"
+            "resumable chain has 0 tasks — nothing to run (check the sweep grid / --max-runs)"
         )
     ckpt_subdir = resumable.checkpoint_subdir
     # Make every tasks/ pull (the incremental ones in wait_for_all AND the final
@@ -488,9 +477,7 @@ async def run_resumable_sweep_async(
 
     if do_setup:
         if not await source.setup(sweep_dir, sweep_id):
-            raise RuntimeError(
-                f"setup() failed for source {source.name!r} ({source.source_type})"
-            )
+            raise RuntimeError(f"setup() failed for source {source.name!r} ({source.source_type})")
 
     state = chain_state or ChainState()
     chain_cfg = ChainConfig(
@@ -549,9 +536,7 @@ async def run_resumable_sweep_async(
 
     while True:
         if current is None:
-            dependency = (
-                f"afterany:{':'.join(prev_job_ids)}" if prev_job_ids else None
-            )
+            dependency = f"afterany:{':'.join(prev_job_ids)}" if prev_job_ids else None
             ctx = ResumableContext(chunk_index=state.chunk_index, config=resumable)
             logger.info(
                 f"chain {sweep_id}: submitting chunk {state.chunk_index + 1} "
@@ -684,8 +669,6 @@ async def _safe_collect(source: ComputeSource, *, defer_cleanup: bool) -> None:
     try:
         ok = await source.collect_results(defer_cleanup=defer_cleanup)
         if not ok:
-            logger.warning(
-                f"collect_results returned False for source {source.name!r}"
-            )
+            logger.warning(f"collect_results returned False for source {source.name!r}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"collect_results raised for source {source.name!r}: {e}")

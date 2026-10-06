@@ -23,11 +23,12 @@ unit-testable by overriding the two narrow I/O seams
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 import logging
-from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional, Sequence, Union
+from collections.abc import Sequence
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from ..common.compute_source import ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
@@ -57,18 +58,18 @@ class SSHComputeSource(ComputeSource):
     def __init__(
         self,
         name: str,
-        host: Optional[str] = None,
-        ssh_key: Optional[str] = None,
-        ssh_port: Optional[int] = None,
-        conda_env: Optional[str] = None,
-        python_path: Optional[str] = None,
+        host: str | None = None,
+        ssh_key: str | None = None,
+        ssh_port: int | None = None,
+        conda_env: str | None = None,
+        python_path: str | None = None,
         project_dir: str = ".",
         script_path: str = "",
         remote_root: str = "~/.hsm/runs",
         max_parallel_jobs: int = 1,
-        gpus: Union[None, int, Sequence[int]] = None,
-        default_spec: Optional[ResourceSpec] = None,
-        rsync_excludes: Optional[Sequence[str]] = None,
+        gpus: None | int | Sequence[int] = None,
+        default_spec: ResourceSpec | None = None,
+        rsync_excludes: Sequence[str] | None = None,
         keep_remote_on_success: bool = False,
     ):
         super().__init__(name, "ssh_remote", max(max_parallel_jobs, 1))
@@ -108,20 +109,20 @@ class SSHComputeSource(ComputeSource):
         # Populated in setup()
         self._conn: Any = None
         self._project_name = Path(self.project_dir).name or "project"
-        self._remote_code_dir: Optional[str] = None
-        self._remote_sweep_dir: Optional[str] = None
-        self.sweep_dir: Optional[Path] = None
-        self.sweep_id: Optional[str] = None
-        self._gpu_indices: List[int] = []
-        self._slot_queue: Optional[asyncio.Queue] = None
+        self._remote_code_dir: str | None = None
+        self._remote_sweep_dir: str | None = None
+        self.sweep_dir: Path | None = None
+        self.sweep_id: str | None = None
+        self._gpu_indices: list[int] = []
+        self._slot_queue: asyncio.Queue | None = None
         self._slot_count: int = max_parallel_jobs
         self._run_prefix: str = "python"
 
         # Job bookkeeping
-        self._procs: Dict[str, Any] = {}
-        self._monitors: Dict[str, asyncio.Task] = {}
+        self._procs: dict[str, Any] = {}
+        self._monitors: dict[str, asyncio.Task] = {}
         self._job_counter: int = 0
-        self._counter_lock: Optional[asyncio.Lock] = None
+        self._counter_lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
@@ -130,7 +131,7 @@ class SSHComputeSource(ComputeSource):
 
         return await create_ssh_connection(self.host, self.ssh_key, self.ssh_port)
 
-    async def _run_rsync(self, cmd: List[str]) -> int:
+    async def _run_rsync(self, cmd: list[str]) -> int:
         """Run an rsync command and return its exit code. Overridden in tests."""
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -185,9 +186,7 @@ class SSHComputeSource(ComputeSource):
         # remote-shell echo at setup gives a single absolute path used everywhere.
         resolved_root = await self._resolve_remote_path(self.remote_root)
         self._remote_code_dir = f"{resolved_root}/{self._project_name}/code"
-        self._remote_sweep_dir = (
-            f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
-        )
+        self._remote_sweep_dir = f"{resolved_root}/{self._project_name}/sweeps/{sweep_id}"
 
         # Build the remote layout up front so rsync push + per-task writes
         # don't have to worry about missing directories.
@@ -213,7 +212,7 @@ class SSHComputeSource(ComputeSource):
 
         # GPU probe — best effort. A box with no nvidia-smi just gives []
         # which falls back to CPU slots downstream.
-        gpu_indices: List[int] = []
+        gpu_indices: list[int] = []
         try:
             result = await self._conn.run(NVIDIA_SMI_QUERY, check=False)
             if (result.returncode or 0) == 0:
@@ -224,9 +223,7 @@ class SSHComputeSource(ComputeSource):
 
         allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices)
         gpus_per_job = self.default_spec.gpus or 0
-        slots = partition_gpu_slots(
-            allowed, gpus_per_job, cpu_slots=self.max_parallel_jobs
-        )
+        slots = partition_gpu_slots(allowed, gpus_per_job, cpu_slots=self.max_parallel_jobs)
         self._slot_count = len(slots)
         self._slot_queue = asyncio.Queue()
         for s in slots:
@@ -264,24 +261,20 @@ class SSHComputeSource(ComputeSource):
 
     async def submit_job(
         self,
-        params: Dict[str, Any],
+        params: dict[str, Any],
         job_name: str,
         sweep_id: str,
-        wandb_group: Optional[str] = None,
-        spec: Optional[ResourceSpec] = None,
+        wandb_group: str | None = None,
+        spec: ResourceSpec | None = None,
     ) -> str:
         if self._conn is None or self._slot_queue is None:
-            raise RuntimeError(
-                f"SSHComputeSource {self.name!r} not set up; call setup() first"
-            )
+            raise RuntimeError(f"SSHComputeSource {self.name!r} not set up; call setup() first")
 
         effective_spec = self.default_spec.merge(spec)
         job_id = await self._next_job_id()
         local_task_dir = self._local_task_dir_for(job_name)
         local_task_dir.mkdir(parents=True, exist_ok=True)
-        remote_task_dir = (
-            f"{self._remote_sweep_dir}/tasks/{local_task_dir.name}"
-        )
+        remote_task_dir = f"{self._remote_sweep_dir}/tasks/{local_task_dir.name}"
 
         # Block here when all slots are busy — natural back-pressure.
         slot = await self._slot_queue.get()
@@ -328,9 +321,7 @@ class SSHComputeSource(ComputeSource):
             task_dir=str(local_task_dir),
         )
         self.stats.total_submitted += 1
-        self._monitors[job_id] = asyncio.create_task(
-            self._monitor(job_id, proc, slot)
-        )
+        self._monitors[job_id] = asyncio.create_task(self._monitor(job_id, proc, slot))
         gpu_msg = f" on GPU(s) {cuda_visible}" if cuda_visible else ""
         logger.info(f"Submitted ssh job {job_id} ({job_name}) to {self.host}{gpu_msg}")
         return job_id
@@ -343,16 +334,12 @@ class SSHComputeSource(ComputeSource):
                 # killed by signal / channel torn down → treat as failure
                 exit_status = -1
             status = "COMPLETED" if exit_status == 0 else "FAILED"
-            existing = (
-                self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
-            )
+            existing = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
             if existing and existing.status == "CANCELLED":
                 status = "CANCELLED"
             if job_id in self.active_jobs:
                 self.update_job_status(job_id, status)
-            logger.info(
-                f"SSH job {job_id} finished status={status} exit_status={exit_status}"
-            )
+            logger.info(f"SSH job {job_id} finished status={status} exit_status={exit_status}")
         finally:
             self._procs.pop(job_id, None)
             assert self._slot_queue is not None
@@ -367,11 +354,7 @@ class SSHComputeSource(ComputeSource):
             elif getattr(proc, "exit_status", None) is None:
                 return "RUNNING"
             else:
-                status = (
-                    "COMPLETED"
-                    if proc.exit_status == 0
-                    else "FAILED"
-                )
+                status = "COMPLETED" if proc.exit_status == 0 else "FAILED"
                 self.update_job_status(job_id, status)
                 return status
         if job_id in self.completed_jobs:
@@ -393,14 +376,14 @@ class SSHComputeSource(ComputeSource):
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 proc.kill()
             except Exception:  # noqa: BLE001
                 pass
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:  # pragma: no cover
+            except TimeoutError:  # pragma: no cover
                 logger.warning(f"SSH job {job_id} did not exit after kill()")
         return True
 
@@ -408,7 +391,7 @@ class SSHComputeSource(ComputeSource):
         self,
         poll_interval: float = 5.0,
         on_progress=None,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Await per-job monitor tasks directly.
 
         Same pattern as :class:`LocalComputeSource` — the monitor coroutines
@@ -423,9 +406,7 @@ class SSHComputeSource(ComputeSource):
                 on_progress(len(final), max(len(final), 1))
             return final
 
-        monitors = [
-            self._monitors[jid] for jid in pending_ids if jid in self._monitors
-        ]
+        monitors = [self._monitors[jid] for jid in pending_ids if jid in self._monitors]
         total = len(pending_ids) + len(self.completed_jobs)
         if on_progress is not None:
             on_progress(len(self.completed_jobs), max(total, 1))
@@ -438,7 +419,7 @@ class SSHComputeSource(ComputeSource):
 
     # ----------------------------------------------------------- collection
     async def collect_results(
-        self, job_ids: Optional[List[str]] = None, *, defer_cleanup: bool = False
+        self, job_ids: list[str] | None = None, *, defer_cleanup: bool = False
     ) -> bool:
         # defer_cleanup is a resumable-chain no-op here (bash-over-SSH is not a
         # chain backend — chains require Slurm dependencies/signals).
@@ -453,17 +434,11 @@ class SSHComputeSource(ComputeSource):
         if rc != 0:
             return False
 
-        any_failed = any(
-            j.status == "FAILED" for j in self.completed_jobs.values()
-        )
+        any_failed = any(j.status == "FAILED" for j in self.completed_jobs.values())
         if not any_failed and not self.keep_remote_on_success:
             try:
-                await self._conn.run(
-                    f"rm -rf {self._remote_sweep_dir}", check=False
-                )
-                logger.info(
-                    f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}"
-                )
+                await self._conn.run(f"rm -rf {self._remote_sweep_dir}", check=False)
+                logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
         elif any_failed:
@@ -474,8 +449,8 @@ class SSHComputeSource(ComputeSource):
         return True
 
     # -------------------------------------------------------------- health
-    async def health_check(self) -> Dict[str, Any]:
-        info: Dict[str, Any] = {
+    async def health_check(self) -> dict[str, Any]:
+        info: dict[str, Any] = {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
             "host": self.host,
@@ -537,7 +512,7 @@ class SSHComputeSource(ComputeSource):
 # ---------------------------------------------------------- config factory
 
 
-def parse_gpus_arg(arg: Optional[str]) -> Union[None, int, List[int]]:
+def parse_gpus_arg(arg: str | None) -> None | int | list[int]:
     """Parse a ``--gpus`` CLI value into the shape :func:`normalize_gpu_allowlist` expects.
 
     Accepts (case-insensitive):
@@ -561,9 +536,7 @@ def parse_gpus_arg(arg: Optional[str]) -> Union[None, int, List[int]]:
         try:
             return [int(x.strip()) for x in s.split(",") if x.strip() != ""]
         except ValueError as e:
-            raise ValueError(
-                f"--gpus list must be comma-separated integers, got {arg!r}"
-            ) from e
+            raise ValueError(f"--gpus list must be comma-separated integers, got {arg!r}") from e
     try:
         return int(s)
     except ValueError as e:
@@ -576,14 +549,14 @@ def parse_gpus_arg(arg: Optional[str]) -> Union[None, int, List[int]]:
 def build_ssh_source(
     *,
     name: str,
-    remote_cfg: Optional[Dict[str, Any]] = None,
-    distributed_cfg: Optional[Dict[str, Any]] = None,
+    remote_cfg: dict[str, Any] | None = None,
+    distributed_cfg: dict[str, Any] | None = None,
     project_dir: str,
     script_path: str,
-    default_spec: Optional[ResourceSpec] = None,
-    gpus_override: Union[None, int, Sequence[int]] = None,
-    conda_env_override: Optional[str] = None,
-) -> "SSHComputeSource":
+    default_spec: ResourceSpec | None = None,
+    gpus_override: None | int | Sequence[int] = None,
+    conda_env_override: str | None = None,
+) -> SSHComputeSource:
     """Build a push-model :class:`SSHComputeSource` from local hsm_config.
 
     Resolves precedence per field:
@@ -624,9 +597,7 @@ def build_ssh_source(
         try:
             per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
         except (TypeError, ValueError) as e:
-            logger.warning(
-                f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring."
-            )
+            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
             per_remote_spec = None
     else:
         per_remote_spec = None
@@ -639,21 +610,15 @@ def build_ssh_source(
         if conda_env_override is not None
         else remote_cfg.get("conda_env", distributed_cfg.get("conda_env"))
     )
-    python_path = remote_cfg.get(
-        "python_path", distributed_cfg.get("python_path")
-    )
+    python_path = remote_cfg.get("python_path", distributed_cfg.get("python_path"))
 
     if gpus_override is not None:
-        gpus_value: Union[None, int, Sequence[int]] = gpus_override
+        gpus_value: None | int | Sequence[int] = gpus_override
     else:
         gpus_value = remote_cfg.get("gpus")
 
-    remote_root = remote_cfg.get(
-        "remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs")
-    )
-    rsync_excludes = remote_cfg.get(
-        "rsync_excludes", distributed_cfg.get("rsync_excludes")
-    )
+    remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
+    rsync_excludes = remote_cfg.get("rsync_excludes", distributed_cfg.get("rsync_excludes"))
     keep_remote_on_success = bool(
         remote_cfg.get(
             "keep_remote_on_success",

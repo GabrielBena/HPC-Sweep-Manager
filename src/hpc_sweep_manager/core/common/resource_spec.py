@@ -14,7 +14,7 @@ to derive a modified spec.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -42,9 +42,7 @@ class ResourceSpec:
         if self.mem is not None and self.mem_per_cpu is not None:
             raise ValueError("ResourceSpec: cannot set both 'mem' and 'mem_per_cpu'")
         if self.cpus_per_task is not None and self.cpus_per_task < 1:
-            raise ValueError(
-                f"ResourceSpec: cpus_per_task must be >= 1, got {self.cpus_per_task}"
-            )
+            raise ValueError(f"ResourceSpec: cpus_per_task must be >= 1, got {self.cpus_per_task}")
         if self.gpus is not None and self.gpus < 0:
             raise ValueError(f"ResourceSpec: gpus must be >= 0, got {self.gpus}")
         if self.gpu_type is not None and (self.gpus is None or self.gpus < 1):
@@ -52,14 +50,12 @@ class ResourceSpec:
         if isinstance(self.gpu_type, tuple):
             if not self.gpu_type:
                 raise ValueError(
-                    "ResourceSpec: gpu_type list must be non-empty (omit the "
-                    "field for 'any GPU')"
+                    "ResourceSpec: gpu_type list must be non-empty (omit the field for 'any GPU')"
                 )
             for t in self.gpu_type:
                 if not isinstance(t, str) or not t:
                     raise ValueError(
-                        f"ResourceSpec: gpu_type entries must be non-empty "
-                        f"strings, got {t!r}"
+                        f"ResourceSpec: gpu_type entries must be non-empty strings, got {t!r}"
                     )
         for mod in self.modules:
             if not isinstance(mod, str) or not mod:
@@ -142,9 +138,7 @@ class ResourceSpec:
 
 
 # Tiny convenience factory used by config loaders and CLI option parsers.
-def spec_from_legacy_resources(
-    resources: str | None, scheduler: str | None = None
-) -> ResourceSpec:
+def spec_from_legacy_resources(resources: str | None, scheduler: str | None = None) -> ResourceSpec:
     """Best-effort parse of the legacy opaque ``resources`` string into a ResourceSpec.
 
     The legacy field accepted either Slurm-style ``--flag=value`` segments or

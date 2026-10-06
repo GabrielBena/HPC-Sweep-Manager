@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import shlex
 import subprocess
-from typing import List, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,7 +19,6 @@ from hpc_sweep_manager.core.hpc.scheduler_queue import (
     JobGroup,
     QueueCommandError,
     QueueJob,
-    Reservation,
     SlurmQueue,
     SSHSlurmQueue,
     _parse_gpu_from_tres,
@@ -32,7 +30,6 @@ from hpc_sweep_manager.core.hpc.scheduler_queue import (
     parse_reservations_output,
     parse_sacct_job_states,
     parse_sinfo_gpu_capacity,
-    parse_squeue_output,
     positions_by_base,
     strip_array_suffix,
     summarize_gpu_jobs,
@@ -93,20 +90,48 @@ def _row(*fields: str) -> str:
 
 
 _SAMPLE_PENDING_H100 = _row(
-    "1001", "sweep_a_1", "alice", "PENDING", "(Priority)",
-    "standard", "cpu=1,gres/gpu:H100=1", "N/A", "5000",
+    "1001",
+    "sweep_a_1",
+    "alice",
+    "PENDING",
+    "(Priority)",
+    "standard",
+    "cpu=1,gres/gpu:H100=1",
+    "N/A",
+    "5000",
 )
 _SAMPLE_PENDING_L4 = _row(
-    "1002", "sweep_b_1", "bob", "PENDING", "(Resources)",
-    "standard", "cpu=2,gres/gpu:L4=1", "2026-05-28T16:00:00", "6000",
+    "1002",
+    "sweep_b_1",
+    "bob",
+    "PENDING",
+    "(Resources)",
+    "standard",
+    "cpu=2,gres/gpu:L4=1",
+    "2026-05-28T16:00:00",
+    "6000",
 )
 _SAMPLE_RUNNING_H100 = _row(
-    "1003", "sweep_c_1", "alice", "RUNNING", "u24-chiihm0-621",
-    "standard", "cpu=4,gres/gpu:H100=2", "N/A", "0",
+    "1003",
+    "sweep_c_1",
+    "alice",
+    "RUNNING",
+    "u24-chiihm0-621",
+    "standard",
+    "cpu=4,gres/gpu:H100=2",
+    "N/A",
+    "0",
 )
 _SAMPLE_PENDING_CPU = _row(
-    "1004", "datacrunch", "carol", "PENDING", "(Priority)",
-    "standard", "cpu=8,mem=32G", "N/A", "4000",
+    "1004",
+    "datacrunch",
+    "carol",
+    "PENDING",
+    "(Priority)",
+    "standard",
+    "cpu=8,mem=32G",
+    "N/A",
+    "4000",
 )
 _SAMPLE_MALFORMED = "1005\tbad\trow"  # too few fields
 
@@ -177,10 +202,10 @@ class TestGpuSummary:
     def test_aggregates_by_type_and_state(self):
         stdout = "\n".join(
             [
-                _SAMPLE_PENDING_H100,    # H100, pending, count 1
-                _SAMPLE_PENDING_L4,      # L4, pending, count 1
-                _SAMPLE_RUNNING_H100,    # H100, running, count 2
-                _SAMPLE_PENDING_CPU,     # ignored (no GPU)
+                _SAMPLE_PENDING_H100,  # H100, pending, count 1
+                _SAMPLE_PENDING_L4,  # L4, pending, count 1
+                _SAMPLE_RUNNING_H100,  # H100, running, count 2
+                _SAMPLE_PENDING_CPU,  # ignored (no GPU)
             ]
         )
         with patch("subprocess.run", return_value=_fake_completed(stdout)):
@@ -212,7 +237,9 @@ class TestPositionInQueue:
 
 class TestReservations:
     def test_no_reservations(self):
-        with patch("subprocess.run", return_value=_fake_completed("No reservations in the system\n")):
+        with patch(
+            "subprocess.run", return_value=_fake_completed("No reservations in the system\n")
+        ):
             assert SlurmQueue().reservations() == []
 
     def test_single_reservation_parsed(self):
@@ -370,13 +397,27 @@ class TestArrayIdHelpers:
 # ------------------------------------------------------------ pure aggregators
 
 
-def _job(job_id: str, state: str = "PENDING", gpu_count: int = 1,
-         gpu_type: Optional[str] = None, task_count: int = 1,
-         reason: str = "(Priority)") -> QueueJob:
+def _job(
+    job_id: str,
+    state: str = "PENDING",
+    gpu_count: int = 1,
+    gpu_type: str | None = None,
+    task_count: int = 1,
+    reason: str = "(Priority)",
+) -> QueueJob:
     return QueueJob(
-        job_id=job_id, name="n", user="u", state=state, reason=reason,
-        partition="standard", tres_per_node="", expected_start="N/A",
-        priority=0, gpu_count=gpu_count, gpu_type=gpu_type, task_count=task_count,
+        job_id=job_id,
+        name="n",
+        user="u",
+        state=state,
+        reason=reason,
+        partition="standard",
+        tres_per_node="",
+        expected_start="N/A",
+        priority=0,
+        gpu_count=gpu_count,
+        gpu_type=gpu_type,
+        task_count=task_count,
     )
 
 
@@ -396,10 +437,10 @@ class TestSummarizeTaskWeighted:
 class TestPositionsByBase:
     def test_groups_expanded_array_tasks(self):
         pending = [
-            _job("9_1"),           # someone else's task at position 1
-            _job("3703585_19"),    # mine
+            _job("9_1"),  # someone else's task at position 1
+            _job("3703585_19"),  # mine
             _job("9_2"),
-            _job("3703585_20"),    # mine
+            _job("3703585_20"),  # mine
         ]
         by_base = positions_by_base(pending)
         assert by_base["3703585"] == [2, 4]
@@ -434,8 +475,12 @@ class TestCountingPathsExpandArrays:
 
 def _group(base_id: str, **kw) -> JobGroup:
     defaults = dict(
-        name="n", user="u", partition="standard",
-        gpu_count=0, gpu_type=None, is_array=True,
+        name="n",
+        user="u",
+        partition="standard",
+        gpu_count=0,
+        gpu_type=None,
+        is_array=True,
     )
     defaults.update(kw)
     return JobGroup(base_id=base_id, **defaults)
@@ -495,7 +540,10 @@ class TestParseSacctJobStates:
     def test_live_shaped_fixture(self):
         states = parse_sacct_job_states(self._LIVE_SHAPED)
         assert states["3703585"] == {
-            "COMPLETED": 2, "FAILED": 1, "RUNNING": 1, "PENDING": 4,
+            "COMPLETED": 2,
+            "FAILED": 1,
+            "RUNNING": 1,
+            "PENDING": 4,
         }
         # CANCELLED-by long form parsed; TIMEOUT folds into FAILED; the
         # collapsed pending range is task-counted.
@@ -535,9 +583,7 @@ class TestEnrichGroupsWithAccounting:
 class TestSplitGresEntries:
     def test_comma_inside_parens_is_one_entry(self):
         # THE live trap: GresUsed index lists contain commas.
-        assert _split_gres_entries("gpu:A100:6(IDX:0-1,4-7)") == [
-            "gpu:A100:6(IDX:0-1,4-7)"
-        ]
+        assert _split_gres_entries("gpu:A100:6(IDX:0-1,4-7)") == ["gpu:A100:6(IDX:0-1,4-7)"]
 
     def test_top_level_commas_split(self):
         assert _split_gres_entries("gpu:A100:8,shard:a100:32") == [
@@ -607,8 +653,7 @@ class TestParseSinfoGpuCapacity:
     def test_vram_mixed_node_groups_lists_variants(self):
         # Live S3IT reality: H100 nodes exist in 80GB AND 96GB flavors.
         capacity, _ = parse_sinfo_gpu_capacity(
-            "n1 mix gpu:H100:2 gpu:0 X,GPUMEM96GB\n"
-            "n2 idle gpu:H100:8 gpu:0 X,GPUMEM80GB\n"
+            "n1 mix gpu:H100:2 gpu:0 X,GPUMEM96GB\nn2 idle gpu:H100:8 gpu:0 X,GPUMEM80GB\n"
         )
         assert capacity["H100"]["vram_gb"] == [80, 96]
 
@@ -618,8 +663,7 @@ class TestParseSinfoGpuCapacity:
 
     def test_vram_not_taken_from_unusable_nodes(self):
         capacity, _ = parse_sinfo_gpu_capacity(
-            "n1 idle gpu:A100:8 gpu:0\n"
-            "n2 down gpu:A100:8 gpu:0 X,GPUMEM80GB\n"
+            "n1 idle gpu:A100:8 gpu:0\nn2 down gpu:A100:8 gpu:0 X,GPUMEM80GB\n"
         )
         assert "vram_gb" not in capacity["A100"]
 
@@ -673,14 +717,14 @@ class FakeConn:
     """asyncssh stand-in: substring responder, records every command."""
 
     def __init__(self):
-        self.run_calls: List[str] = []
-        self._responder: List[tuple] = []
+        self.run_calls: list[str] = []
+        self._responder: list[tuple] = []
         self.run_delay_s: float = 0.0
 
     def add(self, sub: str, res: _Result) -> None:
         self._responder.append((sub, res))
 
-    async def run(self, cmd: str, *, input: Optional[str] = None, check: bool = False):
+    async def run(self, cmd: str, *, input: str | None = None, check: bool = False):
         self.run_calls.append(cmd)
         if self.run_delay_s:
             await asyncio.sleep(self.run_delay_s)
@@ -693,8 +737,17 @@ class FakeConn:
 
 # A live-grammar row (colon-count GRES) as the remote would emit it.
 _REMOTE_ROW_A100 = "\t".join(
-    ["3703585_14", "sweep_x_array", "gbena", "RUNNING", "u24-chaiam0-615",
-     "standard", "gres/gpu:A100:1", "2026-06-04T09:05:27", "106515"]
+    [
+        "3703585_14",
+        "sweep_x_array",
+        "gbena",
+        "RUNNING",
+        "u24-chaiam0-615",
+        "standard",
+        "gres/gpu:A100:1",
+        "2026-06-04T09:05:27",
+        "106515",
+    ]
 )
 
 
@@ -766,8 +819,9 @@ class TestSSHSlurmQueue:
         conn = FakeConn()
         conn.add(
             "scontrol",
-            _Result(0, "ReservationName=maint StartTime=s EndTime=e "
-                       "Duration=d Nodes=n NodeCnt=3\n"),
+            _Result(
+                0, "ReservationName=maint StartTime=s EndTime=e Duration=d Nodes=n NodeCnt=3\n"
+            ),
         )
         res = await SSHSlurmQueue(conn).reservations()
         assert len(res) == 1 and res[0].node_count == 3

@@ -147,15 +147,15 @@ class TestSpecFromCliModeAware:
         spec = spec_from_cli(
             walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="local"
         )
-        assert spec.gpus == 1            # from local: block
+        assert spec.gpus == 1  # from local: block
         assert spec.walltime == "02:00:00"
-        assert spec.gpu_type is None     # slurm: block must not leak
+        assert spec.gpu_type is None  # slurm: block must not leak
 
     def test_array_mode_reads_only_slurm_block(self):
         spec = spec_from_cli(
             walltime=None, resources=None, hsm_config=self._both_blocks_cfg(), mode="array"
         )
-        assert spec.gpus == 4            # from slurm: block
+        assert spec.gpus == 4  # from slurm: block
         assert spec.walltime == "08:00:00"
         assert spec.gpu_type == "h100"
 
@@ -238,9 +238,7 @@ class TestBuildComputeSource:
                 return None
 
         with pytest.raises(RuntimeError, match="not enabled"):
-            build_compute_source(
-                mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS
-            )
+            build_compute_source(mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS)
 
     def test_distributed_requires_sources(self):
         class FakeConfig:
@@ -250,9 +248,7 @@ class TestBuildComputeSource:
                 return None
 
         with pytest.raises(RuntimeError, match="No compute sources"):
-            build_compute_source(
-                mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS
-            )
+            build_compute_source(mode="distributed", hsm_config=FakeConfig(), **self.BASE_KWARGS)
 
     def test_distributed_builds_source(self):
         from hpc_sweep_manager.core.distributed.distributed_compute_source import (
@@ -260,9 +256,7 @@ class TestBuildComputeSource:
         )
 
         class FakeConfig:
-            config_data = {
-                "distributed": {"enabled": True, "local_max_jobs": 2, "remotes": {}}
-            }
+            config_data = {"distributed": {"enabled": True, "local_max_jobs": 2, "remotes": {}}}
 
             def get_max_array_size(self):
                 return None
@@ -322,9 +316,7 @@ class TestBuildComputeSource:
         assert source._visible_gpus == [0, 2]
 
     def test_local_mode_no_config_no_cli_means_all_detected(self, no_gpus):
-        source, _, _ = build_compute_source(
-            mode="local", hsm_config=None, **self.BASE_KWARGS
-        )
+        source, _, _ = build_compute_source(mode="local", hsm_config=None, **self.BASE_KWARGS)
         assert source._visible_gpus is None  # LocalComputeSource will use all detected
 
     def test_local_mode_no_parallel_jobs_falls_back_to_one(self, no_gpus):
@@ -384,33 +376,25 @@ class TestBuildComputeSource:
             build_compute_source(mode="array", **self.BASE_KWARGS)
 
     def test_individual_mode_with_slurm(self, fake_slurm):
-        source, resolved, sub_mode = build_compute_source(
-            mode="individual", **self.BASE_KWARGS
-        )
+        source, resolved, sub_mode = build_compute_source(mode="individual", **self.BASE_KWARGS)
         assert isinstance(source, SlurmComputeSource)
         assert resolved == "individual"
         assert sub_mode == "individual"
 
     def test_array_mode_with_slurm(self, fake_slurm):
-        source, resolved, sub_mode = build_compute_source(
-            mode="array", **self.BASE_KWARGS
-        )
+        source, resolved, sub_mode = build_compute_source(mode="array", **self.BASE_KWARGS)
         assert isinstance(source, SlurmComputeSource)
         assert resolved == "array"
         assert sub_mode == "array"
 
     def test_default_spec_is_propagated(self, fake_slurm):
         spec = ResourceSpec(walltime="03:00:00", cpus_per_task=2)
-        source, _, _ = build_compute_source(
-            mode="array", default_spec=spec, **self.BASE_KWARGS
-        )
+        source, _, _ = build_compute_source(mode="array", default_spec=spec, **self.BASE_KWARGS)
         assert source.default_spec is spec
 
     def test_qos_whitelist_is_propagated_to_slurm(self, fake_slurm):
         wl = frozenset({"normal", "long"})
-        source, _, _ = build_compute_source(
-            mode="array", qos_whitelist=wl, **self.BASE_KWARGS
-        )
+        source, _, _ = build_compute_source(mode="array", qos_whitelist=wl, **self.BASE_KWARGS)
         assert source.qos_whitelist is wl
 
     def test_qos_whitelist_from_hsm_config_is_used(self, fake_slurm):
@@ -419,9 +403,7 @@ class TestBuildComputeSource:
         from hpc_sweep_manager.core.common.config import HSMConfig
 
         cfg = HSMConfig({"slurm": {"qos_whitelist": ["normal", "medium", "long"]}})
-        source, _, _ = build_compute_source(
-            mode="array", hsm_config=cfg, **self.BASE_KWARGS
-        )
+        source, _, _ = build_compute_source(mode="array", hsm_config=cfg, **self.BASE_KWARGS)
         assert source.qos_whitelist == frozenset({"normal", "medium", "long"})
 
     def test_explicit_qos_whitelist_overrides_hsm_config(self, fake_slurm):

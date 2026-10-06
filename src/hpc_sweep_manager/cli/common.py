@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import click
 from rich.console import Console
@@ -55,9 +55,7 @@ def validate_project_setup(console: Console, logger: logging.Logger) -> bool:
     return True
 
 
-def load_hsm_config_with_validation(
-    console: Console, logger: logging.Logger
-) -> Optional[HSMConfig]:
+def load_hsm_config_with_validation(console: Console, logger: logging.Logger) -> HSMConfig | None:
     """Load HSM config with validation and user-friendly error messages."""
     hsm_config = HSMConfig.load()
 
@@ -78,7 +76,7 @@ def load_hsm_config_with_validation(
     return hsm_config
 
 
-def display_project_status(console: Console, logger: logging.Logger) -> Dict[str, Any]:
+def display_project_status(console: Console, logger: logging.Logger) -> dict[str, Any]:
     """Display comprehensive project status information."""
     console.print("\n[bold blue]Project Status Overview[/bold blue]")
 
@@ -240,7 +238,7 @@ def display_sweep_summary(
     total_combinations: int,
     mode: str,
     config_path: Path,
-    max_runs: Optional[int] = None,
+    max_runs: int | None = None,
 ):
     """Display a summary before sweep execution."""
     effective_runs = min(total_combinations, max_runs) if max_runs else total_combinations
