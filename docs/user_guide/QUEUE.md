@@ -197,6 +197,19 @@ The account defaults to the remote's `spec.account` (or the `slurm:` block's).
 The command exits 3 when the account is *hot* (over 2x its share, or a
 co-worker waiting on `Priority`), so scripts and hooks can react.
 
+`hsm sweep run` makes the same check before every Slurm launch whose spec has
+an `account`, and prints the line (dry-runs too). When the account is hot it
+asks:
+
+- **`t`, the default:** throttle the array to 50 tasks at once (or the spec's lower
+  `array_throttle`) and go. A launch with no terminal takes it.
+- **`a`:** launch as asked. `--force` does this and skips the question.
+- **`w`:** wait. HSM re-checks every 30 min and launches as asked once the account
+  cools; after 12 h it throttles and goes.
+- **`c`:** cancel.
+
+A failed check never blocks a launch.
+
 ## Watch mode
 
 `mine` and `gpus` take `--watch` (with `--refresh N`, default 30s) for a

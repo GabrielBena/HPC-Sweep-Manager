@@ -77,6 +77,11 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **`hsm queue share` (FR#10).** How loaded the shared account is, and how much of it
   is you: the account's usage against its share, running CPUs by user, co-workers
   waiting and why. It exits 3 when the account is hot. One SSH round trip.
+- **Slurm launches check the account's fair share (S-4).** `hsm sweep run` prints the
+  account's load before every Slurm launch whose spec has an `account`, and when the
+  account is hot it asks: throttle to 50 at once and go (the default, also taken
+  with no terminal), launch as asked (`--force` skips the question), wait for the
+  account to cool (re-checked every 30 min, at most 12 h), or cancel.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))

@@ -26,6 +26,7 @@ from ..core.common.sweep_orchestrator import (
 )
 from ..core.common.templating import params_to_hydra_args
 from .common import common_options
+from .launch_gate import fair_share_gate
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +458,7 @@ def _run_sweep_via_orchestrator(
     sweep_resumable_block: dict | None = None,
     resumable_flag: bool = False,
     chunk_walltime: str | None = None,
+    force: bool = False,
 ) -> None:
     """Route a sweep through the unified ComputeSource orchestrator.
 
@@ -583,6 +585,19 @@ def _run_sweep_via_orchestrator(
         hsm_config=hsm_config,
         console=console,
     )
+    # The account's fair share (S-4): printed on every Slurm launch, a prompt when it's hot.
+    spec = fair_share_gate(
+        source,
+        effective_spec,
+        spec,
+        array=sub_mode == "array",
+        force=force,
+        dry_run=dry_run,
+        console=console,
+    )
+    if spec is None:
+        console.print("Cancelled.")
+        return
 
     if dry_run:
         from ..core.remote.push_exec import resolve_run_prefix
@@ -847,6 +862,7 @@ def run_sweep(
     remote_submission: str | None = None,
     resumable_flag: bool = False,
     chunk_walltime: str | None = None,
+    force: bool = False,
 ):
     """Run parameter sweep (orchestrator-only path)."""
 
@@ -951,6 +967,7 @@ def run_sweep(
             sweep_resumable_block=config.resumable,
             resumable_flag=resumable_flag,
             chunk_walltime=chunk_walltime,
+            force=force,
         )
 
     except FileNotFoundError:
@@ -1025,6 +1042,11 @@ def sweep_cmd(ctx):
         "resumable.chunk_walltime from config. Implies --resumable."
     ),
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Launch as asked, even on a hot shared account (skips the fair-share prompt).",
+)
 @common_options
 @click.pass_context
 def run_cmd(
@@ -1043,6 +1065,7 @@ def run_cmd(
     no_progress,
     resumable_flag,
     chunk_walltime,
+    force,
     verbose,
     quiet,
 ):
@@ -1092,6 +1115,7 @@ def run_cmd(
         remote_submission=remote_submission,
         resumable_flag=resumable_flag,
         chunk_walltime=chunk_walltime,
+        force=force,
     )
 
 
