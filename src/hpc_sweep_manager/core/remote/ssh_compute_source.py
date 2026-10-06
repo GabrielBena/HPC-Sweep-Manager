@@ -68,12 +68,13 @@ LAUNCH_TRIES = 3  # a task whose launch fails this often is FAILED
 RUN_TIMEOUT_S = 300  # a remote command that takes longer counts as a dropped link
 
 # One poll for every running task: `p <task dir> <pid> <job id>` prints "<job> rc <code>",
-# "<job> run" (its process group is alive) or "<job> gone" (dead without an exit code: killed
-# hard, or the host rebooted). The second rc check closes the race with a task that ends
-# between the first and `kill -0`; `-s` reads a half-written rc file as still running.
+# "<job> run" (its process group is alive, or its pid: just after launch, before setsid has
+# made it a group) or "<job> gone" (dead without an exit code: killed hard, or the host
+# rebooted). The second rc check closes the race with a task that ends between the first and
+# `kill -0`; `-s` reads a half-written rc file as still running.
 _POLL_FN = (
     'p() { if [ -s "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
-    'elif kill -0 -- -"$2" 2>/dev/null; then echo "$3 run"; '
+    'elif kill -0 -- -"$2" 2>/dev/null || kill -0 "$2" 2>/dev/null; then echo "$3 run"; '
     'elif [ -s "$1/.hsm_rc" ]; then echo "$3 rc $(cat "$1/.hsm_rc")"; '
     'else echo "$3 gone"; fi; }'
 )
