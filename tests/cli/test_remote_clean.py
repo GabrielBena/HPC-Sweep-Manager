@@ -236,6 +236,28 @@ class TestCleanRefusals:
         assert result.exit_code != 0 and "unexpected characters" in result.output
         assert remote["last_host"] is None
 
+    def test_crafted_name_cannot_redirect_the_rm(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        (runs / "x\n@@target " / "victim").mkdir(parents=True)
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+        self._assert_refused(_clean("box", "-y", "--all-projects"), remote)
+        assert (runs / "proj" / "code").exists()
+
+    def test_target_changed_during_the_prompt_refused(self, tmp_path, monkeypatch, remote):
+        runs = tmp_path / "remote" / "runs"
+        _hsm_tree(runs, "proj")
+        _project(tmp_path, monkeypatch, _root_cfg(runs))
+
+        def confirm_while_someone_writes(*args, **kwargs):
+            (runs / "proj" / "results").mkdir()
+            return True
+
+        monkeypatch.setattr("click.confirm", confirm_while_someone_writes)
+        result = _clean("box")
+        assert result.exit_code != 0 and "changed since it was checked" in result.output
+        assert _rm_calls(remote) == [] and (runs / "proj" / "results").exists()
+
     def test_default_mode_without_project_config_refused(self, tmp_path, monkeypatch, remote):
         sub = tmp_path / "local" / "proj" / "subdir"
         sub.mkdir(parents=True)
@@ -245,26 +267,55 @@ class TestCleanRefusals:
         assert remote["last_host"] is None
 
 
+def _records(*records: str, noise: str = "") -> str:
+    """Probe output: optional rc-file noise, then NUL-terminated records."""
+    return noise + "".join(f"{r}\0" for r in records)
+
+
 class TestCleanVerdict:
     """The pure guard on probe output (cases a local bash can't stage safely)."""
 
     def test_rc_file_noise_is_ignored(self):
-        out = "Welcome!\n@@target /s/u/runs/p\n@@home /home/u\n@@entry d \n@@entry d code\n"
+        out = _records(
+            "@@target /s/u/runs/p", "@@home /home/u", "@@entry d ", "@@entry d code", noise="Hi!\n"
+        )
         assert _clean_verdict(out, all_projects=False) == ("/s/u/runs/p", True, None)
 
     @pytest.mark.parametrize("target", ["/", "/home", "/home/u"])
     def test_root_home_and_ancestors_refused(self, target):
-        out = f"@@target {target}\n@@home /home/u\n@@entry d \n"
+        out = _records(f"@@target {target}", "@@home /home/u", "@@entry d ")
         assert _clean_verdict(out, all_projects=True)[2] is not None
 
     @pytest.mark.parametrize("home", ["", "relative"])
     def test_unresolved_home_is_unsafe(self, home):
-        out = f"@@target /s/u/runs\n@@home {home}\n"
+        out = _records("@@target /s/u/runs", f"@@home {home}")
         assert _clean_verdict(out, all_projects=True)[2] is not None
 
     def test_missing_target_is_a_noop(self):
-        assert _clean_verdict("@@target /s/u/runs/p\n@@home /home/u\n", False) == (
-            "/s/u/runs/p",
-            False,
-            None,
+        out = _records("@@target /s/u/runs/p", "@@home /home/u")
+        assert _clean_verdict(out, False) == ("/s/u/runs/p", False, None)
+
+    def test_a_name_cannot_forge_the_target(self):
+        # A dir named "x\n@@target " with a child "victim": with newline-separated
+        # output its child's line read "@@target /victim" and replaced the target.
+        out = _records(
+            "@@target /s/u/runs",
+            "@@home /home/u",
+            "@@entry d ",
+            "@@entry d x\n@@target ",
+            "@@entry d x\n@@target /victim",
         )
+        target, _, why = _clean_verdict(out, all_projects=True)
+        assert target == "/s/u/runs" and why is not None
+
+    @pytest.mark.parametrize(
+        "out",
+        [
+            _records("@@target /s/u/runs", "@@target /victim", "@@home /home/u"),
+            _records("@@target /s/u/runs", "@@home /home/u", "@@target /victim"),
+            _records("@@target /s/u/runs", "@@home /home/u", "@@entry d ") + "trailing",
+            "@@target /s/u/runs\n@@home /home/u\n@@entry d \n",  # not NUL-separated
+        ],
+    )
+    def test_unexpected_records_refused(self, out):
+        assert "unexpected probe output" in _clean_verdict(out, all_projects=True)[2]

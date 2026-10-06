@@ -102,41 +102,45 @@ def _clean_target(name: str, hsm_config, all_projects: bool) -> tuple[dict, str,
 def _clean_probe(root: str, project: str | None) -> str:
     """ONE remote command: the canonical target and ``$HOME``, then the target's tree.
 
-    Lines are sentinel-marked so rc-file noise can't shift them; ``root`` stays
-    unquoted so ``~``/``$VAR`` expand (``_SAFE_ROOT`` vetted it first).
+    Records are NUL-terminated (a file name can't hold a NUL, so it can't forge
+    one); ``root`` stays unquoted so ``~``/``$VAR`` expand (``_SAFE_ROOT`` vetted it).
     """
     sub = f"/{shlex.quote(project)}" if project else ""
     return (
         f't=$(realpath -m -- {root}{sub}) && h=$(realpath -m -- "$HOME") && '
-        'echo "@@target $t" && echo "@@home $h" && '
-        f"find \"$t\" -maxdepth {1 if project else 2} -printf '@@entry %y %P\\n' 2>/dev/null; true"
+        'printf \'@@target %s\\0@@home %s\\0\' "$t" "$h" && '
+        f"find \"$t\" -maxdepth {1 if project else 2} -printf '@@entry %y %P\\0' 2>/dev/null; true"
     )
 
 
 def _clean_verdict(out: str, all_projects: bool) -> tuple[str, bool, str | None]:
     """Judge the probe's output → (canonical target, exists, why it must not be removed).
 
+    Exactly ``@@target``, ``@@home``, then only ``@@entry`` records, else refused.
     Safe only if the target is neither ``/`` nor ``$HOME`` nor above it, and holds nothing
     but HSM's own dirs: ``<project>/{code,sweeps,snapshots}`` (one level deeper for --all).
     """
-    tags, entries = {}, []
-    for line in out.splitlines():
-        key, _, val = line.partition(" ")
-        if key == "@@entry":
-            entries.append(val.partition(" ")[::2])  # (type, path relative to the target)
-        elif key in ("@@target", "@@home"):
-            tags[key] = val
-    target, home = tags.get("@@target", ""), tags.get("@@home", "")
-    if not target.startswith("/") or not home.startswith("/"):
-        return target, False, "the remote could not resolve it or $HOME (needs GNU realpath)"
+    first, *rest = out.split("\0")
+    records = [first.rpartition("\n")[2], *rest]  # rc-file noise can only come first
+    if (
+        len(records) < 3
+        or records[-1]  # output after the last record
+        or not records[0].startswith("@@target /")
+        or not records[1].startswith("@@home /")
+        or not all(r.startswith("@@entry ") for r in records[2:-1])
+    ):
+        return "", False, "unexpected probe output (needs GNU realpath and find); check the remote"
+    target, home = records[0].removeprefix("@@target "), records[1].removeprefix("@@home ")
+    entries = [r.removeprefix("@@entry ").partition(" ")[::2] for r in records[2:-1]]
     if PurePosixPath(target) in (PurePosixPath(home), *PurePosixPath(home).parents):
-        return target, True, "it is / or $HOME, or contains $HOME"
+        return target, True, "it is / or $HOME, or contains $HOME; point the root at its own dir"
     level = 2 if all_projects else 1  # how deep HSM's own dirs sit below the target
     for kind, rel in entries:
         depth = rel.count("/") + 1 if rel else 0
         foreign = depth == level and rel.split("/")[-1] not in _HSM_PROJECT_DIRS
         if foreign or (depth < level and kind != "d"):
-            return target, True, f"it holds {rel or 'a non-directory'!r}, which HSM does not create"
+            what = rel or "a non-directory"
+            return target, True, f"it holds {what!r}, which HSM does not create; move it by hand"
     return target, bool(entries), None
 
 
@@ -519,10 +523,13 @@ def clean(name: str, all_projects: bool, yes: bool):
     async def do_clean():
         connect = create_ssh_connection(host, remote_cfg.get("ssh_key"), remote_cfg.get("ssh_port"))
         async with await connect as conn:
-            out = (await conn.run(_clean_probe(root, project), check=False)).stdout or ""
+            probe = _clean_probe(root, project)
+            out = (await conn.run(probe, check=False)).stdout or ""
             target, exists, why = _clean_verdict(out, all_projects)
             if why:
-                raise click.ClickException(f"Refusing to clean {target or root!r} on {host}: {why}")
+                raise click.ClickException(
+                    f"Refusing to clean {target or root!r} on {host}: {why}, then rerun."
+                )
             if not exists:
                 console.print(f"Nothing to clean: {target} does not exist on {host}.")
                 return
@@ -530,6 +537,10 @@ def clean(name: str, all_projects: bool, yes: bool):
             if not yes and not click.confirm(f"Remove {target}{scope} on {host}?", default=False):
                 console.print("Cancelled.")
                 return
+            if (await conn.run(probe, check=False)).stdout != out:  # changed during the prompt
+                raise click.ClickException(
+                    f"{target} on {host} changed since it was checked; nothing removed. Rerun."
+                )
             rc = (await conn.run(f"rm -rf -- {shlex.quote(target)}", check=False)).returncode
             if rc == 0:
                 console.print(f"[green]✓ Cleaned {target} on {host}[/green]")
