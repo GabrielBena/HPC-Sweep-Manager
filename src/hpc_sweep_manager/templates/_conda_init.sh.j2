@@ -11,7 +11,8 @@
    Caller-supplied context: requires `uses_conda` to be truthy to emit
    anything; emits a no-op when false (no conda env requested). With
    `conda_env`, the first install that has `envs/<conda_env>` wins (else the
-   first install found), so a leftover ~/miniconda3 can't shadow ~/miniforge3.
+   first install found, unless micromamba holds the env), so a leftover
+   ~/miniconda3 can't shadow ~/miniforge3.
 #}
 {% if uses_conda %}
 # --- HSM conda / micromamba init (non-interactive shells skip .bashrc) -------
@@ -31,11 +32,15 @@ if [ "$_hsm_conda_loaded" -eq 0 ]; then
         [ -n "$_r" ] && [ -f "$_r/etc/profile.d/conda.sh" ] || continue
         _hsm_first="${_hsm_first:-$_r}"
 {% if conda_env %}
-        [ -d "$_r/envs/{{ conda_env }}" ] || continue
+        [ -d "$_r/envs/{{ conda_env }}/conda-meta" ] || continue
 {% endif %}
         _hsm_pick="$_r"
         break
     done
+{% if conda_env %}
+    # An env in micromamba's root is left to the micromamba bridge below.
+    [ -d "${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/envs/{{ conda_env }}" ] && _hsm_first=""
+{% endif %}
     _hsm_pick="${_hsm_pick:-$_hsm_first}"
     if [ -n "$_hsm_pick" ]; then
         # shellcheck disable=SC1091

@@ -270,7 +270,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **The conda probe sources the install that has the env (R11, FR#15a).** With no conda on
   PATH, the task script sourced the first `conda.sh` it found, so a leftover
   `~/miniconda3` shadowed the `~/miniforge3` that holds the env. It now sources the first
-  install with `envs/<env>` (else the first found, as before), and also tries
+  install with `envs/<env>` (else the first found, as before, unless the env is in
+  micromamba's root), and also tries
   `$CONDA_EXE`'s prefix and `~/mambaforge`. A conda already on PATH (`module load
   miniforge3`) still wins.
 
