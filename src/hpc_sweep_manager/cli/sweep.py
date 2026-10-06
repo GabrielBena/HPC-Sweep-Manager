@@ -2149,12 +2149,17 @@ async def _cancel_ssh(sweep_dir: Path, manifest: dict, console: Console) -> int:
         source._conn = await source._open_connection()
         await source.recover_pids()
         await source.update_all_job_statuses()
+        if source._down_since:  # every listed task would still read as running
+            console.print(f"[red]Could not read the tasks on {source.host}; try again.[/red]")
+            return 1
         live = list(source.active_jobs)
         sent = [job for job in live if await source.cancel_job(job)]
+        source.active_jobs.clear()  # TERMed: no "they keep running" hint from cleanup()
         colour = "green" if len(sent) == len(live) else "red"
+        why = "" if len(sent) == len(live) else " (the rest had ended, or were unreachable)"
         console.print(
             f"[{colour}]Sent TERM to {len(sent)} of {len(live)} running task(s) on "
-            f"{source.host}.[/{colour}] `hsm sweep collect {source.sweep_id}` pulls them."
+            f"{source.host}{why}.[/{colour}] `hsm sweep collect {source.sweep_id}` pulls them."
         )
         return 0 if len(sent) == len(live) else 1
     except (OSError, asyncssh.Error) as e:

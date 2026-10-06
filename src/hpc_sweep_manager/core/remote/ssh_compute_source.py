@@ -582,9 +582,15 @@ class SSHComputeSource(ComputeSource):
         pid = self._pids.get(job_id)
         if pid is None or job_id not in self.active_jobs or job_id in self._cancelled:
             return False
+        stamp = shlex.quote(f"{self._task_dirs[job_id]}/.hsm_pid")
         try:
-            # The group exists once the task has called setsid; just after launch, the pid does.
-            sent = await self._run(f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid}")
+            # A live pid younger than its .hsm_pid is another process's (a reused pid): exit 3,
+            # nothing sent. The group exists once the task has called setsid; before, the pid.
+            sent = await self._run(
+                f"if a=$(ps -o etimes= -p {pid}); then "
+                f"[ $(( $(date +%s) - $(stat -c %Y {stamp}) )) -le $(( a + 2 )) ] || exit 3; fi; "
+                f"kill -TERM -- -{pid} 2>/dev/null || kill -TERM {pid}"
+            )
         except (OSError, asyncssh.Error) as e:
             sent = SimpleNamespace(returncode=repr(e))
         if sent.returncode != 0:  # already ended, or the link dropped
