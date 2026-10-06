@@ -94,17 +94,19 @@ Example combos:
 
 ## Conda env vs explicit Python path
 
-The wrapper script's interpreter is resolved in this order:
+The wrapper script's interpreter comes from the narrowest place that sets one:
 
-1. `conda_env` (from `--conda-env` CLI flag / `distributed.conda_env` in
-   `.hsm/config.yaml`) → renders `conda run -n <env> python`.
-   The script also sources `conda.sh` from the standard locations
-   (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`, `/opt/conda`)
-   before invoking, since non-interactive SSH shells skip `~/.bashrc`.
-2. `python_path` (per-remote `python_path` in config) → renders that
-   absolute path.
-3. Bare `python` on the remote PATH (whatever the non-interactive shell
-   finds).
+1. the `--conda-env` CLI flag;
+2. the remote's own entry (`distributed.remotes.<alias>`), with `conda_env` or `python_path`;
+3. the `distributed:` block, with `conda_env` or `python_path`;
+4. the project's `paths.conda_env`;
+5. bare `python` on the remote PATH (whatever the non-interactive shell finds).
+
+A level that sets either key is taken whole, so a remote's `python_path` wins over a
+`paths.conda_env`. A conda env renders `conda run -n <env> python`, and the script sources
+`conda.sh` from the standard locations (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`,
+`/opt/conda`) first, since non-interactive SSH shells skip `~/.bashrc`. A `python_path`
+renders that path as is. Within one level, `conda_env` wins over `python_path`.
 
 Quick reachability check before your first sweep:
 

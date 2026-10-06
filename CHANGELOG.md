@@ -235,6 +235,13 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   never gets a running task's dir removed. While the launcher still runs (it holds a lock
   on the sweep dir), collect refuses: the launcher collects the sweep itself. (A
   distributed sweep's ssh children write no manifest: they share the sweep dir.)
+- **A remote's own `python_path` is used (C5, FR#15b).** The project's `paths.conda_env`
+  beat a `python_path` set on a remote, so a box whose env lives elsewhere ran the
+  project's env. The interpreter now comes from the narrowest place that sets one: the
+  `--conda-env` flag, the remote's entry, the `distributed:` block, then
+  `paths.conda_env`. A level that sets `conda_env` or `python_path` is taken whole, by one
+  helper shared by the ssh and ssh-slurm factories. **For consumers:** a remote with a
+  `python_path` and no `conda_env` now runs that `python_path`.
 
 ### Removed (2026-10 maintenance pass)
 

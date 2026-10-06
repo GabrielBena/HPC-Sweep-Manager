@@ -88,6 +88,7 @@ from .push_exec import (
     build_rsync_push_cmd,
     own_snapshot,
     pin_code_refs,
+    remote_interpreter,
     resolve_run_prefix,
     snapshot_prepare_cmd,
 )
@@ -1147,12 +1148,7 @@ def build_ssh_slurm_source(
     if max_parallel_jobs and (default_spec is None or default_spec.array_throttle is None):
         default_spec = replace(default_spec or ResourceSpec(), array_throttle=max_parallel_jobs)
 
-    conda_env = (
-        conda_env_override
-        if conda_env_override is not None
-        else remote_cfg.get("conda_env", distributed_cfg.get("conda_env"))
-    )
-    python_path = remote_cfg.get("python_path", distributed_cfg.get("python_path", "python"))
+    conda_env, python_path = remote_interpreter(remote_cfg, distributed_cfg, conda_env_override)
 
     remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
     # Storage-tier awareness: workdir overrides remote_root for the active

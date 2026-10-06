@@ -56,6 +56,7 @@ from .push_exec import (
     own_snapshot,
     partition_gpu_slots,
     pin_code_refs,
+    remote_interpreter,
     resolve_run_prefix,
     snapshot_prepare_cmd,
 )
@@ -781,12 +782,7 @@ def build_ssh_source(
         per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
-    conda_env = (
-        conda_env_override
-        if conda_env_override is not None
-        else remote_cfg.get("conda_env", distributed_cfg.get("conda_env"))
-    )
-    python_path = remote_cfg.get("python_path", distributed_cfg.get("python_path"))
+    conda_env, python_path = remote_interpreter(remote_cfg, distributed_cfg, conda_env_override)
 
     if gpus_override is not None:
         gpus_value: None | int | Sequence[int] = gpus_override

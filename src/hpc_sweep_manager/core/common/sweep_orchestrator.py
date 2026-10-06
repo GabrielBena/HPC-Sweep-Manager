@@ -222,12 +222,11 @@ def build_compute_source(
             raise RuntimeError("--mode remote requires --remote <alias>")
         # Lookup: a registered remote, or a bare ssh-config alias (empty cfg) if none are.
         distributed_cfg = dict(hsm_config.config_data.get("distributed", {}) if hsm_config else {})
-        # paths.conda_env is the lowest-priority fallback for the SSH
-        # factories. Per-remote / distributed.conda_env still win because
-        # we only inject when absent.
+        # paths.conda_env is the widest fallback for the SSH factories: an interpreter set on
+        # the remote or the distributed block wins (push_exec.remote_interpreter).
         if hsm_config is not None:
             _proj_env = getattr(hsm_config, "get_conda_env", lambda: None)()
-            if _proj_env and "conda_env" not in distributed_cfg:
+            if _proj_env and not distributed_cfg.keys() & {"conda_env", "python_path"}:
                 distributed_cfg["conda_env"] = _proj_env
         registered = distributed_cfg.get("remotes") or {}
         if registered and remote_alias not in registered:

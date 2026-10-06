@@ -370,9 +370,10 @@ it's trying to reintroduce them, push back.
 10. **`paths.conda_env` is the single source of truth for the python env.**
     Replaces the deprecated `paths.python_interpreter` (absolute python path).
     `HSMConfig.get_conda_env()` reads it; the orchestrator forwards it to
-    LocalComputeSource and SlurmComputeSource constructors, and falls back
-    into `distributed.conda_env` for SSH/SSH-Slurm children that don't have
-    a per-remote override. Each compute source wraps the supplied
+    LocalComputeSource and SlurmComputeSource constructors, and is the widest
+    fallback for SSH/SSH-Slurm children: a `conda_env` or `python_path` set on
+    the remote or the `distributed:` block wins, the narrowest level taken whole
+    (`push_exec.remote_interpreter`, shared by both factories). Each compute source wraps the supplied
     `python_path` in `conda run -n <env> python` via
     `resolve_run_prefix(conda_env, None)` and renders the shared
     `_conda_init.sh.j2` partial (uses_conda=True), so every backend

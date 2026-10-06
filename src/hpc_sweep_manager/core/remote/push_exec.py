@@ -125,6 +125,20 @@ def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
     return "python"
 
 
+def remote_interpreter(
+    remote_cfg: dict, distributed_cfg: dict, conda_env_override: str | None = None
+) -> tuple[str | None, str | None]:
+    """``(conda_env, python_path)`` for a remote: a CLI ``--conda-env``, else the narrowest of the
+    remote's entry and the ``distributed:`` block that sets either, taken whole. So a remote's
+    ``python_path`` is never beaten by an env set more widely (``paths.conda_env`` included)."""
+    if conda_env_override is not None:
+        return conda_env_override, None
+    for level in (remote_cfg, distributed_cfg):
+        if "conda_env" in level or "python_path" in level:
+            return level.get("conda_env"), level.get("python_path")
+    return None, None
+
+
 def build_rsync_push_cmd(
     local_dir: str,
     host: str,
