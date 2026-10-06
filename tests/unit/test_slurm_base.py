@@ -190,11 +190,27 @@ class TestCpuOnlyJobsKeepOffGpuNodes:
         assert await src._off_gpu_nodes(spec) == got and src.calls == ["sinfo"]  # once
 
     @pytest.mark.parametrize(
-        "spec", [ResourceSpec(gpus=1), ResourceSpec(cpu_only_nodes=False)], ids=["gpu", "opt-out"]
+        "spec",
+        [
+            ResourceSpec(partition="standard", gpus=1),
+            ResourceSpec(partition="standard", extra_directives=(("gres", "gpu:1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("--gpus-per-task", "1"),)),
+            ResourceSpec(partition="standard", cpu_only_nodes=False),
+            ResourceSpec(),  # the default partition isn't known here
+        ],
+        ids=["gpus", "gres-directive", "gpus-directive", "opt-out", "no-partition"],
     )
-    async def test_gpu_jobs_and_opt_outs_are_left_alone(self, spec):
+    async def test_gpu_jobs_opt_outs_and_unknown_partitions_are_left_alone(self, spec):
         src = ScriptedSlurm([])
         assert await src._off_gpu_nodes(spec) == spec and src.calls == []
+
+    @pytest.mark.parametrize(
+        "sinfo", [(0, "gpu-1 gpu:A100:4\ngpu-2 gpu:H100:8\n", ""), (1, "", "sinfo: error")]
+    )
+    async def test_never_excludes_every_node(self, sinfo):
+        # An all-GPU partition (or a failed sinfo): excluding would leave the job nowhere to run.
+        spec = ResourceSpec(partition="gpu")
+        assert await ScriptedSlurm([sinfo])._off_gpu_nodes(spec) == spec
 
 
 def test_a_directive_key_without_dashes_still_renders():

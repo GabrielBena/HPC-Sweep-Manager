@@ -151,22 +151,29 @@ class SlurmBase(ComputeSource):
 
     async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
         """A CPU-only job excludes its partition's GPU nodes (24 of ~300 CPU tasks once sat on
-        GPU nodes, taking their CPUs and memory); an ``--exclude`` already given is kept."""
-        if spec.gpus or spec.cpu_only_nodes is False:
+        GPU nodes, taking their CPUs and memory); an ``--exclude`` already given is kept.
+
+        Only with an explicit partition (the default one isn't known here) that has CPU nodes
+        too: excluding every node would leave the job nowhere to run.
+        """
+        extra = {directive_flag(k): v for k, v in spec.extra_directives}
+        asks_gpus = spec.gpus or any(k.startswith(("--gres", "--gpu")) for k in extra)
+        if asks_gpus or spec.cpu_only_nodes is False or not spec.partition:
             return spec
-        part = spec.partition or ""
+        part = spec.partition
         if part not in self._gpu_nodes:
-            argv = ["sinfo", "-h", "-N", "-o", "%N %G", *(["-p", part] if part else [])]
-            rc, out, _ = await self._sh(argv)
-            rows = [line.split() for line in out.splitlines()] if rc == 0 else []
-            self._gpu_nodes[part] = sorted({r[0] for r in rows if len(r) > 1 and r[1] != "(null)"})
+            rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
+            rows = [line.split()[:2] for line in out.splitlines() if len(line.split()) > 1]
+            nodes = {node for node, _ in rows} if rc == 0 else set()
+            gpu = {node for node, gres in rows if gres != "(null)"} if rc == 0 else set()
+            self._gpu_nodes[part] = sorted(gpu) if gpu < nodes else []
             if self._gpu_nodes[part]:
-                logger.info(f"CPU-only jobs exclude {len(self._gpu_nodes[part])} GPU node(s)")
+                logger.info(f"CPU-only jobs exclude {len(gpu)} GPU node(s) of {part}")
         if not self._gpu_nodes[part]:
             return spec
-        extra = {directive_flag(k): v for k, v in spec.extra_directives}
-        exclude = [extra.get("--exclude"), *self._gpu_nodes[part]]
-        extra["--exclude"] = ",".join(filter(None, exclude))
+        extra["--exclude"] = ",".join(
+            filter(None, [extra.get("--exclude"), *self._gpu_nodes[part]])
+        )
         return replace(spec, extra_directives=tuple(extra.items()))
 
     async def _warn_reservations(self, walltime: str | None) -> None:
