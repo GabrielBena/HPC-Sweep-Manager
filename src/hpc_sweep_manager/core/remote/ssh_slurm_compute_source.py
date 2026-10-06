@@ -1084,6 +1084,10 @@ def build_ssh_slurm_source(
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
     # The remote's max_parallel_jobs caps its arrays (S5); before, Slurm never saw it.
     if max_parallel_jobs and (default_spec is None or default_spec.array_throttle is None):
+        if isinstance(max_parallel_jobs, bool) or not isinstance(max_parallel_jobs, int):
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be an integer")
+        if max_parallel_jobs < 1:
+            raise ValueError(f"remote {name!r}: max_parallel_jobs must be >= 1")
         default_spec = replace(default_spec or ResourceSpec(), array_throttle=max_parallel_jobs)
 
     conda_env = (
