@@ -58,8 +58,7 @@ src/hpc_sweep_manager/
 │   │   ├── gpu_probe.py              # nvidia-smi parser
 │   │   └── discovery.py              # just create_ssh_connection
 │   └── distributed/
-│       ├── distributed_compute_source.py  # fan-out wrapper
-│       └── distributed_manager.py    # interior fan-out engine
+│       └── distributed_compute_source.py  # fan-out over the child sources
 └── templates/
     ├── slurm_single.sh.j2            # one task per sbatch
     ├── slurm_array.sh.j2             # array submission
