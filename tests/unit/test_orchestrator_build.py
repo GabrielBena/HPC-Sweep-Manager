@@ -53,9 +53,10 @@ class TestRemoteSubmission:
         assert mode == "remote"
         assert sub == "array"
 
-    def test_slurm_default_is_individual(self, tmp_path):
+    def test_slurm_default_is_array(self, tmp_path):
+        # One sbatch per sweep: individual mode flooded login nodes (tracker S3).
         _src, _mode, sub = _build("slurm", None, tmp_path)
-        assert sub == "individual"
+        assert sub == "array"
 
     def test_slurm_explicit_individual(self, tmp_path):
         _src, _mode, sub = _build("slurm", "individual", tmp_path)

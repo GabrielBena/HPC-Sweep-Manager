@@ -215,12 +215,21 @@ class SSHSlurmComputeSource(SlurmBase):
             )
         return merged
 
-    async def _ssh_run(self, cmd: str, *, check: bool = False) -> Any:
+    async def _ssh_run(self, cmd: str, *, check: bool = False, input: str | None = None) -> Any:
         if self._conn is None:
             raise RuntimeError(
                 f"SSHSlurmComputeSource {self.name!r} not connected; call setup() first"
             )
-        return await self._conn.run(cmd, check=check)
+        return await self._conn.run(cmd, check=check, input=input)
+
+    async def _sbatch(self, script_path: str, script: str) -> str:
+        """Write a job script and submit it over one SSH channel; return the job id."""
+        path = shlex.quote(script_path)
+        result = await self._ssh_run(f"cat > {path} && sbatch {path}", input=script)
+        if (result.returncode or 0) != 0:
+            stderr = (result.stderr or "").strip() or "no stderr"
+            raise RuntimeError(f"sbatch {script_path} failed on {self.host}: {stderr}")
+        return parse_sbatch_job_id(result.stdout or "")
 
     async def _resolve_remote_path(self, path: str) -> str:
         """Expand ``~`` / ``$USER`` / ``$HOME`` / ``$SCRATCH`` etc. on the remote.
@@ -403,14 +412,7 @@ class SSHSlurmComputeSource(SlurmBase):
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
         )
-        remote_script_path = f"{self._remote_scripts_dir}/{job_name}.slurm"
-        await self._write_remote_file(remote_script_path, script_content)
-
-        result = await self._ssh_run(f"sbatch {shlex.quote(remote_script_path)}", check=False)
-        if (result.returncode or 0) != 0:
-            stderr = (result.stderr or "").strip() or "no stderr"
-            raise RuntimeError(f"sbatch failed for {job_name} on {self.host}: {stderr}")
-        job_id = parse_sbatch_job_id(result.stdout or "")
+        job_id = await self._sbatch(f"{self._remote_scripts_dir}/{job_name}.slurm", script_content)
 
         # Local mirror task dir so collect_results() can write into it.
         local_task_dir = self.sweep_dir / "tasks" / job_name  # type: ignore[union-attr]
@@ -446,8 +448,8 @@ class SSHSlurmComputeSource(SlurmBase):
             raise ValueError(
                 f"resumable chains use array mode (one chunk = one Slurm array); got mode={mode!r}"
             )
-        if mode == "array":
-            try:
+        try:
+            if mode == "array":
                 job_ids = await self._submit_array(
                     params_list,
                     sweep_id,
@@ -458,34 +460,29 @@ class SSHSlurmComputeSource(SlurmBase):
                     dependency=dependency,
                     resumable=resumable,
                 )
-            except Exception:
-                # Multi-type submission is a LOOP of sbatch calls — a
-                # mid-sequence failure leaves earlier sub-arrays LIVE on the
-                # cluster. Without a manifest they'd be invisible to
-                # `hsm sweep collect` (the field-report-#8 recovery anchor),
-                # so persist whatever DID submit before re-raising.
-                if self.active_jobs:
-                    submitted = list(self.active_jobs)
-                    logger.error(
-                        f"array submission failed partway — "
-                        f"{len(submitted)} sub-array(s) already live on "
-                        f"{self.host}: {', '.join(submitted)}. Writing the "
-                        f"manifest so `hsm sweep collect {sweep_id}` can "
-                        f"re-attach; to abort instead: "
-                        f"ssh {self.host} scancel {' '.join(submitted)}"
-                    )
-                    await self._write_manifest(submitted, mode, len(params_list))
-                raise
-        else:
-            effective = self._effective_spec(spec)
-            if isinstance(effective.gpu_type, tuple):
+            elif isinstance(self._effective_spec(spec).gpu_type, tuple):
                 raise ValueError(
                     "Multi-type gpu_type lists are supported in array mode "
                     "only — use `--mode array` (one Slurm array per GPU type)."
                 )
-            job_ids = await super().submit_batch(
-                params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
-            )
+            else:
+                job_ids = await super().submit_batch(
+                    params_list, sweep_id, mode, spec, wandb_group, job_name_prefix
+                )
+        except BaseException:
+            # Submission is a loop of sbatch calls (one per task, or one per GPU type): a failure
+            # or a Ctrl-C partway leaves earlier jobs live on the cluster. Persist them before
+            # re-raising, so `hsm sweep collect` can re-attach (field report #8, tracker S3).
+            if self.active_jobs:
+                live = list(self.active_jobs)
+                ids = " ".join(live) if len(live) <= 10 else "<the job_ids in .hsm_manifest.json>"
+                logger.error(
+                    f"submission stopped partway: {len(live)} job(s) already live on {self.host}. "
+                    f"Writing the manifest so `hsm sweep collect {sweep_id}` can re-attach; "
+                    f"to abort instead: ssh {self.host} scancel {ids}"
+                )
+                await self._write_manifest(live, mode, len(params_list))
+            raise
         # Drop a re-attach manifest (local + remote) so `hsm sweep collect <id>`
         # can pull/archive after the launching process dies (T0). In resumable
         # mode the chain DRIVER owns the manifest (it carries the chain state +
@@ -738,14 +735,8 @@ class SSHSlurmComputeSource(SlurmBase):
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
         )
-        remote_script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
-        await self._write_remote_file(remote_script_path, script_content)
-
-        result = await self._ssh_run(f"sbatch {shlex.quote(remote_script_path)}", check=False)
-        if (result.returncode or 0) != 0:
-            stderr = (result.stderr or "").strip() or "no stderr"
-            raise RuntimeError(f"sbatch (array) failed on {self.host}: {stderr}")
-        job_id = parse_sbatch_job_id(result.stdout or "")
+        script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
+        job_id = await self._sbatch(script_path, script_content)
 
         local_tasks_dir = self.sweep_dir / "tasks"  # type: ignore[union-attr]
         local_tasks_dir.mkdir(parents=True, exist_ok=True)

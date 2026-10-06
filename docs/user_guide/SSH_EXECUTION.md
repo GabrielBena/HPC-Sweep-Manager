@@ -232,15 +232,19 @@ distributed:
 Then:
 
 ```bash
-hsm sweep run --remote uzh -c sweeps/sweep.yaml              # one sbatch per combo
-hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode array # one sbatch --array
+hsm sweep run --remote uzh -c sweeps/sweep.yaml                   # one sbatch --array
+hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode individual # one sbatch per combo
 ```
 
 `--remote` implies remote execution; the optional `--mode array|individual`
-picks the **submission style**. Default is `individual` (one `sbatch` per
-parameter combo). `--mode array` packs the whole sweep into a single
-`sbatch --array` — fewer scheduler entries, faster to queue. (`--mode array`
-is ignored for `backend: ssh` bash remotes, which have no scheduler.)
+picks the **submission style**. The default is `array`: the whole sweep is one
+`sbatch --array`, written and submitted over one SSH channel. `--mode individual`
+submits one `sbatch` per parameter combo, which costs SSH channels and a
+scheduler RPC per task on the login node; HSM warns above 50 tasks. A
+submission stopped partway (an error, Ctrl-C) still writes the
+`.hsm_manifest.json` naming the jobs already live, so `hsm sweep collect`
+can re-attach. (`--mode` is ignored for `backend: ssh` bash remotes, which
+have no scheduler.)
 
 The CLI flags `--walltime` / `--resources` still override `spec:` per
 run, same as the local-Slurm path. Add `--dry-run` to preview the merged

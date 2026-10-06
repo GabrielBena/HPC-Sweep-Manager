@@ -102,11 +102,12 @@ class TestRemoteDryRun:
         out = _dry_run(remote_submission="array")
         assert "submission=array" in out
 
-    def test_dry_run_default_submission_individual(self, tmp_path, monkeypatch):
+    def test_dry_run_default_submission_array(self, tmp_path, monkeypatch):
         _make_project(tmp_path, spec={"walltime": "01:00:00"})
         monkeypatch.chdir(tmp_path)
         out = _dry_run()
-        assert "submission=individual" in out
+        assert "submission=array" in out
+        assert "default for slurm remotes" in out  # the change is announced
 
 
 class TestRemoteModeReconciliation:
