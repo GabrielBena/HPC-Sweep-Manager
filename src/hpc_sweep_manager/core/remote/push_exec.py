@@ -214,9 +214,8 @@ def build_rsync_pull_cmd(
     excludes: Sequence[str] = (),
     agentless: bool = False,
 ) -> list[str]:
-    """rsync a remote results dir back down (no ``--delete`` — purely additive). A file cut off
-    mid-transfer waits in ``.rsync-partial/`` (``--partial-dir``), so the next try resumes it,
-    and a truncated file never stands under its real name.
+    """rsync a remote results dir back down (no ``--delete`` — purely additive). No
+    ``--partial``: rsync deletes a file cut off mid-transfer, so none is left truncated.
 
     ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task
     ``resume/`` checkpoint dir on intermediate pulls so a multi-GB checkpoint
@@ -224,7 +223,7 @@ def build_rsync_pull_cmd(
     cluster-internal archive instead. ``agentless`` as in :func:`build_rsync_push_cmd`.
     """
     ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
-    cmd = ["rsync", "-az", "--partial-dir=.rsync-partial", "-e", ssh]
+    cmd = ["rsync", "-az", "-e", ssh]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
@@ -234,8 +233,7 @@ def build_rsync_pull_cmd(
 
 async def run_rsync(cmd: list[str], host: str) -> int:
     """Run an rsync command and return its exit code. A dropped link (:data:`RSYNC_RETRY_RCS`)
-    is tried again after each pause of :data:`RSYNC_BACKOFF_S`; the pull's ``--partial-dir`` lets
-    a retry resume a big file."""
+    is tried again after each pause of :data:`RSYNC_BACKOFF_S`."""
     pauses = list(RSYNC_BACKOFF_S)
     while True:
         proc = await asyncio.create_subprocess_exec(
@@ -248,7 +246,7 @@ async def run_rsync(cmd: list[str], host: str) -> int:
         retry = rc in RSYNC_RETRY_RCS and bool(pauses)
         again = f", trying again in {pauses[0]:g} s" if retry else ""
         stderr = (err or b"").decode("utf-8", errors="replace").strip()
-        level = logging.WARNING if retry else logging.ERROR
+        level = logging.WARNING if retry or rc == 24 else logging.ERROR  # 24: files vanished
         logger.log(level, f"rsync ({host}): rc={rc}{again}\n{stderr}")
         if not retry:
             return rc

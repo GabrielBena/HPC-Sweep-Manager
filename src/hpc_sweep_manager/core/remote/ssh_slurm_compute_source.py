@@ -97,6 +97,7 @@ logger = logging.getLogger(__name__)
 
 SSH_TIMEOUT_S = 300  # a command that hangs this long counts as a dropped link (bulk ones: none)
 PULL_EVERY_S = 600  # while jobs are live, ``tasks/`` is pulled this often (tracker R7)
+MID_RUN_PULL_EXCLUDES = ("*.ckpt", "*.pt", "*.pth")  # weights come with the final pull only
 
 
 class SSHSlurmComputeSource(SlurmBase):
@@ -838,7 +839,7 @@ class SSHSlurmComputeSource(SlurmBase):
         return success
 
     # ----------------------------------------------------------- collection
-    async def _pull_tasks(self) -> int:
+    async def _pull_tasks(self, mid_run: bool = False) -> int:
         """rsync-pull the remote ``tasks/`` dir down (additive, no ``--delete``).
 
         Idempotent and cheap to call repeatedly: rsync only transfers new /
@@ -846,7 +847,6 @@ class SSHSlurmComputeSource(SlurmBase):
         and for the periodic pulls in ``wait_for_all`` (:meth:`_after_poll`), so a
         stuck task or a dead launcher can't strand the tasks that DID finish.
         """
-        self._pulled_at = time.monotonic()
         remote_tasks = f"{self._remote_sweep_dir}/tasks"
         local_tasks = str(self.sweep_dir / "tasks")
         # _pull_excludes is set by the resumable driver to skip the heavy
@@ -855,11 +855,14 @@ class SSHSlurmComputeSource(SlurmBase):
             self.host,
             remote_tasks,
             local_tasks,
-            excludes=self._pull_excludes,
+            excludes=[*self._pull_excludes, *(MID_RUN_PULL_EXCLUDES if mid_run else ())],
             agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
-        return await self._run_rsync(pull_cmd)
+        try:
+            return await self._run_rsync(pull_cmd)
+        finally:  # timed from the end: a pull longer than PULL_EVERY_S isn't due again at once
+            self._pulled_at = time.monotonic()
 
     async def chunk_progress(
         self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
@@ -910,14 +913,15 @@ class SSHSlurmComputeSource(SlurmBase):
         return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime)
 
     async def _after_poll(self, newly_done: int) -> None:
-        """While jobs are live, pull ``tasks/`` every :data:`PULL_EVERY_S` (R7): an array is one
-        job, so a pull per finished job came only at its end. Best effort and additive: the
-        final :meth:`collect_results` still runs archive → pull → cleanup (gotchas 4/4b)."""
+        """While jobs are live, pull ``tasks/`` every :data:`PULL_EVERY_S` (R7), without weight
+        files: an array is one job, so a pull per finished job came only at its end. Best effort
+        and additive: the final :meth:`collect_results` still runs archive → pull → cleanup
+        (gotchas 4/4b), and brings everything."""
         due = time.monotonic() - self._pulled_at >= PULL_EVERY_S
         if not (due and self.active_jobs and self._remote_sweep_dir):
             return
         try:
-            failure = f"rc={rc}" if (rc := await self._pull_tasks()) else None
+            failure = f"rc={rc}" if (rc := await self._pull_tasks(mid_run=True)) else None
         except Exception as e:  # noqa: BLE001 — best effort; collect_results pulls again
             failure = repr(e)
         if failure:

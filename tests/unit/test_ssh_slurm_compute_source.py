@@ -865,8 +865,18 @@ class TestPeriodicPull:
     old pull per finished job came only at its end; the final pull is collect_results'."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("outcome", [0, 23, OSError("link down")])
-    async def test_every_ten_minutes_while_jobs_run(self, tmp_path, monkeypatch, caplog, outcome):
+    @pytest.mark.parametrize(
+        ("outcome", "takes", "times"),
+        [
+            (0, 0, [600, 1200]),
+            (23, 0, [600, 1200]),
+            (OSError("link down"), 0, [600, 1200]),
+            (0, 700, [600, 1900]),  # a pull longer than the interval: next one 10 min after it
+        ],
+    )
+    async def test_every_ten_minutes_while_jobs_run(
+        self, tmp_path, monkeypatch, caplog, outcome, takes, times
+    ):
         clock = [0.0]  # a fake time.monotonic, a minute on at each poll
         monkeypatch.setattr(
             ssh_slurm_compute_source, "time", SimpleNamespace(monotonic=lambda: clock[0])
@@ -890,18 +900,16 @@ class TestPeriodicPull:
 
         async def rsync(cmd):
             pulls.append((clock[0], cmd))
+            clock[0] += takes
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
 
         src.update_all_job_statuses, src._run_rsync = refresh, rsync
         assert await src.wait_for_all(poll_interval=0) == {"1": "COMPLETED"}
-        # At 10 and 20 min, never more often (a failed pull too), none once the job is done.
-        assert [t for t, _ in pulls] == [600, 1200]
-        assert all(
-            "--partial-dir=.rsync-partial" in cmd and cmd[-2].endswith("/tasks/")
-            for _, cmd in pulls
-        )
+        # Every 10 min, never more often (a failed pull too), none once the job is done.
+        assert [t for t, _ in pulls] == times
+        assert all("--exclude=*.pt" in cmd and cmd[-2].endswith("/tasks/") for _, cmd in pulls)
         failed = caplog.text.count("periodic tasks/ pull from uzh failed")
         assert failed == (2 if outcome else 0)  # a failure is a warning; the wait went on
 
