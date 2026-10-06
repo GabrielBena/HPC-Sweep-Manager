@@ -198,17 +198,20 @@ The command exits 3 when the account is *hot* (over 2x its share, or a
 co-worker waiting on `Priority`), so scripts and hooks can react.
 
 `hsm sweep run` makes the same check before every Slurm launch whose spec has
-an `account`, and prints the line (dry-runs too). When the account is hot it
-asks:
+an `account` (a dry run stays offline, and `--mode distributed` isn't checked),
+and prints the line. When the account is hot, or
+the check can't tell (it failed, or `sshare` gave nothing), it asks:
 
-- **`t`, the default:** throttle the array to 50 tasks at once (or the spec's lower
-  `array_throttle`) and go. A launch with no terminal takes it.
+- **`t`, the default:** throttle the array to 50 tasks at once and go. A launch
+  with no terminal takes it. It isn't offered when it would change nothing
+  (individual submissions, or an `array_throttle` already at 50 or below); `a` is
+  the default then. A resumable chain keeps the throttle for `hsm sweep advance`.
 - **`a`:** launch as asked. `--force` does this and skips the question.
 - **`w`:** wait. HSM re-checks every 30 min and launches as asked once the account
-  cools; after 12 h it throttles and goes.
+  is known to be cool; after 12 h it throttles and goes.
 - **`c`:** cancel.
 
-A failed check never blocks a launch.
+A failed check never blocks a launch: with no terminal, it throttles and goes.
 
 ## Watch mode
 

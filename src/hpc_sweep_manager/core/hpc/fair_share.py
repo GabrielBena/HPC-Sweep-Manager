@@ -40,6 +40,11 @@ class Share:
     mine_on_gpu: int = 0  # our running jobs on GPU nodes
 
     @property
+    def known(self) -> bool:
+        """The probe found the account's share (a failed or empty ``sshare`` leaves it nan)."""
+        return not math.isnan(self.ratio)
+
+    @property
     def hot(self) -> bool:
         """Over ``HOT_RATIO`` its share, or a co-worker waiting on priority."""
         return self.ratio > HOT_RATIO or any("Priority" in r for r in self.waiting.values())
@@ -48,8 +53,9 @@ class Share:
         jobs, cpus = self.running.get(self.me, (0, 0))
         total = sum(c for _, c in self.running.values())
         pending = ", ".join(f"{u} ({'/'.join(sorted(r))})" for u, r in sorted(self.waiting.items()))
+        usage = f"{self.ratio:.1f}x" if self.known else "unknown (sshare gave nothing)"
         return (
-            f"{self.account}: usage {self.ratio:.1f}x its fair share; {self.me} = "
+            f"{self.account}: usage {usage} its fair share; {self.me} = "
             f"{100 * self.my_usage:.0f}% of its recorded usage and {cpus} of {total} running "
             f"CPUs ({jobs} jobs, {self.mine_on_gpu} on GPU nodes); co-workers pending: "
             f"{pending or 'none'}"

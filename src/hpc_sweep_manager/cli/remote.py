@@ -3,7 +3,9 @@
 import asyncio
 import datetime
 import logging
-from pathlib import Path
+import re
+import shlex
+from pathlib import Path, PurePosixPath
 
 import click
 import yaml
@@ -30,17 +32,116 @@ def _config_write_path() -> Path:
     """Pick where to persist remote config edits.
 
     Prefers an existing config file in the standard search order; otherwise
-    bootstraps a new ``.hsm/config.yaml`` (the primary location).
+    bootstraps a new ``.hsm/config.yaml`` (the primary location). Never the
+    machine config (``~/.hsm/config.yaml``, which is what cwd = ``$HOME`` finds).
     """
+    from ..core.common.config import MACHINE_CONFIG_PATH
+
     candidates = [
         Path.cwd() / ".hsm" / "config.yaml",
         Path.cwd() / "sweeps" / "hsm_config.yaml",
         Path.cwd() / "hsm_config.yaml",
     ]
-    for path in candidates:
-        if path.exists():
-            return path
-    return candidates[0]  # bootstrap a fresh .hsm/config.yaml
+    path = next((p for p in candidates if p.exists()), candidates[0])
+    if path.resolve() == MACHINE_CONFIG_PATH.resolve():
+        raise click.ClickException(f"{path} is the machine config; run this in a project dir.")
+    return path
+
+
+def _read_project_config() -> tuple[Path, str, dict]:
+    """The PROJECT config file's path, text and data — never the machine-merged view."""
+    path = _config_write_path()
+    text = path.read_text() if path.exists() else ""
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        raise click.ClickException(f"{path} is not a YAML mapping")
+    return path, text, data
+
+
+def _write_project_config(path: Path, text: str, data: dict, hint: str, entry: dict) -> None:
+    """Rewrite the project config — or, if it has comments, print ``entry`` and exit 1."""
+    if re.search(r"(^|\s)#", text, re.MULTILINE):  # a rewrite would strip them
+        click.echo(yaml.safe_dump({"distributed": {"remotes": entry}}, sort_keys=False))
+        raise click.ClickException(f"{path} has comments, so it is unchanged. {hint} by hand.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.dump(data, default_flow_style=False, indent=2, sort_keys=False))
+
+
+def _remotes_block(data: dict, path: Path) -> dict:
+    """The project config's ``distributed.remotes`` (created if absent); malformed → error."""
+    if data.get("distributed") is None:
+        data["distributed"] = {"enabled": False, "strategy": "round_robin", "sync_method": "rsync"}
+    dist = data["distributed"]
+    if isinstance(dist, dict) and dist.get("remotes") is None:
+        dist["remotes"] = {}
+    remotes = dist.get("remotes") if isinstance(dist, dict) else None
+    if not isinstance(remotes, dict) or any(
+        e is not None and not isinstance(e, dict) for e in remotes.values()
+    ):
+        raise click.ClickException(f"{path}: `distributed.remotes` must map names to mappings")
+    return remotes
+
+
+# `hsm remote clean` deletes only what the push sources create under <root>/<project>/.
+_HSM_PROJECT_DIRS = frozenset({"code", "sweeps", "snapshots"})
+_SAFE_ROOT = re.compile(r"[A-Za-z0-9./~_+${}-]+")  # no `;`, `$(`, backtick: nothing to run
+
+
+def _clean_target(name: str, hsm_config, all_projects: bool) -> tuple[dict, str, str | None]:
+    """(remote cfg, root, project) as the push sources resolve them (no project for --all)."""
+    data = hsm_config.config_data if hsm_config else {}
+    dist = data.get("distributed") or {}
+    cfg = (dist.get("remotes") or {}).get(name) or {}
+    root = cfg.get("remote_root", dist.get("remote_root", "~/.hsm/runs"))
+    if (cfg.get("backend") or "ssh").lower() == "slurm" and cfg.get("workdir"):
+        root = cfg["workdir"]
+    project_dir = (hsm_config and hsm_config.get_project_root()) or Path.cwd()
+    return cfg, root, None if all_projects else (Path(project_dir).resolve().name or "project")
+
+
+def _clean_probe(root: str, project: str | None) -> str:
+    """ONE remote command: the canonical target and ``$HOME``, then the target's tree.
+
+    Records are NUL-terminated (a file name can't hold a NUL, so it can't forge
+    one); ``root`` stays unquoted so ``~``/``$VAR`` expand (``_SAFE_ROOT`` vetted it).
+    """
+    sub = f"/{shlex.quote(project)}" if project else ""
+    return (
+        f't=$(realpath -m -- {root}{sub}) && h=$(realpath -m -- "$HOME") && '
+        'printf \'@@target %s\\0@@home %s\\0\' "$t" "$h" && '
+        f"find \"$t\" -maxdepth {1 if project else 2} -printf '@@entry %y %P\\0' 2>/dev/null; true"
+    )
+
+
+def _clean_verdict(out: str, all_projects: bool) -> tuple[str, bool, str | None]:
+    """Judge the probe's output → (canonical target, exists, why it must not be removed).
+
+    Exactly ``@@target``, ``@@home``, then only ``@@entry`` records, else refused.
+    Safe only if the target is neither ``/`` nor ``$HOME`` nor above it, and holds nothing
+    but HSM's own dirs: ``<project>/{code,sweeps,snapshots}`` (one level deeper for --all).
+    """
+    first, *rest = out.split("\0")
+    records = [first.rpartition("\n")[2], *rest]  # rc-file noise can only come first
+    if (
+        len(records) < 3
+        or records[-1]  # output after the last record
+        or not records[0].startswith("@@target /")
+        or not records[1].startswith("@@home /")
+        or not all(r.startswith("@@entry ") for r in records[2:-1])
+    ):
+        return "", False, "unexpected probe output (needs GNU realpath and find); check the remote"
+    target, home = records[0].removeprefix("@@target "), records[1].removeprefix("@@home ")
+    entries = [r.removeprefix("@@entry ").partition(" ")[::2] for r in records[2:-1]]
+    if PurePosixPath(target) in (PurePosixPath(home), *PurePosixPath(home).parents):
+        return target, True, "it is / or $HOME, or contains $HOME; point the root at its own dir"
+    level = 2 if all_projects else 1  # how deep HSM's own dirs sit below the target
+    for kind, rel in entries:
+        depth = rel.count("/") + 1 if rel else 0
+        foreign = depth == level and rel.split("/")[-1] not in _HSM_PROJECT_DIRS
+        if foreign or (depth < level and kind != "d"):
+            what = rel or "a non-directory"
+            return target, True, f"it holds {what!r}, which HSM does not create; move it by hand"
+    return target, bool(entries), None
 
 
 def _resolve_remotes_for_action(names: tuple, all_flag: bool, console: Console):
@@ -87,30 +188,25 @@ def _resolve_remotes_for_action(names: tuple, all_flag: bool, console: Console):
 @click.option("--key", help="SSH key path (overrides ~/.ssh/config)")
 @click.option("--port", type=int, default=None, help="SSH port (overrides ~/.ssh/config)")
 @click.option("--max-jobs", type=int, help="Max parallel jobs (overrides remote default)")
-@click.option("--enabled/--disabled", default=True, help="Enable/disable this remote")
-def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool):
+@click.option("--enabled/--disabled", default=None, help="Enable/disable this remote")
+def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool | None):
     """Add a new remote machine configuration.
 
     HOST is optional: if omitted, NAME is treated as a ~/.ssh/config alias and
     all connection details (hostname, user, port, key, proxy) come from there.
     Provide HOST / --key / --port only to override the ssh-config entry.
+    Re-adding a registered remote updates only the fields you pass.
     """
     console = Console()
 
-    # Load existing config, or bootstrap a fresh one — adding a remote is
-    # exactly the moment to create the file, so don't demand 'hsm init' first.
-    hsm_config = HSMConfig.load()
-    config_data = hsm_config.config_data if hsm_config else {}
-
-    distributed = config_data.setdefault(
-        "distributed",
-        {"enabled": False, "strategy": "round_robin", "sync_method": "rsync"},
-    )
-    distributed.setdefault("remotes", {})
+    # Load the project file (never the machine-merged view), or bootstrap a fresh one —
+    # adding a remote is exactly the moment to create the file, so don't demand 'hsm init'.
+    config_path, text, config_data = _read_project_config()
+    remotes = _remotes_block(config_data, config_path)
 
     # Only persist connection fields that were explicitly given — a bare entry
     # resolves entirely from ~/.ssh/config via the alias.
-    remote_config = {"enabled": enabled}
+    remote_config = {} if enabled is None else {"enabled": enabled}
     if host:
         remote_config["host"] = host
     if port:
@@ -120,20 +216,21 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool)
     if max_jobs:
         remote_config["max_parallel_jobs"] = max_jobs
 
-    distributed["remotes"][name] = remote_config
-
-    config_path = _config_write_path()
+    # Merge, never replace: an existing entry's backend/workdir/spec must survive.
+    entry = {**(remotes.get(name) or {}), **remote_config}
+    if name in remotes and entry == (remotes[name] or {}):
+        console.print(f"Remote '{name}' is already configured as given; nothing to change.")
+        return
+    remotes[name] = entry
+    hint = "Paste this entry under `distributed.remotes`"
     try:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w") as f:
-            yaml.dump(config_data, f, default_flow_style=False, indent=2)
-
+        _write_project_config(config_path, text, config_data, hint, {name: entry})
         where = host or f"{name} (via ~/.ssh/config)"
         console.print(f"[green]✓ Added remote '{name}' ({where})[/green]")
         console.print(f"Configuration saved to: {config_path}")
         console.print(f"Run 'hsm remote test {name}' to verify the connection.")
 
-    except Exception as e:
+    except OSError as e:
         console.print(f"[red]Failed to save configuration: {e}[/red]")
 
 
@@ -395,97 +492,90 @@ def health(names: tuple, all: bool, watch: bool, refresh: int):
 def clean(name: str, all_projects: bool, yes: bool):
     """Delete the HSM scratch directory for this project on a remote.
 
-    By default removes ``{remote_root}/{local-project-name}/`` — i.e. the
-    rsync'd code cache + any per-sweep dirs that survived a failed run. Use
-    ``--all-projects`` to wipe ``{remote_root}/`` itself.
+    By default removes ``<root>/<project>/`` — i.e. the rsync'd code cache +
+    any per-sweep dirs that survived a failed run. Use ``--all-projects`` to
+    wipe ``<root>/`` itself. ``<root>`` and ``<project>`` resolve as the sweep
+    sources do: a ``backend: slurm`` remote's ``workdir``, else ``remote_root``
+    (per-remote, ``distributed.remote_root``, ``~/.hsm/runs``); the project
+    root's dir name. NAME may be a registered remote or a bare ssh-config alias.
 
-    Resolves the remote_root via, in order: the registered remote's
-    ``remote_root`` override, ``distributed.remote_root``, then
-    ``~/.hsm/runs``. NAME may be a registered remote or a bare ssh-config
-    alias.
+    Before any prompt, one remote command canonicalises the target; it is
+    refused if it is ``/``, ``$HOME`` or above it, or holds anything HSM does
+    not create (``code``/``sweeps``/``snapshots``). ``-y`` skips the prompt only.
     """
     from ..core.remote.discovery import create_ssh_connection
 
     console = Console()
 
+    if not all_projects and not _config_write_path().exists():
+        raise click.ClickException(
+            "No project config (.hsm/config.yaml) here: run this in the project's root dir, "
+            "or pass --all-projects."
+        )
     hsm_config = HSMConfig.load()
-    config_data = hsm_config.config_data if hsm_config else {}
-    distributed_cfg = config_data.get("distributed", {})
-    registered = distributed_cfg.get("remotes", {})
-    remote_cfg = dict(registered.get(name, {}))
-    if name not in registered:
+    remote_cfg, root, project = _clean_target(name, hsm_config, all_projects)
+    if not _SAFE_ROOT.fullmatch(root):
+        raise click.ClickException(f"Refusing to clean: unexpected characters in root {root!r}")
+    if not remote_cfg:
         console.print(f"[dim]{name}: not in hsm_config — treating as a ~/.ssh/config alias[/dim]")
-
     host = remote_cfg.get("host") or name
-    ssh_key = remote_cfg.get("ssh_key")
-    ssh_port = remote_cfg.get("ssh_port")
-    remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
-    remote_root = remote_root.rstrip("/")
-
-    if all_projects:
-        target = remote_root
-        scope_msg = f"the entire HSM root ({target}) on {host}"
-    else:
-        project_name = Path.cwd().name or "project"
-        target = f"{remote_root}/{project_name}"
-        scope_msg = f"project '{project_name}' at {target} on {host}"
-
-    if not yes:
-        console.print(f"[yellow]About to remove {scope_msg}.[/yellow]")
-        if not click.confirm("Proceed?", default=False):
-            console.print("Cancelled.")
-            return
 
     async def do_clean():
-        async with await create_ssh_connection(host, ssh_key, ssh_port) as conn:
-            # `rm -rf` of a non-existent path is a no-op success → idempotent.
-            result = await conn.run(f"rm -rf {target}", check=False)
-            return result.returncode or 0
+        connect = create_ssh_connection(host, remote_cfg.get("ssh_key"), remote_cfg.get("ssh_port"))
+        async with await connect as conn:
+            probe = _clean_probe(root, project)
+            out = (await conn.run(probe, check=False)).stdout or ""
+            target, exists, why = _clean_verdict(out, all_projects)
+            if why:
+                raise click.ClickException(
+                    f"Refusing to clean {target or root!r} on {host}: {why}, then rerun."
+                )
+            if not exists:
+                console.print(f"Nothing to clean: {target} does not exist on {host}.")
+                return
+            scope = " (every HSM project in it)" if all_projects else ""
+            if not yes and not click.confirm(f"Remove {target}{scope} on {host}?", default=False):
+                console.print("Cancelled.")
+                return
+            if (await conn.run(probe, check=False)).stdout != out:  # changed during the prompt
+                raise click.ClickException(
+                    f"{target} on {host} changed since it was checked; nothing removed. Rerun."
+                )
+            rc = (await conn.run(f"rm -rf -- {shlex.quote(target)}", check=False)).returncode
+            if rc == 0:
+                console.print(f"[green]✓ Cleaned {target} on {host}[/green]")
+            else:
+                console.print(f"[red]rm exited with rc={rc} on {host}; {target} may remain[/red]")
 
     try:
-        rc = asyncio.run(do_clean())
+        asyncio.run(do_clean())
+    except (click.ClickException, click.Abort):
+        raise
     except Exception as e:
         console.print(f"[red]Failed to connect to {host}: {e}[/red]")
-        return
-
-    if rc == 0:
-        console.print(f"[green]✓ Cleaned {target} on {host}[/green]")
-    else:
-        console.print(f"[red]rm exited with rc={rc} on {host}[/red]")
 
 
 @remote.command()
 @click.argument("name")
 @click.confirmation_option(prompt="Are you sure you want to remove this remote?")
 def remove(name: str):
-    """Remove a remote machine configuration."""
+    """Remove a remote machine configuration (from the project config file only)."""
     console = Console()
 
-    hsm_config = HSMConfig.load()
-    if not hsm_config:
-        console.print("[yellow]No remotes registered (no hsm_config found).[/yellow]")
-        return
-
-    config_data = hsm_config.config_data
-    remotes = config_data.get("distributed", {}).get("remotes", {})
+    config_path, text, config_data = _read_project_config()
+    remotes = _remotes_block(config_data, config_path)
 
     if name not in remotes:
         console.print(f"[red]Remote '{name}' not found in hsm_config.[/red]")
         return
 
-    # Remove the remote
-    del remotes[name]
-
-    # Save updated configuration
-    config_path = _config_write_path()
-
+    entry = remotes.pop(name)
+    hint = "Delete this entry from `distributed.remotes`"
     try:
-        with open(config_path, "w") as f:
-            yaml.dump(config_data, f, default_flow_style=False, indent=2)
-
+        _write_project_config(config_path, text, config_data, hint, {name: entry})
         console.print(f"[green]✓ Removed remote '{name}'[/green]")
 
-    except Exception as e:
+    except OSError as e:
         console.print(f"[red]Failed to save configuration: {e}[/red]")
 
 

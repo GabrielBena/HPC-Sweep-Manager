@@ -84,3 +84,39 @@ def test_queue_share_exits_3_when_the_account_is_hot(monkeypatch):
     result = CliRunner().invoke(cli, ["queue", "share", "--account", "lab"])
     assert result.exit_code == 3, result.output
     assert "13.7x its fair share" in result.output
+
+
+def test_an_unreadable_share_is_unknown_not_quiet():
+    share = parse_share("@@ME\nme\n@@SSHARE\n@@RUN\n", "lab")  # sshare failed or no such account
+    assert not share.known and "unknown" in share.summary()
+
+
+def test_queue_share_fails_when_the_share_is_unreadable(monkeypatch):
+    async def fake_probe(account, partition=""):
+        return parse_share("@@ME\nme\n", account)
+
+    monkeypatch.setattr(queue_cli, "probe_share", fake_probe)
+    monkeypatch.setattr(queue_cli, "_resolve_queue_target", lambda alias, console: None)
+    result = CliRunner().invoke(cli, ["queue", "share", "--account", "lab"])
+    assert result.exit_code == 1 and "could not read account 'lab'" in result.output
+
+
+def test_queue_share_reads_the_account_of_the_remote_it_falls_back_to(monkeypatch):
+    seen = {}
+
+    class FakeQueue:
+        async def share(self, account, partition=""):
+            seen.update(account=account, partition=partition)
+            return parse_share(HOT, account)
+
+    remotes = {"uzh": {"backend": "slurm", "spec": {"account": "lab", "partition": "std"}}}
+    cfg = type("C", (), {"config_data": {"distributed": {"remotes": remotes}}})()
+    monkeypatch.setattr(queue_cli.HSMConfig, "load", staticmethod(lambda: cfg))
+    monkeypatch.setattr(queue_cli, "_resolve_queue_target", lambda alias, console: {"alias": "uzh"})
+    monkeypatch.setattr(
+        queue_cli,
+        "_run_queue_command",
+        lambda console, target, gather, render: render(asyncio.run(gather(FakeQueue()))),
+    )
+    result = CliRunner().invoke(cli, ["queue", "share"])
+    assert seen == {"account": "lab", "partition": "std"}, result.output
