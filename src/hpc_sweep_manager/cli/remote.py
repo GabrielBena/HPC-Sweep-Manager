@@ -100,7 +100,9 @@ def _clean_target(name: str, hsm_config, all_projects: bool) -> tuple[dict, str,
 
 
 def _clean_probe(root: str, project: str | None) -> str:
-    """ONE remote command: the canonical target and ``$HOME``, then the target's tree.
+    """ONE remote command: the canonical target and ``$HOME``, its tree, then the ssh tasks
+    still running in it (a ``.hsm_pid`` whose process group is alive: detached, they outlive
+    their launcher).
 
     Records are NUL-terminated (a file name can't hold a NUL, so it can't forge
     one); ``root`` stays unquoted so ``~``/``$VAR`` expand (``_SAFE_ROOT`` vetted it).
@@ -109,16 +111,24 @@ def _clean_probe(root: str, project: str | None) -> str:
     return (
         f't=$(realpath -m -- {root}{sub}) && h=$(realpath -m -- "$HOME") && '
         'printf \'@@target %s\\0@@home %s\\0\' "$t" "$h" && '
-        f"find \"$t\" -maxdepth {1 if project else 2} -printf '@@entry %y %P\\0' 2>/dev/null; true"
+        f"find \"$t\" -maxdepth {1 if project else 2} -printf '@@entry %y %P\\0' 2>/dev/null; "
+        + _LIVE_TASKS
     )
+
+
+_LIVE_TASKS = (
+    r"""find "$t" -name .hsm_pid -exec bash -c 'kill -0 -- -"$(cat "$1")" 2>/dev/null && """
+    r"""printf "@@live %s\0" "$1"' _ {} \; 2>/dev/null; true"""
+)
 
 
 def _clean_verdict(out: str, all_projects: bool) -> tuple[str, bool, str | None]:
     """Judge the probe's output → (canonical target, exists, why it must not be removed).
 
-    Exactly ``@@target``, ``@@home``, then only ``@@entry`` records, else refused.
-    Safe only if the target is neither ``/`` nor ``$HOME`` nor above it, and holds nothing
-    but HSM's own dirs: ``<project>/{code,sweeps,snapshots}`` (one level deeper for --all).
+    Exactly ``@@target``, ``@@home``, then only ``@@entry``/``@@live`` records, else refused.
+    Safe only if the target is neither ``/`` nor ``$HOME`` nor above it, runs no ssh task,
+    and holds nothing but HSM's own dirs: ``<project>/{code,sweeps,snapshots}`` (one level
+    deeper for --all).
     """
     first, *rest = out.split("\0")
     records = [first.rpartition("\n")[2], *rest]  # rc-file noise can only come first
@@ -127,13 +137,15 @@ def _clean_verdict(out: str, all_projects: bool) -> tuple[str, bool, str | None]
         or records[-1]  # output after the last record
         or not records[0].startswith("@@target /")
         or not records[1].startswith("@@home /")
-        or not all(r.startswith("@@entry ") for r in records[2:-1])
+        or not all(r.startswith(("@@entry ", "@@live ")) for r in records[2:-1])
     ):
         return "", False, "unexpected probe output (needs GNU realpath and find); check the remote"
     target, home = records[0].removeprefix("@@target "), records[1].removeprefix("@@home ")
-    entries = [r.removeprefix("@@entry ").partition(" ")[::2] for r in records[2:-1]]
+    entries = [r[8:].partition(" ")[::2] for r in records[2:-1] if r.startswith("@@entry ")]
     if PurePosixPath(target) in (PurePosixPath(home), *PurePosixPath(home).parents):
         return target, True, "it is / or $HOME, or contains $HOME; point the root at its own dir"
+    if live := [r[7:] for r in records[2:-1] if r.startswith("@@live ")]:
+        return target, True, f"{len(live)} task(s) still run there ({live[0]}); stop them first"
     level = 2 if all_projects else 1  # how deep HSM's own dirs sit below the target
     for kind, rel in entries:
         depth = rel.count("/") + 1 if rel else 0

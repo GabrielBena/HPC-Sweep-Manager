@@ -1,7 +1,11 @@
 #!/bin/bash
 # Push-model SSHComputeSource wrapper for {{ job_name }} (job_id={{ job_id }}).
-# Runs on the remote host inside the rsync'd code dir.
+# Runs on the remote host inside the rsync'd code dir, detached (setsid nohup; the launch writes
+# its pid to .hsm_pid): it outlives the launcher's connection. Its exit code lands in .hsm_rc,
+# which one poll per cycle reads; a cancel TERMs its whole process group, which ends it with 143.
 set -e
+trap 'echo $? > {{ remote_task_dir }}/.hsm_rc' EXIT
+trap 'exit 143' TERM
 
 {% if cuda_visible_devices is not none %}
 export CUDA_VISIBLE_DEVICES={{ cuda_visible_devices }}
