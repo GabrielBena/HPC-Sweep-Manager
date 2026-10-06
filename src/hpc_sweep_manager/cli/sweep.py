@@ -750,7 +750,7 @@ def _run_sweep_via_orchestrator(
                     resumable=rconf,
                     wandb_group=group,
                     job_name_prefix=sweep_id,
-                    poll_interval=10.0,
+                    poll_interval=source.poll_interval,
                     on_progress=progress_cb,
                     costs=costs,
                 )
@@ -783,7 +783,7 @@ def _run_sweep_via_orchestrator(
                 wandb_group=group,
                 job_name_prefix=sweep_id,
                 wait=True,
-                poll_interval=10.0,
+                poll_interval=source.poll_interval,
                 on_progress=progress_cb,
                 costs=costs,
             )
@@ -1167,10 +1167,8 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     try:
         # Idempotency: if the remote sweep dir is gone, a prior successful
         # collect already pulled + archived + cleaned it. Re-running is a no-op.
-        exists = await source._ssh_run(
-            f"test -d {shlex.quote(source._remote_sweep_dir)}", check=False
-        )
-        if (exists.returncode or 0) != 0:
+        exists = await source._ssh_run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
+        if exists.returncode == 1:  # test -d says no (None: unknown, go on)
             console.print(
                 f"[green]Remote sweep dir already cleaned on {source.host} — "
                 f"nothing left to collect (a prior collect finished it).[/green]"
@@ -1211,7 +1209,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "
-                f"({'ok' if ok else 'pull reported an error — see logs'})."
+                f"({'ok' if ok else 'an error, see the log; the remote dir is kept'})."
             )
     finally:
         await source.cleanup()
@@ -1310,12 +1308,14 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
-    if (manifest.get("resumable") or {}).get("enabled"):
+    done = ((manifest.get("chain") or {}).get("state") or {}).get("done")
+    if (manifest.get("resumable") or {}).get("enabled") and not done:
         # collect would archive + rm -rf the remote dir on "all terminal" — but a
         # chain's chunk is terminal between chunks, and deleting it loses the
-        # resume checkpoints. Refuse; point at advance (which is chain-aware).
+        # resume checkpoints. Refuse; point at advance (which is chain-aware). A
+        # done chain is collected (e.g. after its final archive was cut short).
         console.print(
-            f"[red]{sweep_id} is a resumable chain — `hsm sweep collect` could "
+            f"[red]{sweep_id} is a resumable chain not done — `hsm sweep collect` could "
             f"delete the remote checkpoints between chunks.[/red]"
         )
         console.print(
@@ -1426,9 +1426,10 @@ async def _advance_via_manifest(
             initial_job_ids=last_job_ids,
             initial_prev_done=int(chain.get("last_done_count") or 0),
             initial_prev_mtime=chain.get("last_checkpoint_mtime"),
+            poll_interval=source.poll_interval,
             block=block,
         )
-        decision = (result.chain_decision or "").upper()
+        decision = result.chain_decision.upper() or "no decision (the progress probe failed)"
         console.print(f"[bold]Chain {sweep_id}: {decision}[/bold]")
         if result.chain_decision == "advance":
             console.print(

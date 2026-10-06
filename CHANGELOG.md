@@ -25,8 +25,7 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **Slurm remotes submit one job array by default (S3).** `--remote <slurm>` used to
   submit one `sbatch` per task (about 1,500 SSH sessions locked a user out of a
   login node); it now submits one `sbatch --array` and says so. `--mode individual`
-  keeps the old style and warns above 50 tasks. Each job script is written and
-  submitted over one SSH channel, not two.
+  keeps the old style and warns above 50 tasks.
 - **A submission stopped partway is still tracked (S3).** An error or a Ctrl-C in the
   middle of a loop of `sbatch` calls used to leave the live jobs out of the
   manifest; it is now written before the error propagates, so `hsm sweep collect`
@@ -190,6 +189,27 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   reservation at setup. It now warns at submission only about a maintenance window
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
+- **A login-node blip no longer ends a Slurm-over-SSH launcher (S11, R9).** A dropped
+  connection made the next `squeue` raise and killed a multi-day wait. The connection
+  now has a 30 s keepalive and each command a 5 min bound (none for the archive rsync
+  and `rm -rf`); a command whose connection failed reconnects and runs once more. While
+  the host stays unreachable the polls fail and every job keeps its state; after 30 min
+  the launcher gives up, and the jobs stay in Slurm (`hsm queue mine --remote <name>`
+  lists them; `hsm sweep collect <id>`, or `advance` for a chain, re-attaches). A command
+  cut off mid-run (no exit status) no longer counts as a success: a server-side archive
+  cut short keeps the remote dir (no pull, no `rm -rf`) and `collect` says so (also for
+  a finished chain, which `collect` now takes), `scancel` marks nothing CANCELLED, an
+  unexpanded `$USER` is an error, a failed chain-progress probe is asked again (a few
+  polls, then the launcher stops; a detached `advance` leaves it to its next run)
+  instead of counting as a chunk without progress, and a failed `sinfo` is no longer
+  cached. A job script is written first, then submitted by a `sbatch` with no time
+  bound, and `sbatch` is never resent after a lost reply (the job may be queued): HSM
+  looks for the one live job with its name and script, else names the `squeue`,
+  `sacct` and `scancel` commands to check by hand; a submission whose channel never
+  opened is sent again. A remote file write
+  (params file, manifest, `.archived`) that fails now raises instead of passing
+  silently. Slurm sources poll every 60 s instead of 10 s; local and ssh sources stay at
+  10 s (a distributed sweep still polls its Slurm children every 10 s).
 - **GPU indices are nvidia-smi's, and HSM never joins a busy GPU unless told `all` (X4).**
   HSM numbers GPUs as `nvidia-smi` does (PCI bus order), but CUDA's default order is
   fastest-first, so on anahita an index inside a list (`--gpus 1,2`) ran on nvidia-smi #3
@@ -209,8 +229,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   A remote's `gpus:` written as a string (`"1,2"`, `ALL`, `cpu`) is parsed like `--gpus`
   (`"1,2"` used to mean CPU-only, as did `gpus: all`), and a hung local `nvidia-smi` times
   out after 30 s. A remote GPU probe with no answer (a dropped link, a hung driver) stops a
-  GPU job at setup instead of running it on CPU. **Compatibility:** an allowlist written in CUDA's default order must be
-  restated in nvidia-smi order (on anahita, `local.visible_gpus: [2, 3]`, the A6000s,
+  GPU job at setup instead of running it on CPU. **Compatibility:** an allowlist written in
+  CUDA's default order must be restated in nvidia-smi order (on anahita, `local.visible_gpus: [2, 3]`, the A6000s,
   becomes `[1, 2]`). **For consumers:** a remote's `gpus: 0` now renders an empty
   `CUDA_VISIBLE_DEVICES` (no GPU), and lists and counts skip busy GPUs (`--gpus all`
   takes them).

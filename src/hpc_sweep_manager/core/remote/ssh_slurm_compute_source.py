@@ -19,7 +19,9 @@ that doesn't itself have Slurm installed. This module does:
        sbatch's stdout. Slurm remotes default to one job array per sweep.
     3. Status: :class:`SlurmBase` (shared with the native source) asks one
        ``squeue -u <user>`` and one ``sacct`` per poll, whatever the job count, and
-       never reads a failed call as a verdict.
+       never reads a failed call as a verdict. A dropped ssh link is reopened once per
+       command (:meth:`_ssh_run`; a 30 s keepalive notices it); while it stays down the
+       polls fail and every job keeps its state.
     4. ``collect_results()``: rsync the remote ``tasks/`` tree back to
        the local sweep dir; on full-success, ``rm -rf`` the remote sweep
        dir (the per-project code mirror persists for the next sweep).
@@ -40,18 +42,24 @@ without a real cluster.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import getpass
 import json
 import logging
 import re
 import shlex
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import asyncssh
+
 from ..common.chain import ChainState
 from ..common.compute_source import (
+    TERMINAL_STATES,
     JobInfo,
     SubmissionMode,
 )
@@ -65,13 +73,15 @@ from ..hpc.gpu_planner import (
     normalize_speed_factors,
     replace_sub_walltime,
 )
+from ..hpc.scheduler_queue import strip_array_suffix
 from ..hpc.slurm_base import SlurmBase
 from ..hpc.slurm_protocol import (
+    SLURM_STATE_MAP,
     format_signal,
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
-from .discovery import agent_stalled
+from .discovery import LINK_GIVE_UP_S, agent_stalled
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
@@ -83,6 +93,8 @@ from .push_exec import (
 )
 
 logger = logging.getLogger(__name__)
+
+SSH_TIMEOUT_S = 300  # a command that hangs this long counts as a dropped link (bulk ones: none)
 
 
 class SSHSlurmComputeSource(SlurmBase):
@@ -183,13 +195,18 @@ class SSHSlurmComputeSource(SlurmBase):
         self._pull_excludes: tuple[str, ...] = ()
         self._resumable_config: ResumableConfig | None = None
         self._chain_state: ChainState | None = None
+        self._down_since: float | None = None  # when the ssh link went down (None: up)
 
     # ------------------------------------------------------------- I/O seams
     async def _open_connection(self) -> Any:
-        """Open the persistent asyncssh connection. Overridden in tests."""
+        """Open the persistent asyncssh connection. Overridden in tests.
+
+        With a keepalive: a dead link closes within ~90 s, and :meth:`_ssh_run` reconnects."""
         from .discovery import create_ssh_connection
 
-        return await create_ssh_connection(self.host, self.ssh_key, self.ssh_port)
+        return await create_ssh_connection(
+            self.host, self.ssh_key, self.ssh_port, keepalive_interval=30
+        )
 
     async def _run_rsync(self, cmd: list[str]) -> int:
         """Run an rsync command and return its exit code. Overridden in tests."""
@@ -219,23 +236,79 @@ class SSHSlurmComputeSource(SlurmBase):
             )
         return merged
 
-    async def _ssh_run(self, cmd: str, *, check: bool = False, input: str | None = None) -> Any:
+    async def _ssh_run(
+        self,
+        cmd: str,
+        *,
+        input: str | None = None,
+        timeout: float | None = SSH_TIMEOUT_S,
+        resend: bool = True,
+    ) -> Any:
+        """One remote command; a ``returncode`` of None means unknown (the link died as it ran).
+
+        A failed connection is reopened and the command sent once more; with ``resend=False``
+        only when it never started (its channel didn't open), else the error is raised."""
         if self._conn is None:
             raise RuntimeError(
                 f"SSHSlurmComputeSource {self.name!r} not connected; call setup() first"
             )
-        return await self._conn.run(cmd, check=check, input=input)
+        try:
+            return await self._conn.run(cmd, input=input, check=False, timeout=timeout)
+        except (OSError, asyncssh.Error) as e:
+            logger.warning(f"{self.host}: connection lost ({e!r}); reconnecting")
+            with contextlib.suppress(Exception):
+                self._conn.close()
+            self._conn = await self._open_connection()
+            never_ran = isinstance(e, asyncssh.ChannelOpenError) and (
+                e.code != asyncssh.OPEN_REQUEST_SESSION_FAILED  # an unanswered exec may have run
+            )
+            if not (resend or never_ran):
+                raise
+            return await self._conn.run(cmd, input=input, check=False, timeout=timeout)
 
-    async def _sbatch(self, script_path: str, script: str) -> str:
-        """Write a job script and submit it over one SSH channel; return the job id."""
-        path = shlex.quote(script_path)
-        result = await self._ssh_run(f"cat > {path} && sbatch {path}", input=script)
-        if result.returncode != 0:  # None: killed by a signal
+    async def _sbatch(self, job_name: str, script: str) -> str:
+        """Write ``scripts/<job_name>.slurm``, then submit it; return the job id.
+
+        The write is confirmed first, so sbatch never waits on stdin. sbatch has no time bound
+        (a busy controller can take minutes and still queue the job; the keepalive ends a dead
+        link), and a lost reply is never answered with a second sbatch, which could queue the
+        job twice: the job is looked up instead (:meth:`_queued_id`)."""
+        path = f"{self._remote_scripts_dir}/{job_name}.slurm"
+        await self._write_remote_file(path, script)
+        lost = "no exit status"
+        try:
+            result = await self._ssh_run(f"sbatch {shlex.quote(path)}", resend=False, timeout=None)
+        except (OSError, asyncssh.Error) as e:
+            result, lost = None, repr(e)
+        if result is None or result.returncode is None:
+            if job_id := await self._queued_id(job_name, path):
+                logger.warning(f"sbatch {path}: the reply was lost ({lost}); queued as {job_id}")
+                return job_id
+            raise RuntimeError(
+                f"sbatch {path}: the reply from {self.host} was lost ({lost}); the job may be "
+                f"queued. Check `squeue -n {job_name}` (`sacct -X --name {job_name}` once it "
+                f"left the queue) and `scancel -n {job_name}` before submitting again"
+            )
+        if result.returncode != 0:
             stderr = (result.stderr or "").strip() or "no stderr"
             if "array" in stderr:  # e.g. above the cluster's MaxArraySize
                 stderr += " (too many tasks for one job array? try --mode individual)"
-            raise RuntimeError(f"sbatch {script_path} failed on {self.host}: {stderr}")
+            raise RuntimeError(f"sbatch {path} failed on {self.host}: {stderr}")
         return parse_sbatch_job_id(result.stdout or "")
+
+    async def _queued_id(self, job_name: str, script: str) -> str | None:
+        """The one live job named ``job_name`` that runs ``script`` (a path unique to the
+        sweep; a chain's finished chunks share both, hence live only), or None."""
+        user = self.slurm_user or getpass.getuser()
+        argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
+        rc, out, _ = await self._sh(argv)
+        rows = [line.split() for line in out.splitlines()] if rc == 0 else []
+        ids = {
+            strip_array_suffix(row[0])
+            for row in rows
+            if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
+        }
+        return ids.pop() if len(ids) == 1 else None
 
     async def _resolve_remote_path(self, path: str) -> str:
         """Expand ``~`` / ``$USER`` / ``$HOME`` / ``$SCRATCH`` etc. on the remote.
@@ -254,23 +327,19 @@ class SSHSlurmComputeSource(SlurmBase):
         # silently multi-expanded into a corrupted dest).
         if "~" not in path and "$" not in path:
             return path
-        result = await self._ssh_run(f"echo {path}", check=False)
+        result = await self._ssh_run(f"echo {path}")
+        if result.returncode != 0:  # None: unknown; a literal `$USER` would break every squeue
+            raise RuntimeError(f"could not expand {path!r} on {self.host}: {result.stderr!r}")
         lines = (result.stdout or "").strip().splitlines()
         first = lines[0].strip() if lines else ""
         return first or path
 
     async def _write_remote_file(self, remote_path: str, content: str) -> None:
-        # ``cat > path`` is sufficient since asyncssh's ``.run(..., input=...)``
-        # pipes content over the channel. Avoids needing scp or sftp.
-        if self._conn is None:
-            raise RuntimeError(
-                f"SSHSlurmComputeSource {self.name!r} not connected; call setup() first"
-            )
-        await self._conn.run(
-            f"cat > {shlex.quote(remote_path)}",
-            input=content,
-            check=False,
-        )
+        """``cat >`` the content (asyncssh pipes ``input`` over the channel; no scp or sftp)."""
+        result = await self._ssh_run(f"cat > {shlex.quote(remote_path)}", input=content)
+        if result.returncode != 0:  # None: unknown
+            err = (result.stderr or "").strip() or f"rc={result.returncode}"
+            raise RuntimeError(f"writing {remote_path} on {self.host} failed: {err}")
 
     # ------------------------------------------------------------------ setup
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
@@ -289,11 +358,8 @@ class SSHSlurmComputeSource(SlurmBase):
 
         # Verify the Slurm tools we need are on the remote PATH. Bail
         # early with a useful message rather than failing at sbatch time.
-        check = await self._ssh_run(
-            "command -v sbatch && command -v squeue && command -v scancel",
-            check=False,
-        )
-        if (check.returncode or 0) != 0:
+        check = await self._ssh_run("command -v sbatch && command -v squeue && command -v scancel")
+        if check.returncode != 0:
             logger.error(
                 f"Slurm tools (sbatch/squeue/scancel) not found on PATH on "
                 f"{self.host}. If they live in a flavour module or conda env, "
@@ -391,7 +457,7 @@ class SSHSlurmComputeSource(SlurmBase):
             wandb_group=wandb_group,
             uses_conda=bool(self.conda_env),
         )
-        job_id = await self._sbatch(f"{self._remote_scripts_dir}/{job_name}.slurm", script_content)
+        job_id = await self._sbatch(job_name, script_content)
 
         # Local mirror task dir so collect_results() can write into it.
         local_task_dir = self.sweep_dir / "tasks" / job_name  # type: ignore[union-attr]
@@ -583,6 +649,7 @@ class SSHSlurmComputeSource(SlurmBase):
         self.sweep_id = sweep_id
         try:
             self._conn = await self._open_connection()
+            self.slurm_user = await self._resolve_remote_path("$USER")
         except Exception as e:  # noqa: BLE001
             logger.error(f"SSH connection to {self.host} failed: {e}")
             return False
@@ -590,7 +657,6 @@ class SSHSlurmComputeSource(SlurmBase):
         self._remote_tasks_dir = manifest.get("remote_tasks_dir", f"{self._remote_sweep_dir}/tasks")
         self._resolved_archive_dir = manifest.get("resolved_archive_dir")
         self._remote_code_dir = manifest.get("remote_code_dir")
-        self.slurm_user = await self._resolve_remote_path("$USER")
         return True
 
     @classmethod
@@ -628,6 +694,8 @@ class SSHSlurmComputeSource(SlurmBase):
         if rblock:
             inst._resumable_config = ResumableConfig.from_manifest(rblock)
             inst._chain_state = ChainState.from_dict((manifest.get("chain") or {}).get("state"))
+            if inst._should_archive(False):  # the checkpoints ride the archive, not the WAN
+                inst._pull_excludes = (f"*/{inst._resumable_config.checkpoint_subdir}/",)
         return inst
 
     async def _submit_array(
@@ -726,8 +794,7 @@ class SSHSlurmComputeSource(SlurmBase):
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
         )
-        script_path = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
-        job_id = await self._sbatch(script_path, script_content)
+        job_id = await self._sbatch(sub.job_name, script_content)
 
         local_tasks_dir = self.sweep_dir / "tasks"  # type: ignore[union-attr]
         local_tasks_dir.mkdir(parents=True, exist_ok=True)
@@ -754,13 +821,25 @@ class SSHSlurmComputeSource(SlurmBase):
 
     # ----------------------------------------------------------------- status
     async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
-        result = await self._ssh_run(shlex.join(argv))
-        rc = 255 if result.returncode is None else result.returncode  # None: killed by a signal
-        return rc, result.stdout or "", result.stderr or ""
+        try:
+            result = await self._ssh_run(shlex.join(argv))
+        except (OSError, asyncssh.Error) as e:  # still unreachable: a failed call, no verdict
+            self._down_since = self._down_since or time.monotonic()
+            if time.monotonic() - self._down_since > LINK_GIVE_UP_S:
+                raise ConnectionError(
+                    f"{self.host} unreachable for {LINK_GIVE_UP_S // 60} min; its jobs stay in "
+                    f"Slurm (`hsm queue mine --remote {self.name}` lists them; `hsm sweep collect "
+                    f"{self.sweep_id}`, or `advance` for a chain, re-attaches a sweep it ran alone)"
+                ) from e
+            return 255, "", f"ssh to {self.host}: {e!r}"
+        if result.returncode is None:  # unknown: the link died as it ran
+            return 255, result.stdout or "", "no exit status"
+        self._down_since = None
+        return result.returncode, result.stdout or "", result.stderr or ""
 
     async def cancel_job(self, job_id: str) -> bool:
-        result = await self._ssh_run(f"scancel {shlex.quote(job_id)}", check=False)
-        success = (result.returncode or 0) == 0
+        result = await self._ssh_run(f"scancel {shlex.quote(job_id)}")
+        success = result.returncode == 0
         if success and job_id in self.active_jobs:
             self.update_job_status(job_id, "CANCELLED")
         return success
@@ -790,13 +869,14 @@ class SSHSlurmComputeSource(SlurmBase):
 
     async def chunk_progress(
         self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
-    ) -> ChunkProgress:
+    ) -> ChunkProgress | None:
         """Probe done-sentinels + newest checkpoint mtime in ONE ssh round-trip.
 
         HSM stats only paths it itself provided — it never reads checkpoint
         CONTENTS (the generality guardrail). The remote ``find`` emits the
         sentinel paths (one per done task) and the single max checkpoint mtime;
         the driver diffs successive observations into the ``progressed`` bool.
+        None when the probe failed: an empty one would count as a chunk without progress.
         """
         if self._conn is None or self._remote_tasks_dir is None:
             return ChunkProgress(done_indices=frozenset(), checkpoint_mtime=None)
@@ -813,8 +893,11 @@ class SSHSlurmComputeSource(SlurmBase):
             f"find {tasks} -path {ckpt_glob} -type f -printf '%T@\\n' 2>/dev/null "
             f"| sort -n | tail -1"
         )
-        result = await self._ssh_run(cmd, check=False)
-        before, _, after = (result.stdout or "").partition("HSM_SEP")
+        rc, out, err = await self._sh(["bash", "-c", cmd])
+        if rc != 0:
+            logger.warning(f"progress probe on {self.host} failed (rc={rc}): {err.strip()}")
+            return None
+        before, _, after = out.partition("HSM_SEP")
         done: set[int] = set()
         for line in before.splitlines():
             # Anchor to the sentinel's PARENT (`.../task_<N>/<sentinel>` at the
@@ -862,8 +945,8 @@ class SSHSlurmComputeSource(SlurmBase):
         # safety net) then pull tasks/ back to anahita. The archive uses
         # the cluster's internal network, which is much faster than
         # routing everything through our anahita ↔ S3IT link.
-        if self._should_archive(any_failed):
-            await self._archive_remote(any_failed)
+        if self._should_archive(any_failed) and not await self._archive_remote(any_failed):
+            return False  # no pull, no rm -rf: the remote dir stays for a later collect
 
         rc = await self._pull_tasks()
         if rc != 0:
@@ -872,7 +955,8 @@ class SSHSlurmComputeSource(SlurmBase):
         if not any_failed and not self.keep_remote_on_success:
             try:
                 dirs = (self._remote_sweep_dir, own_snapshot(self._remote_code_dir, self.sweep_id))
-                await self._ssh_run("rm -rf " + " ".join(shlex.quote(d) for d in dirs if d))
+                rm = "rm -rf " + " ".join(shlex.quote(d) for d in dirs if d)
+                await self._ssh_run(rm, timeout=None)
                 logger.info(f"Cleaned remote sweep dir {self._remote_sweep_dir} on {self.host}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Failed to clean remote sweep dir: {e}")
@@ -901,13 +985,13 @@ class SSHSlurmComputeSource(SlurmBase):
             return True
         return not any_failed  # "completed"
 
-    async def _archive_remote(self, any_failed: bool) -> None:
+    async def _archive_remote(self, any_failed: bool) -> bool:
         """Server-side rsync from ``_remote_sweep_dir`` to ``archive_dir/<sweep_id>``.
 
         Runs entirely on the remote — no data flows through anahita. On
         success drops a ``.archived`` sentinel containing timestamp + the
         source path, so a later inspection can tell "this is a frozen
-        snapshot, not the live sweep dir."
+        snapshot, not the live sweep dir." False when the rsync failed.
         """
         assert self.archive_dir is not None  # _should_archive gates this
         # Use the remote-expanded archive_dir ($USER/~ resolved in setup()).
@@ -928,15 +1012,15 @@ class SSHSlurmComputeSource(SlurmBase):
                 f"{shlex.quote(snapshot + '/')} {code_target}"
             )
         logger.info(f"Archiving sweep on {self.host}: {self._remote_sweep_dir} -> {archive_target}")
-        result = await self._ssh_run(cmd, check=False)
-        if (result.returncode or 0) != 0:
+        result = await self._ssh_run(cmd, timeout=None)
+        if result.returncode != 0:  # None: unknown, e.g. the link died during the rsync
             stderr = (result.stderr or "").strip() or "no stderr"
             logger.warning(
                 f"Server-side archive on {self.host} failed (rc="
-                f"{result.returncode}): {stderr}. The /scratch copy is "
-                f"intact; you can retry by hand."
+                f"{result.returncode}): {stderr}. The /scratch copy is kept; "
+                f"`hsm sweep collect {self.sweep_id}` archives it again."
             )
-            return
+            return False
 
         sentinel_lines = [
             f"archived_at: {datetime.now().isoformat()}",
@@ -947,6 +1031,7 @@ class SSHSlurmComputeSource(SlurmBase):
         sentinel_path = f"{archive_target}/.archived"
         await self._write_remote_file(sentinel_path, "\n".join(sentinel_lines) + "\n")
         logger.info(f"Archive sentinel written: {sentinel_path}")
+        return True
 
     # -------------------------------------------------------------- health
     async def health_check(self) -> dict[str, Any]:
@@ -960,11 +1045,8 @@ class SSHSlurmComputeSource(SlurmBase):
         }
         if self._conn is not None:
             try:
-                result = await self._ssh_run(
-                    "sinfo -h -o '%P %a %D' 2>/dev/null | head -5",
-                    check=False,
-                )
-                if (result.returncode or 0) == 0:
+                result = await self._ssh_run("sinfo -h -o '%P %a %D' 2>/dev/null | head -5")
+                if result.returncode == 0:
                     info["connection"] = "ok"
                     info["partitions"] = (result.stdout or "").strip()
                 else:

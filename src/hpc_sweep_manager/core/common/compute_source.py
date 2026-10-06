@@ -61,6 +61,8 @@ class ComputeSourceStats:
 class ComputeSource(ABC):
     """Abstract base class for compute sources."""
 
+    poll_interval: float = 10.0  # seconds between the status polls of a launcher's wait
+
     def __init__(self, name: str, source_type: str, max_parallel_jobs: int):
         self.name = name
         self.source_type = source_type  # "local", "ssh_remote"
@@ -190,8 +192,9 @@ class ComputeSource(ABC):
     # ComputeSource uniformly; only the Slurm sources override them.
     async def chunk_progress(
         self, num_tasks: int, *, done_sentinel: str, checkpoint_subdir: str
-    ) -> ChunkProgress:
-        """Probe per-task done-sentinels + newest checkpoint mtime for a chunk.
+    ) -> ChunkProgress | None:
+        """Probe per-task done-sentinels + newest checkpoint mtime for a chunk (None: the probe
+        failed, and the driver asks again).
 
         Resumable chains are Slurm-only; the base raises so a mis-wired backend
         fails loudly instead of silently never advancing.

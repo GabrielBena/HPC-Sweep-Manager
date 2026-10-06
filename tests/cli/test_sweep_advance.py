@@ -77,6 +77,18 @@ class TestAdvanceCommandGuards:
         assert "resumable chain" in res.output
         assert "advance" in res.output
 
+    def test_collect_takes_a_done_chain(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        manifest = _chain_manifest()
+        manifest["chain"]["state"]["done"] = True  # e.g. its final archive was cut short
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "sweeps/outputs/sw1").mkdir(parents=True)
+        (tmp_path / "sweeps/outputs/sw1/.hsm_manifest.json").write_text(json.dumps(manifest))
+        res = CliRunner().invoke(sweep_cmd, ["collect", "sw1"], obj=_obj())
+        assert "resumable chain" not in res.output
+        assert "missing required field" in res.output  # past the guard (a bare test manifest)
+
 
 class TestAdvanceHelperGuards:
     @pytest.mark.asyncio

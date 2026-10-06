@@ -176,7 +176,7 @@ def test_hsm_sweep_run_throttles_or_cancels(tmp_path, monkeypatch, answer):
     seen = {}
 
     async def run_sweep_async(*, source, spec, **kw):
-        seen.update(spec=spec, default=source.default_spec)
+        seen.update(spec=spec, default=source.default_spec, poll=kw["poll_interval"])
         raise RuntimeError("stop here")
 
     monkeypatch.setattr(launch_gate, "_probe", probe)
@@ -204,3 +204,4 @@ def test_hsm_sweep_run_throttles_or_cancels(tmp_path, monkeypatch, answer):
         assert not seen
     else:
         assert seen["default"].merge(seen["spec"]).array_throttle == 50
+        assert seen["poll"] == 60  # a Slurm source polls once a minute (R9)

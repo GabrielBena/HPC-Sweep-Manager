@@ -31,7 +31,7 @@ class FakeConn:
     def add(self, sub, res):
         self._responder.append((sub, res))
 
-    async def run(self, cmd, *, input: str | None = None, check: bool = False):
+    async def run(self, cmd, *, input: str | None = None, check: bool = False, timeout=None):
         self.run_calls.append(cmd)
         for i, (sub, res) in enumerate(self._responder):
             if sub in cmd:
@@ -194,3 +194,35 @@ class TestCollectViaManifest:
         )
         assert "still running" in buf.getvalue()
         assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rc", [None, 255])
+    async def test_an_unknown_test_d_goes_on(self, tmp_path, patched, rc):
+        # Only `test -d` saying 1 means "already cleaned"; anything else is no answer.
+        conn, rsync_calls = patched
+        conn.add("test -d", _Result(rc))
+        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
+        buf = io.StringIO()
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1",
+            _manifest(tmp_path, job_ids=["1"]),
+            Console(file=buf, width=200),
+        )
+        assert "already cleaned" not in buf.getvalue() and rsync_calls
+
+    @pytest.mark.asyncio
+    async def test_a_done_chain_is_archived_again_and_pulled_without_checkpoints(
+        self, tmp_path, patched
+    ):
+        # Review of #38: a chain whose final archive was cut short had no way back.
+        conn, rsync_calls = patched
+        conn.add("sacct", _Result(0, stdout="101|COMPLETED\n"))
+        manifest = _manifest(tmp_path, job_ids=["101"], archive_dir="/shares/lab/hsm-archive")
+        manifest["resumable"] = {"enabled": True, "chunk_walltime": "23:00:00"}
+        manifest["chain"] = {"state": {"chunk_index": 2, "done": True}}
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1", manifest, Console(file=io.StringIO())
+        )
+        assert any("/shares/lab/hsm-archive/sw1" in c for c in conn.run_calls)  # archived
+        assert "--exclude=*/resume/" in rsync_calls[-1]  # the checkpoints ride the archive
+        assert any(c.startswith("rm -rf") for c in conn.run_calls)

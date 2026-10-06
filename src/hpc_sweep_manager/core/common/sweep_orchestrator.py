@@ -17,6 +17,7 @@ fold in once the SSH + distributed backends finish their own refactor.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 import shutil
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 # Mode strings the orchestrator accepts. Completion runs still route through
 # the legacy path (they need starting-task-number propagation); see cli/sweep.py.
 SUPPORTED_MODES = frozenset({"local", "auto", "array", "individual", "distributed", "remote"})
+
+PROBE_TRIES = 5  # polls a live chain launcher gives a failing chunk-progress probe
 
 
 @dataclass
@@ -587,11 +590,25 @@ async def run_resumable_sweep_async(
         if chunks_meta:
             chunks_meta[-1]["terminal_states"] = list(last_statuses.values())
 
-        progress = await source.chunk_progress(
-            num_tasks,
-            done_sentinel=resumable.done_sentinel,
-            checkpoint_subdir=ckpt_subdir,
-        )
+        # A failed probe (None) is no verdict, and the chunk is in the manifest. A live launcher
+        # asks again a few polls; a detached `advance` leaves it to its next run, so that two
+        # runs never overlap and both submit the next chunk.
+        for attempt in range(PROBE_TRIES if block else 1):
+            if attempt:
+                await asyncio.sleep(poll_interval)
+            progress = await source.chunk_progress(
+                num_tasks, done_sentinel=resumable.done_sentinel, checkpoint_subdir=ckpt_subdir
+            )
+            if progress is not None:
+                break
+        if progress is None:
+            if block:
+                raise RuntimeError(
+                    f"chain {sweep_id}: the progress probe failed {PROBE_TRIES} times; the chain "
+                    f"is saved, `hsm sweep advance {sweep_id}` takes it on"
+                )
+            logger.warning(f"chain {sweep_id}: the progress probe failed; no decision this run")
+            break
         done_count = len(progress.done_indices)
         progressed = (done_count > prev_done) or (
             progress.checkpoint_mtime is not None

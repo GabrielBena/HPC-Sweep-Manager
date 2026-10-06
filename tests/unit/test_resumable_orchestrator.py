@@ -13,7 +13,10 @@ from typing import Any
 import pytest
 
 from hpc_sweep_manager.core.common.resumable import ChunkProgress, ResumableConfig
-from hpc_sweep_manager.core.common.sweep_orchestrator import run_resumable_sweep_async
+from hpc_sweep_manager.core.common.sweep_orchestrator import (
+    PROBE_TRIES,
+    run_resumable_sweep_async,
+)
 
 
 class FakeSource:
@@ -125,6 +128,27 @@ class TestDrive:
         assert src.submit_calls[1]["chunk_index"] == 1
         # Pull-excludes were set so wait_for_all's pulls skip the checkpoint dir.
         assert src._pull_excludes == ("*/resume/",)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_is_asked_again_not_a_strike(self):
+        # Tracker S11 review: an empty probe after a blip counted as a chunk without progress.
+        src = FakeSource([None, None, ChunkProgress(frozenset({1, 2}), 100.0)])
+        res = await _run(src, _cfg(max_consecutive_failures=1), params=2, poll_interval=0)
+        assert res.chain_decision == "done" and res.chunks_run == 1 and not src._script
+
+    @pytest.mark.asyncio
+    async def test_a_probe_that_keeps_failing_ends_a_live_launcher(self):
+        src = FakeSource([None] * PROBE_TRIES + [ChunkProgress(frozenset({1}), 1.0)])
+        with pytest.raises(RuntimeError, match="hsm sweep advance sw"):
+            await _run(src, _cfg(), params=1, poll_interval=0)
+        assert len(src._script) == 1 and src.collect_calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_probe_leaves_a_detached_advance_undecided(self):
+        # Two overlapping cron runs could both ADVANCE once the link is back: this one stops.
+        src = FakeSource([None, ChunkProgress(frozenset(), 100.0)])
+        res = await _run(src, _cfg(), params=2, do_setup=False, initial_job_ids=["j0"], block=False)
+        assert res.chain_decision == "" and src.submit_calls == [] and len(src._script) == 1
 
     @pytest.mark.asyncio
     async def test_done_in_one_chunk(self):
