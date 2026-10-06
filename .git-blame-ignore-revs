@@ -1,0 +1,3 @@
+# Mechanical commits that `git blame` should skip (git config blame.ignoreRevsFile .git-blame-ignore-revs).
+# style: mechanical ruff fix + format (no semantic change)
+09f1c9b9e2f426399ae947a63ad31a54cc4ad18e
