@@ -322,6 +322,7 @@ def test_conda_init_sources_the_install_that_has_the_env(
     tmp_path, installs, conda_exe, conda_env, picked
 ):
     """The rendered partial, run by a real bash with no conda on PATH."""
+    import shutil
     import subprocess
 
     for name, envs in installs.items():
@@ -331,10 +332,11 @@ def test_conda_init_sources_the_install_that_has_the_env(
             (tmp_path / name / "envs" / env / "conda-meta").mkdir(parents=True)
     (tmp_path / "miniconda3" / "envs" / "lab").mkdir(parents=True, exist_ok=True)  # leftover
     script = render_template("_conda_init.sh.j2", uses_conda=True, conda_env=conda_env)
-    env = {"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    env = {"HOME": str(tmp_path), "PATH": str(tmp_path / "no-bin")}  # no conda on PATH (CI has one)
     if conda_exe:
         env["CONDA_EXE"] = str(tmp_path / conda_exe)
-    out = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    bash = shutil.which("bash")
+    out = subprocess.run([bash, "-c", script], env=env, capture_output=True, text=True)
     assert out.stdout.split() == (["sourced", picked] if picked else []), out.stderr
 
 
