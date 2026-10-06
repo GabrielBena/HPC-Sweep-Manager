@@ -158,17 +158,19 @@ def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:
 
 
 def remote_interpreter(
-    remote_cfg: dict, distributed_cfg: dict, conda_env_override: str | None = None
+    remote_cfg: dict,
+    distributed_cfg: dict,
+    project_conda_env: str | None = None,
+    conda_env_override: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """``(conda_env, python_path)`` for a remote: a CLI ``--conda-env``, else the narrowest of the
-    remote's entry and the ``distributed:`` block that sets either, taken whole. So a remote's
-    ``python_path`` is never beaten by an env set more widely (``paths.conda_env`` included)."""
-    if conda_env_override is not None:
-        return conda_env_override, None
-    for level in (remote_cfg, distributed_cfg):
-        if "conda_env" in level or "python_path" in level:
+    """``(conda_env, python_path)`` for a remote: the narrowest of an override, the remote's
+    entry and the ``distributed:`` block that sets either (a key left empty is unset), taken
+    whole, else the project's ``paths.conda_env``. So a remote's ``python_path`` is never beaten
+    by an env set more widely."""
+    for level in ({"conda_env": conda_env_override}, remote_cfg, distributed_cfg):
+        if level.get("conda_env") or level.get("python_path"):
             return level.get("conda_env"), level.get("python_path")
-    return None, None
+    return project_conda_env, None
 
 
 def build_rsync_push_cmd(

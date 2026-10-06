@@ -222,12 +222,8 @@ def build_compute_source(
             raise RuntimeError("--mode remote requires --remote <alias>")
         # Lookup: a registered remote, or a bare ssh-config alias (empty cfg) if none are.
         distributed_cfg = dict(hsm_config.config_data.get("distributed", {}) if hsm_config else {})
-        # paths.conda_env is the widest fallback for the SSH factories: an interpreter set on
-        # the remote or the distributed block wins (push_exec.remote_interpreter).
-        if hsm_config is not None:
-            _proj_env = getattr(hsm_config, "get_conda_env", lambda: None)()
-            if _proj_env and not distributed_cfg.keys() & {"conda_env", "python_path"}:
-                distributed_cfg["conda_env"] = _proj_env
+        # paths.conda_env is the widest fallback (push_exec.remote_interpreter).
+        proj_env = getattr(hsm_config, "get_conda_env", lambda: None)() if hsm_config else None
         registered = distributed_cfg.get("remotes") or {}
         if registered and remote_alias not in registered:
             # A typo must not become a bare ssh-bash remote (e.g. a login node).
@@ -265,6 +261,7 @@ def build_compute_source(
                 script_path=script_path,
                 default_spec=default_spec,
                 conda_env_override=conda_env_override,
+                project_conda_env=proj_env,
             )
             # One `sbatch --array` per sweep unless `--mode individual`, which costs two SSH
             # channels and one slurmctld RPC per task (tracker S3).
@@ -293,6 +290,7 @@ def build_compute_source(
                 default_spec=default_spec,
                 gpus_override=gpus_override,
                 conda_env_override=conda_env_override,
+                project_conda_env=proj_env,
             )
             return source, "remote", "individual"
         else:

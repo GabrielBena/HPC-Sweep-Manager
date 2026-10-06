@@ -110,12 +110,9 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
     project_dir = hsm_config.get_project_root() or str(Path.cwd())
     script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
     distributed_cfg = dict(hsm_config.config_data.get("distributed", {}))
-    # paths.conda_env is the widest fallback for SSH/SSH-Slurm children: an interpreter set on
-    # the remote or the distributed block wins (push_exec.remote_interpreter). The getattr
+    # paths.conda_env is the widest fallback (push_exec.remote_interpreter); the getattr
     # handles FakeConfig in tests.
     project_conda_env = getattr(hsm_config, "get_conda_env", lambda: None)()
-    if project_conda_env and not distributed_cfg.keys() & {"conda_env", "python_path"}:
-        distributed_cfg["conda_env"] = project_conda_env
 
     sources: list[ComputeSource] = []
     for remote_name, remote_config in remotes.items():
@@ -128,6 +125,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
                     distributed_cfg=distributed_cfg,
                     project_dir=project_dir,
                     script_path=script_path,
+                    project_conda_env=project_conda_env,
                 )
                 if not remote_config.get("max_parallel_jobs"):  # the fair-share rule: <= 50 at once
                     source.max_parallel_jobs = DEFAULT_THROTTLE
@@ -139,6 +137,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
                     distributed_cfg=distributed_cfg,
                     project_dir=project_dir,
                     script_path=script_path,
+                    project_conda_env=project_conda_env,
                 )
                 logger.info(f"Remote source ready: {remote_name} (backend=ssh)")
             else:

@@ -320,8 +320,8 @@ class HSMConfig:
         ``python`` for this project activates this env: local (via
         ``conda run -n <env> python``), native Slurm (same), SSH and
         SSH-Slurm (via the existing ``resolve_run_prefix`` path).
-        Per-remote ``distributed.remotes.<alias>.conda_env`` still
-        overrides for the remote that names it (rare).
+        A ``conda_env`` or ``python_path`` on a remote or the ``distributed:``
+        block wins over it (``push_exec.remote_interpreter``).
 
         Returns ``None`` when unset or set to an empty string.
 

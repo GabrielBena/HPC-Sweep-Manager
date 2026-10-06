@@ -62,12 +62,13 @@ class TestParseGpusArg:
 @pytest.mark.parametrize(
     ("remote", "distributed", "override", "prefix"),
     [
-        # FR#15b: paths.conda_env reaches the factories as the distributed block's conda_env.
-        ({"python_path": "/opt/py/bin/python"}, {"conda_env": "proj"}, None, "/opt/py/bin/python"),
+        ({"python_path": "/opt/py/bin/python"}, {}, None, "/opt/py/bin/python"),  # FR#15b
         ({"conda_env": "box"}, {"python_path": "/opt/py"}, None, "conda run -n box python"),
         ({}, {"python_path": "/opt/py"}, None, "/opt/py"),
-        ({"conda_env": None}, {"conda_env": "proj"}, None, "python"),  # an env turned off
-        ({"python_path": "/opt/py"}, {}, "cli", "conda run -n cli python"),  # --conda-env
+        ({}, {}, None, "conda run -n proj python"),  # paths.conda_env, the widest
+        ({"python_path": None}, {"conda_env": None}, None, "conda run -n proj python"),  # empty
+        ({"python_path": "python"}, {}, None, "python"),  # the way out of the project's env
+        ({"python_path": "/opt/py"}, {}, "cli", "conda run -n cli python"),
     ],
 )
 def test_the_narrowest_interpreter_wins(factory, remote, distributed, override, prefix):
@@ -76,6 +77,7 @@ def test_the_narrowest_interpreter_wins(factory, remote, distributed, override, 
         remote_cfg={**remote, "backend": "slurm"} if factory is build_ssh_slurm_source else remote,
         distributed_cfg=distributed,
         conda_env_override=override,
+        project_conda_env="proj",
         project_dir="/local/proj",
         script_path="train.py",
     )

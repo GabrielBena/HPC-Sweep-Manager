@@ -468,9 +468,10 @@ calling-shell state.
 
 **Per-source overrides** (rare): set
 `distributed.remotes.<alias>.conda_env` to use a different env on a
-specific remote (e.g., a CPU-only build of the env on one cluster).
-`distributed.conda_env` is a global default at the same precedence as
-per-remote. CLI `--conda-env <name>` wins over everything.
+specific remote (e.g., a CPU-only build of the env on one cluster), or
+its `python_path` to use an interpreter outside conda. The narrowest of the
+remote's entry, the `distributed:` block and `paths.conda_env` that sets
+`conda_env` or `python_path` wins, taken whole (see SSH_EXECUTION.md).
 
 **`hsm setup init`** detects the active shell env via
 `$CONDA_DEFAULT_ENV` and writes it into `paths.conda_env` automatically

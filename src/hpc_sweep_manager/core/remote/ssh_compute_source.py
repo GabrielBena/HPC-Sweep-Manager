@@ -762,6 +762,7 @@ def build_ssh_source(
     default_spec: ResourceSpec | None = None,
     gpus_override: None | int | Sequence[int] = None,
     conda_env_override: str | None = None,
+    project_conda_env: str | None = None,
 ) -> SSHComputeSource:
     """Build a push-model :class:`SSHComputeSource` from local hsm_config.
 
@@ -803,7 +804,9 @@ def build_ssh_source(
         per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
-    conda_env, python_path = remote_interpreter(remote_cfg, distributed_cfg, conda_env_override)
+    conda_env, python_path = remote_interpreter(
+        remote_cfg, distributed_cfg, project_conda_env, conda_env_override
+    )
 
     if gpus_override is not None:
         gpus_value: None | int | Sequence[int] = gpus_override

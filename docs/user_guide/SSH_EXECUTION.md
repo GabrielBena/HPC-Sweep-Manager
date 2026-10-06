@@ -107,14 +107,14 @@ Example combos:
 
 The wrapper script's interpreter comes from the narrowest place that sets one:
 
-1. the `--conda-env` CLI flag;
-2. the remote's own entry (`distributed.remotes.<alias>`), with `conda_env` or `python_path`;
-3. the `distributed:` block, with `conda_env` or `python_path`;
-4. the project's `paths.conda_env`;
-5. bare `python` on the remote PATH (whatever the non-interactive shell finds).
+1. the remote's own entry (`distributed.remotes.<alias>`), with `conda_env` or `python_path`;
+2. the `distributed:` block, with `conda_env` or `python_path`;
+3. the project's `paths.conda_env`;
+4. bare `python` on the remote PATH (whatever the non-interactive shell finds).
 
 A level that sets either key is taken whole, so a remote's `python_path` wins over a
-`paths.conda_env`. A conda env renders `conda run -n <env> python`, and the script sources
+`paths.conda_env`; a key left empty counts as unset. To run a remote outside the project's
+env, give it `python_path: python` (or a full path). A conda env renders `conda run -n <env> python`, and the script sources
 `conda.sh` from the standard locations (`~/miniconda3`, `~/anaconda3`, `~/.miniconda3`,
 `/opt/conda`) first, since non-interactive SSH shells skip `~/.bashrc`. A `python_path`
 renders that path as is. Within one level, `conda_env` wins over `python_path`.
@@ -196,8 +196,9 @@ distributed:
       conda_env: my-env-cpu
 ```
 
-CLI flags (`--gpus`, `--conda-env`) override per-remote config; per-remote
-config overrides global `distributed.*`; global overrides defaults.
+The CLI flag `--gpus` overrides per-remote config; per-remote config overrides global
+`distributed.*`; global overrides defaults. The interpreter follows the order in
+[Conda env vs explicit Python path](#conda-env-vs-explicit-python-path).
 
 `DEFAULT_RSYNC_EXCLUDES` already skips the usual ML artifacts from the code
 push — `.git`, `__pycache__`, `*.pyc`/`*.pt`/`*.pth`/`*.ckpt`,
