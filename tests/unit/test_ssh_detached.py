@@ -35,7 +35,7 @@ class BashConn:
     def __init__(self, home: Path):
         self.home, self.calls = home, []
 
-    async def run(self, cmd, *, input=None, check=False):
+    async def run(self, cmd, *, input=None, check=False, **kw):
         self.calls.append((cmd, input))
         proc = await asyncio.create_subprocess_exec(
             "bash",
@@ -128,7 +128,7 @@ async def test_cancel_ends_the_whole_process_group(box, tmp_path):
     assert await box.cancel_job(job)
     await _until(lambda: not _group_alive(pgid))  # the python child too, not only the wrapper
     assert (_remote_task(box) / ".hsm_rc").read_text().strip() == "143"
-    assert box.completed_jobs[job].status == "CANCELLED"
+    assert await box.wait_for_all(poll_interval=0.05) == {job: "CANCELLED"}
 
 
 async def test_cleanup_leaves_a_task_running_to_its_end(box, tmp_path):
@@ -149,11 +149,28 @@ async def test_a_task_killed_hard_is_failed(box, tmp_path):
     assert await box.wait_for_all(poll_interval=0.05) == {job: "FAILED"}
 
 
-async def test_a_repeated_launch_finds_the_running_task(box, tmp_path):
-    # A launch whose reply was lost is retried: it must not start a second copy.
+@pytest.mark.parametrize("sleep", [30, 0])
+async def test_a_repeated_launch_finds_the_task_running_or_done(box, tmp_path, sleep):
+    # A launch whose reply was lost is retried: it must never start the task again.
     assert await box.setup(tmp_path / "sweep", "s1")
-    job = await box.submit_job({"sleep": 30}, "s1_task_001", "s1")
-    await _until(lambda: (_remote_task(box) / ".hsm_pid").exists())
+    job = await box.submit_job({"sleep": sleep, "code": 4}, "s1_task_001", "s1")
+    if not sleep:
+        await _until((_remote_task(box) / ".hsm_rc").exists)
     launch, script = next(c for c in box._conn.calls if "setsid nohup" in c[0])
     again = await box._conn.run(launch, input=script)
     assert again.stdout.strip() == str(box._pids[job])
+    assert (_remote_task(box) / "hsm.log").read_text().count("trained") == (0 if sleep else 1)
+
+
+async def test_a_task_runs_while_any_of_its_group_does(box, tmp_path):
+    # The wrapper killed alone: its training process still holds the GPU, so not "gone".
+    assert await box.setup(tmp_path / "sweep", "s1")
+    job = await box.submit_job({"sleep": 30}, "s1_task_001", "s1")
+    pgid = box._pids[job]
+    await _until(lambda: "train.py" in os.popen(f"pgrep -g {pgid} -a").read())
+    os.kill(pgid, signal.SIGKILL)  # the wrapper only
+    await box.update_all_job_statuses()
+    assert job in box.active_jobs
+    os.killpg(pgid, signal.SIGKILL)
+    await _until(lambda: not _group_alive(pgid))
+    assert await box.wait_for_all(poll_interval=0.05) == {job: "FAILED"}
