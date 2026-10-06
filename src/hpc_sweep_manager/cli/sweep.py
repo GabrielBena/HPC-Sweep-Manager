@@ -1250,12 +1250,12 @@ async def _collect_ssh(sweep_dir: Path, manifest: dict, console: Console) -> Non
             return
         ok = await source.collect_results()
         states = [info.status for info in source.completed_jobs.values()]
-        running, failed = len(source.active_jobs), states.count("FAILED")
+        running, failed = len(source.active_jobs), len(states) - states.count("COMPLETED")
         colour = "red" if failed or not ok else "yellow" if running else "green"
         kept = "kept" if running or failed or not ok else "cleaned"
         console.print(
-            f"[{colour}]{len(states)} task(s) ended ({failed} FAILED), {running} still running; "
-            f"pulled → {sweep_dir / 'tasks'} ({'ok' if ok else 'the pull failed'}); "
+            f"[{colour}]{len(states)} task(s) ended ({failed} not COMPLETED), {running} still "
+            f"running; pulled → {sweep_dir / 'tasks'} ({'ok' if ok else 'the pull failed'}); "
             f"the remote dir is {kept}.[/{colour}]"
         )
         if running:
@@ -2131,6 +2131,40 @@ def queue_cmd(ctx):
     )
 
 
+async def _cancel_ssh(sweep_dir: Path, manifest: dict, console: Console) -> int:
+    """TERM each running task of an ssh sweep (its process group); the exit status. Never while
+    its launcher runs: it would start the tasks still queued."""
+    import asyncssh
+
+    from ..core.remote.ssh_compute_source import SSHComputeSource, launcher_lock
+
+    if not (lock := launcher_lock(sweep_dir)):
+        console.print(
+            "[yellow]This sweep's launcher is still running: stop it first (Ctrl-C; its tasks "
+            "keep running), then cancel.[/yellow]"
+        )
+        return 1
+    source = SSHComputeSource.from_manifest(manifest, sweep_dir)
+    try:
+        source._conn = await source._open_connection()
+        await source.recover_pids()
+        await source.update_all_job_statuses()
+        live = list(source.active_jobs)
+        sent = [job for job in live if await source.cancel_job(job)]
+        colour = "green" if len(sent) == len(live) else "red"
+        console.print(
+            f"[{colour}]Sent TERM to {len(sent)} of {len(live)} running task(s) on "
+            f"{source.host}.[/{colour}] `hsm sweep collect {source.sweep_id}` pulls them."
+        )
+        return 0 if len(sent) == len(live) else 1
+    except (OSError, asyncssh.Error) as e:
+        console.print(f"[red]Could not reach {source.host} to cancel: {e}[/red]")
+        return 1
+    finally:
+        await source.cleanup()
+        lock.close()
+
+
 async def _scancel(sweep_dir: Path, manifest: dict, job_ids: list[str]) -> tuple[int, str]:
     """One ``scancel`` naming every job: over ssh for an SSH-Slurm sweep, else on this machine."""
     from ..core.hpc.slurm_compute_source import SlurmComputeSource
@@ -2212,6 +2246,12 @@ def cancel_cmd(ctx, sweep_id, yes):
                 "If its launcher still runs, stop it too (Ctrl-C).[/yellow]"
             )
         return
+    if manifest.get("backend") == "ssh":
+        console.print(f"[bold]Cancelling sweep:[/bold] {sweep_id} (ssh on {manifest.get('host')})")
+        if not yes and not click.confirm("Proceed?", default=False):
+            console.print("Cancelled.")
+            return
+        raise SystemExit(asyncio.run(_cancel_ssh(sweep_dir, manifest, console)))
 
     meta = _load_sweep_meta(sweep_dir)
     backend = (meta["backend"] or "").lower()
@@ -2258,9 +2298,8 @@ def cancel_cmd(ctx, sweep_id, yes):
         return
     elif backend == "ssh_remote":
         console.print(
-            "[yellow]Cannot reliably remote-cancel push-model SSH sweeps from here. "
-            "If the local `hsm sweep run` process is still active, Ctrl+C it; "
-            "otherwise the remote tasks are already done or you can kill them via "
+            "[yellow]This ssh sweep has no .hsm_manifest.json (an older HSM): stop its "
+            "launcher (Ctrl-C), then kill its tasks with "
             "`ssh <alias> 'pkill -f <sweep_id>'`.[/yellow]"
         )
         return

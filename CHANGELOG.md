@@ -303,6 +303,12 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   deleted). **For consumers:** native Slurm sweep dirs now hold a
   `.hsm_manifest.json`, so `hsm queue mine` links a live native sweep's jobs to it;
   `hsm sweep advance` refuses a native chain (it re-attaches over SSH only).
+- **`hsm sweep cancel` cancels an ssh sweep (S9 follow-up).** It printed "cannot reliably
+  remote-cancel" and suggested Ctrl-C, which since detached tasks (X-2) stops only the
+  launcher. From the sweep's `.hsm_manifest.json` it now sends TERM to each running task's
+  process group (a task may checkpoint on TERM), and exits 1 if any send fails; while the
+  launcher runs it refuses, since the launcher would start the tasks still queued. A
+  cancelled task counts as not COMPLETED: `collect` keeps the remote dir and says so.
 
 ### Removed (2026-10 maintenance pass)
 
