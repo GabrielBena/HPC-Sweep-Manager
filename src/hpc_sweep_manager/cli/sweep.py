@@ -25,6 +25,7 @@ from ..core.common.sweep_orchestrator import (
     spec_from_cli,
 )
 from ..core.common.templating import params_to_hydra_args
+from ..core.hpc.slurm_base import cpu_only
 from .common import common_options
 from .launch_gate import fair_share_gate
 
@@ -196,6 +197,12 @@ def _describe_gpu_allowlist(allow) -> str:
     return str(allow)
 
 
+def _no_gpus_line(spec) -> str:
+    """A Slurm placement's GPU line for a job with none, saying whether GPU nodes are kept off."""
+    off = " (the partition's GPU nodes are excluded at submit)" if cpu_only(spec) else ""
+    return f"  GPUs: none requested (spec.gpus=0){off}"
+
+
 def _render_placement(
     *,
     source,
@@ -270,7 +277,7 @@ def _render_placement(
                     "(Slurm schedules across the partition)"
                 )
             else:
-                console.print("  GPUs: none requested (spec.gpus=0)")
+                console.print(_no_gpus_line(spec))
 
         elif resolved_mode == "remote":
             host = getattr(source, "host", remote_alias)
@@ -290,7 +297,7 @@ def _render_placement(
                 if gpus_per_task:
                     console.print(f"  GPUs/task: {_describe_gres(spec, gpus_per_task)}")
                 else:
-                    console.print("  GPUs: none requested (spec.gpus=0)")
+                    console.print(_no_gpus_line(spec))
             else:
                 console.print(
                     f"  GPU allowlist on remote: "

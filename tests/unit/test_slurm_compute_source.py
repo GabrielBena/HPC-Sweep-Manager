@@ -16,6 +16,9 @@ from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
 from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
 
+# What the fakes answer to anything but sbatch: a command that printed nothing.
+OTHER_COMMAND = type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+
 
 class TestConstruction:
     def test_default_source_type(self):
@@ -602,6 +605,9 @@ class TestMultiGpuTypeLocal:
         next_id = iter(["201", "202"])
 
         def fake_run(cmd, **kwargs):
+            if cmd[0] != "sbatch":  # e.g. the pre-submit reservation check
+                return OTHER_COMMAND
+
             class R:
                 returncode = 0
                 stdout = f"Submitted batch job {next(next_id)}\n"
@@ -671,6 +677,8 @@ class TestMultiGpuTypeLocal:
         calls = {"n": 0}
 
         def fake_run(cmd, **kwargs):
+            if cmd[0] != "sbatch":  # e.g. the pre-submit reservation check
+                return OTHER_COMMAND
             calls["n"] += 1
 
             class R:
@@ -792,6 +800,9 @@ class TestNativeMultiTypeResumable:
         ids = iter(["700", "701"])
 
         def fake_run(cmd, capture_output=True, text=True):
+            if cmd[0] != "sbatch":  # e.g. the pre-submit reservation check
+                return OTHER_COMMAND
+
             class R:
                 returncode = 0
                 stdout = f"Submitted batch job {next(ids)}\n"

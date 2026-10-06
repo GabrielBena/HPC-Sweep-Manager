@@ -15,10 +15,20 @@ import getpass
 import logging
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
+from datetime import datetime
 
 from ..common.compute_source import TERMINAL_STATES, ComputeSource, JobInfo
-from .scheduler_queue import parse_sacct_job_states, sacct_args, strip_array_suffix
-from .slurm_protocol import SLURM_STATE_MAP
+from ..common.resource_spec import ResourceSpec
+from ..common.utils import format_walltime, parse_walltime
+from .scheduler_queue import (
+    Reservation,
+    parse_reservations_output,
+    parse_sacct_job_states,
+    sacct_args,
+    strip_array_suffix,
+)
+from .slurm_protocol import SLURM_STATE_MAP, directive_flag
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +86,7 @@ class SlurmBase(ComputeSource):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._sacct_misses: dict[str, int] = {}  # job -> polls in a row with no accounting record
+        self._gpu_nodes: dict[str, list[str]] = {}  # partition -> its GPU nodes (one sinfo each)
 
     @abstractmethod
     async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
@@ -137,3 +148,74 @@ class SlurmBase(ComputeSource):
                 await asyncio.sleep(pause)
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
+
+    async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
+        """A CPU-only job (:func:`cpu_only`) excludes its partition's GPU nodes, unless that is
+        every node; an ``--exclude`` given is kept. 24 of ~300 CPU tasks once sat on GPU nodes."""
+        if not cpu_only(spec):
+            return spec
+        part = spec.partition
+        if part not in self._gpu_nodes:
+            rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
+            rows = [ln.split()[:2] for ln in out.splitlines() if rc == 0 and len(ln.split()) > 1]
+            gpu = {node for node, gres in rows if "gpu" in gres}
+            self._gpu_nodes[part] = sorted(gpu) if gpu < {node for node, _ in rows} else []
+            if self._gpu_nodes[part]:
+                logger.info(
+                    f"CPU-only jobs exclude {len(gpu)} GPU node(s) of {part} "
+                    f"(spec.cpu_only_nodes: false allows them)"
+                )
+        if not self._gpu_nodes[part]:
+            return spec
+        given = [v for k, v in spec.extra_directives if directive_flag(k) == "--exclude"]
+        extra = {directive_flag(k): v for k, v in spec.extra_directives}
+        extra["--exclude"] = ",".join([*given, *self._gpu_nodes[part]])
+        return replace(spec, extra_directives=tuple(extra.items()))
+
+    async def _warn_reservations(self, walltime: str | None) -> None:
+        """Warn when a maintenance reservation starts before a job of ``walltime`` could end:
+        Slurm then holds the job until the reservation is over (once ~20 h, 1,600 CPUs idle).
+        Best effort: a check that fails (transport, clock, an unbounded walltime) says nothing."""
+        try:
+            rc, out, _ = await self._sh(["bash", "-c", "date +%FT%T; scontrol show reservations"])
+            if rc != 0:
+                return
+            now = datetime.fromisoformat(out.splitlines()[0].strip())
+            span = parse_walltime(walltime) if walltime else 0
+            hits = blocking_reservations(parse_reservations_output(out), now, span)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"reservation check skipped: {e}")
+            return
+        for res in hits:
+            free = int((datetime.fromisoformat(res.start_time) - now).total_seconds())
+            hint = f"; a walltime ≤ {format_walltime(free)} would start now" if free > 0 else ""
+            logger.warning(
+                f"Reservation {res.name} ({res.start_time} → {res.end_time}) overlaps a "
+                f"{walltime or 'job'} walltime: jobs won't start before {res.end_time}{hint}."
+            )
+
+
+# Directives that ask for GPUs or pin placement: such a job keeps every node it could use.
+_PLACED = ("--gres", "--gpu", "--tres-per", "--nodelist", "--constraint", "-w", "-C", "-G")
+
+
+def cpu_only(spec: ResourceSpec) -> bool:
+    """Whether :meth:`SlurmBase._off_gpu_nodes` would keep this job off GPU nodes."""
+    placed = any(directive_flag(k).startswith(_PLACED) for k, _ in spec.extra_directives)
+    return not (spec.gpus or placed or spec.cpu_only_nodes is False or not spec.partition)
+
+
+def blocking_reservations(
+    reservations: Iterable[Reservation], now: datetime, walltime_s: int
+) -> list[Reservation]:
+    """Maintenance reservations (MAINT, or all nodes) overlapping ``[now, now + walltime_s]``."""
+    hits = []
+    for res in reservations:
+        try:
+            start, end = (datetime.fromisoformat(t) for t in (res.start_time, res.end_time))
+        except ValueError:
+            continue
+        maint = "MAINT" in res.flags or "ALL_NODES" in res.flags or res.nodes == "ALL"
+        if maint and end > now and start.timestamp() < now.timestamp() + walltime_s:
+            hits.append(res)
+    return hits

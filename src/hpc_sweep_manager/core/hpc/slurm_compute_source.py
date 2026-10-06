@@ -156,7 +156,7 @@ class SlurmComputeSource(SlurmBase):
         wandb_group: str | None = None,
         spec: ResourceSpec | None = None,
     ) -> str:
-        effective = self._effective_spec(spec)
+        effective = await self._off_gpu_nodes(self._effective_spec(spec))
         directives = render_sbatch_directives(effective)
         scripts_dir, logs_dir, tasks_dir = self._ensure_dirs()
         task_dir = tasks_dir / job_name
@@ -220,6 +220,8 @@ class SlurmComputeSource(SlurmBase):
         dependency: str | None = None,
         resumable: ResumableContext | None = None,
     ) -> list[str]:
+        cap = resumable.config.chunk_walltime if resumable else None
+        await self._warn_reservations(cap or self._effective_spec(spec).walltime)
         if resumable is not None and mode != "array":
             raise ValueError(
                 f"resumable chains use array mode (one chunk = one Slurm array); got mode={mode!r}"
@@ -267,7 +269,7 @@ class SlurmComputeSource(SlurmBase):
         """
         if not params_list:
             raise ValueError("Cannot submit an empty array")
-        effective = self._effective_spec(spec)
+        effective = await self._off_gpu_nodes(self._effective_spec(spec))
         submissions = build_array_submissions(
             params_list=params_list,
             effective_spec=effective,

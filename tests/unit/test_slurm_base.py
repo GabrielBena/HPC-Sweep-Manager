@@ -5,15 +5,21 @@ Tracker S1 (an outage read as COMPLETED cleaned a live sweep dir) and S2 (per-jo
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
+from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+from hpc_sweep_manager.core.hpc.scheduler_queue import Reservation
 from hpc_sweep_manager.core.hpc.slurm_base import (
     SACCT_GRACE,
     SlurmBase,
+    blocking_reservations,
     queued_states,
     sacct_verdicts,
 )
+from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
 
 
 class TestQueuedStates:
@@ -168,3 +174,108 @@ class TestRefresh:
         assert await src.get_job_status("1") == "PENDING"
         assert await src.get_job_status("2") == "UNKNOWN"
         assert src.calls == []
+
+
+@pytest.mark.asyncio
+class TestCpuOnlyJobsKeepOffGpuNodes:
+    """Tracker S6 (Gabriel, 2026-10-06): 24 of ~300 CPU tasks once sat on GPU nodes."""
+
+    SINFO = (
+        0,
+        "cpu-1 (null)\ncpu-2 tmpdisk:1000\ngpu-1 gpu:A100:4\ngpu-1 gpu:A100:4\n"
+        "gpu-2 gpu:H100:8(S:0-1)\n",
+        "",
+    )
+
+    async def test_gpu_nodes_join_every_exclude_given(self):
+        # Only a GRES naming a GPU marks a GPU node (cpu-2's tmpdisk doesn't).
+        src = ScriptedSlurm([self.SINFO])
+        given = (("exclude", "old-[1-2]"), ("--exclude", "old-9"))
+        spec = ResourceSpec(partition="standard", extra_directives=given)
+        got = await src._off_gpu_nodes(spec)
+        assert dict(got.extra_directives) == {"--exclude": "old-[1-2],old-9,gpu-1,gpu-2"}
+        assert await src._off_gpu_nodes(spec) == got and src.calls == ["sinfo"]  # once
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            ResourceSpec(partition="standard", gpus=1),
+            ResourceSpec(partition="standard", extra_directives=(("gres", "gpu:1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("--gpus-per-task", "1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("tres-per-task", "gres/gpu:1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("nodelist", "gpu-1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("-w", "gpu-1"),)),
+            ResourceSpec(partition="standard", extra_directives=(("constraint", "GPUMEM80GB"),)),
+            ResourceSpec(partition="standard", cpu_only_nodes=False),
+            ResourceSpec(),  # the default partition isn't known here
+        ],
+        ids=[
+            "gpus",
+            "gres-directive",
+            "gpus-directive",
+            "tres-directive",
+            "nodelist",
+            "short-nodelist",
+            "constraint",
+            "opt-out",
+            "no-partition",
+        ],
+    )
+    async def test_gpu_jobs_opt_outs_and_unknown_partitions_are_left_alone(self, spec):
+        src = ScriptedSlurm([])
+        assert await src._off_gpu_nodes(spec) == spec and src.calls == []
+
+    @pytest.mark.parametrize(
+        "sinfo", [(0, "gpu-1 gpu:A100:4\ngpu-2 gpu:H100:8\n", ""), (1, "", "sinfo: error")]
+    )
+    async def test_never_excludes_every_node(self, sinfo):
+        # An all-GPU partition (or a failed sinfo): excluding would leave the job nowhere to run.
+        spec = ResourceSpec(partition="gpu")
+        assert await ScriptedSlurm([sinfo])._off_gpu_nodes(spec) == spec
+
+
+def test_a_directive_key_without_dashes_still_renders():
+    spec = ResourceSpec(extra_directives=(("exclude", "n1"), ("--nice", "100")))
+    assert render_sbatch_directives(spec).splitlines() == [
+        "#SBATCH --exclude=n1",
+        "#SBATCH --nice=100",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "flags", "nodes", "walltime_h", "blocks"),
+    [
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "MAINT", "n[1-9]", 48, True),
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "", "ALL", 48, True),
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "", "n[1-2]", 48, False),  # not maint
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "MAINT", "ALL", 4, False),  # ends first
+        ("2026-10-05T06:00:00", "2026-10-05T18:00:00", "MAINT", "ALL", 48, False),  # over
+        ("2026-10-06T06:00:00", "2026-10-06T18:00:00", "MAINT", "ALL", 1, True),  # running now
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "ALL_NODES", "n[1-900]", 48, True),
+    ],
+)
+def test_blocking_reservations(start, end, flags, nodes, walltime_h, blocks):
+    res = Reservation("r", start, end, "12:00:00", nodes, 1, flags)
+    now = datetime(2026, 10, 6, 10, 0, 0)
+    assert bool(blocking_reservations([res], now, walltime_h * 3600)) is blocks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [
+        (0, "2026-10-06T10:00:00\nNo reservations in the system\n", ""),
+        (0, "not a clock\n", ""),
+        (255, "", "ssh: connection reset"),
+        OSError("transport gone"),
+    ],
+)
+@pytest.mark.parametrize("walltime", ["2-00:00:00", "90", "UNLIMITED", None])
+async def test_the_reservation_check_never_breaks_a_submission(reply, walltime):
+    class Raising(ScriptedSlurm):
+        async def _sh(self, argv):
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    await Raising([])._warn_reservations(walltime)  # no exception, whatever happens

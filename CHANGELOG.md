@@ -179,6 +179,17 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   an unattended launch on a hot account is throttled), launch as asked (`--force`
   skips the question), wait for the account to cool (re-checked every 30 min, at
   most 12 h), or cancel.
+- **CPU-only jobs keep off GPU nodes (S6).** A Slurm job without GPUs could land on a
+  GPU node and take its CPUs and memory (24 of ~300 replay tasks did). HSM now adds
+  the partition's GPU nodes (one `sinfo` per partition) to `--exclude`, merged with
+  any you set; `spec.cpu_only_nodes: false` allows them. It does so only when the spec
+  names a partition that has CPU nodes too, and never for a job that asks for GPUs
+  through `gpus` or an `extra_directives` `--gres`/`--gpus*`. `extra_directives` keys
+  without their dashes (`exclude:`) now render as `--exclude` instead of being ignored.
+- **Reservations are checked against the walltime (S7).** HSM used to list every
+  reservation at setup. It now warns at submission only about a maintenance window
+  that starts before a job of this walltime would end ("won't start before <end>; a
+  walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
 
 ### Removed (2026-10 maintenance pass)
 
