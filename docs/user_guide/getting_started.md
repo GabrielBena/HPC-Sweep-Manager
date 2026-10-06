@@ -134,7 +134,7 @@ mode for testing).
 ```bash
 hsm sweep run --mode local --parallel-jobs 4
 # GPU pinning in local mode: `local.gpus` (config) = per-task GPU count;
-# `--gpus` = which indices to use (default 'all'). No `--resources` needed.
+# `--gpus` = which nvidia-smi indices to use (default: every free GPU). No `--resources` needed.
 hsm sweep run --mode local --gpus 0,1,2,3
 ```
 

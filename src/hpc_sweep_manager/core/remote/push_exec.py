@@ -66,39 +66,48 @@ DEFAULT_RSYNC_EXCLUDES: tuple[str, ...] = (
 RSYNC_SSH = "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30"
 
 
-def normalize_gpu_allowlist(gpus: None | int | Sequence[int], detected: Sequence[int]) -> list[int]:
-    """Resolve the per-remote ``gpus`` config against the box's detected GPUs.
+def normalize_gpu_allowlist(
+    gpus: None | str | int | Sequence[int], detected: Sequence[int], busy: Sequence[int] = ()
+) -> list[int]:
+    """Resolve a ``gpus`` allowlist against the box's GPUs (nvidia-smi indices, i.e. PCI order).
 
-    - ``None`` → use all detected GPUs.
+    Only ``"all"`` takes a GPU in ``busy``: HSM never joins a co-tenant's GPU otherwise.
+
+    - ``None`` (no allowlist) → every free detected GPU.
+    - ``"all"`` → every detected GPU, busy or not.
     - ``0`` (int) → empty list (CPU-only).
-    - ``N`` (int>0) → the first N detected GPUs.
-    - ``[indices]`` → exactly those indices, intersected with detected (so a
-      stale allowlist can't point at a GPU that isn't there). Order preserved.
+    - ``N`` (int>0) → the first N free GPUs.
+    - ``[indices]`` → those indices that are detected (so a stale allowlist
+      can't point at a GPU that isn't there) and free. Order preserved.
     """
-    detected = list(detected)
+    if gpus == "all":
+        return list(detected)
+    free = [i for i in detected if i not in busy]
     if gpus is None:
-        return detected
+        return free
     if isinstance(gpus, bool):  # guard: bool is an int subclass
-        raise TypeError("gpus must be None, an int, or a list of ints")
+        raise TypeError("gpus must be None, 'all', an int, or a list of ints")
     if isinstance(gpus, int):
-        if gpus <= 0:
-            return []
-        return detected[:gpus]
-    # explicit allowlist
-    detected_set = set(detected)
-    return [i for i in gpus if i in detected_set]
+        return free[: max(gpus, 0)]
+    return [i for i in gpus if i in free]
+
+
+def cpu_only(gpus: None | str | int | Sequence[int]) -> bool:
+    """An explicit CPU allowlist (``--gpus cpu``, ``0``, ``[]``): its tasks see no GPU."""
+    return gpus == 0 or (isinstance(gpus, (list, tuple)) and not gpus)
 
 
 def partition_gpu_slots(
-    allowed: Sequence[int], gpus_per_job: int, cpu_slots: int
+    allowed: Sequence[int], gpus_per_job: int, cpu_slots: int, cpu: bool = False
 ) -> list[list[int] | None]:
     """Partition the allowed GPUs into execution slots.
 
-    Returns a list where each element is a list of GPU indices to expose for
-    one concurrent worker, or ``None`` for a CPU slot. Mirrors
-    LocalComputeSource: ``gpus_per_job`` GPUs per slot, dropping a trailing
-    remainder that can't fill a slot. Falls back to ``cpu_slots`` CPU slots when
-    there are no GPUs, ``gpus_per_job`` is 0, or the request exceeds supply.
+    Returns one element per concurrent worker: the GPU indices it sees (exported
+    as ``CUDA_VISIBLE_DEVICES``), ``gpus_per_job`` GPUs per slot, dropping a
+    trailing remainder that can't fill a slot. Without a full slot (no allowed
+    GPU, ``gpus_per_job`` 0, or a request above supply) it is ``cpu_slots`` CPU
+    slots: ``[]`` (no GPU visible) for an explicit CPU allowlist (``cpu``), else
+    ``None`` (the environment left as is).
     """
     allowed = list(allowed)
     if allowed and gpus_per_job and gpus_per_job > 0:
@@ -109,7 +118,30 @@ def partition_gpu_slots(
                 slots.append(chunk)
         if slots:
             return slots
-    return [None] * max(cpu_slots, 1)
+    return [[] if cpu else None] * max(cpu_slots, 1)
+
+
+def check_gpu_slots(
+    where: str, slots: Sequence, gpus_per_job: int, detected: Sequence[int], busy: Sequence[int]
+) -> bool:
+    """Whether a source can run its tasks, logged when not plainly. A GPU job with no full slot
+    of free allowed GPUs on a box that has GPUs is an error (False), never a silent CPU run; on a
+    CPU box, or with ``--gpus cpu`` (whose slots are ``[]``), it runs on CPU with a warning."""
+    if not gpus_per_job or slots[0]:
+        return True
+    if slots[0] is None and detected:
+        hint = f"; busy: {list(busy)}: wait, or pass --gpus all" if busy else ""
+        logger.error(
+            f"{where}: {gpus_per_job} GPU(s) per task, but no full slot of free allowed GPUs "
+            f"among {list(detected)}{hint}"
+        )
+        return False
+    why = "--gpus cpu" if slots[0] == [] else "no GPU found"
+    logger.warning(
+        f"{where}: {gpus_per_job} GPU(s) per task, but {why}: "
+        f"running {len(slots)} task(s) at a time on CPU"
+    )
+    return True
 
 
 def resolve_run_prefix(conda_env: str | None, python_path: str | None) -> str:

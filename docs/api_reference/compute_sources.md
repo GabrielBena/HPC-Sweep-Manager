@@ -137,7 +137,7 @@ Used by `--mode remote` (single host) and as a child of
 from hpc_sweep_manager.core.remote.ssh_compute_source import (
     SSHComputeSource,
     build_ssh_source,    # config-driven factory (precedence: override > per-remote > global > default)
-    parse_gpus_arg,      # parses --gpus value ("all" | "cpu" | "N" | "i,j,k") → None | int | list[int]
+    parse_gpus_arg,      # parses --gpus value ("all" | "cpu" | "N" | "i,j,k") → None | "all" | int | list[int]
 )
 ```
 

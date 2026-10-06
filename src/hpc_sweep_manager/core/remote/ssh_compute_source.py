@@ -52,6 +52,8 @@ from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
     build_rsync_push_cmd,
+    check_gpu_slots,
+    cpu_only,
     normalize_gpu_allowlist,
     own_snapshot,
     partition_gpu_slots,
@@ -246,6 +248,32 @@ class SSHComputeSource(ComputeSource):
             self.stats.health_status = "unhealthy"
             return False
 
+        # GPU probe, checked before anything is written there. A box with no nvidia-smi gives []
+        # (CPU slots); a probe with no answer (a dropped link, a hung driver) can't say the box
+        # has no GPU, so a GPU job stops here rather than run on CPU.
+        gpus, answered = [], False
+        try:
+            result = await self._conn.run(NVIDIA_SMI_QUERY, check=False, timeout=RUN_TIMEOUT_S)
+            answered = result.returncode is not None
+            if result.returncode == 0:
+                gpus = parse_nvidia_smi_csv(result.stdout or "")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"GPU probe on {self.host} failed: {e}")
+        if not answered and self.default_spec.gpus:
+            logger.error(f"{self.name}@{self.host}: the GPU probe (nvidia-smi) gave no answer")
+            self.stats.health_status = "unhealthy"
+            return False
+        gpu_indices = self._gpu_indices = [g.index for g in gpus]
+        busy = [g.index for g in gpus if not g.is_free]
+
+        allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices, busy)
+        gpus_per_job = self.default_spec.gpus or 0
+        cpu = cpu_only(self._gpus_config)
+        slots = partition_gpu_slots(allowed, gpus_per_job, self.max_parallel_jobs, cpu)
+        if not check_gpu_slots(f"{self.name}@{self.host}", slots, gpus_per_job, gpu_indices, busy):
+            self.stats.health_status = "unhealthy"
+            return False
+
         # Resolve ~ / $USER / $HOME in remote_root to an absolute path.
         # `cd ~/path` and `mkdir -p ~/path` expand tilde, but values like
         # `output.dir=~/path` (or `/scratch/$USER/...`) passed to python inside
@@ -282,16 +310,6 @@ class SSHComputeSource(ComputeSource):
         pre_script = pin_code_refs(self.default_spec.pre_script, self._project_name)
         self.default_spec = replace(self.default_spec, pre_script=pre_script)
 
-        # GPU probe — best effort. A box with no nvidia-smi just gives []
-        # which falls back to CPU slots downstream.
-        gpu_indices: list[int] = []
-        try:
-            result = await self._conn.run(NVIDIA_SMI_QUERY, check=False)
-            if (result.returncode or 0) == 0:
-                gpu_indices = [g.index for g in parse_nvidia_smi_csv(result.stdout or "")]
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"GPU probe on {self.host} failed: {e}")
-        self._gpu_indices = gpu_indices
         # A host whose logind kills a user's processes at logout ends detached tasks with the
         # launcher's session.
         logind = await self._conn.run(_KILL_USER_PROCESSES, check=False)
@@ -301,10 +319,9 @@ class SSHComputeSource(ComputeSource):
                 f"tasks end with this launcher's ssh session; ask its admin to exempt you"
             )
 
-        allowed = normalize_gpu_allowlist(self._gpus_config, gpu_indices)
-        gpus_per_job = self.default_spec.gpus or 0
-        slots = partition_gpu_slots(allowed, gpus_per_job, cpu_slots=self.max_parallel_jobs)
+        # At most one task per slot, so a distributed dispatcher never queues one behind a slot.
         self._slot_count = len(slots)
+        self.max_parallel_jobs = min(self.max_parallel_jobs, self._slot_count)
         self._slot_queue = asyncio.Queue()
         for s in slots:
             self._slot_queue.put_nowait(s)
@@ -313,13 +330,14 @@ class SSHComputeSource(ComputeSource):
 
         slot_desc = (
             f"{self._slot_count} GPU slot(s) ({gpus_per_job}/slot, allowed={allowed})"
-            if slots and slots[0] is not None
+            if slots[0]
             else f"{self._slot_count} CPU slot(s)"
         )
         logger.info(
             f"SSHComputeSource {self.name}@{self.host}: {slot_desc}, "
             f"run_prefix={self._run_prefix!r}, "
             f"detected_gpus={gpu_indices}"
+            + (f", busy GPUs skipped: {busy}" if self._gpus_config != "all" and busy else "")
         )
 
         self.stats.health_status = "healthy"
@@ -357,7 +375,7 @@ class SSHComputeSource(ComputeSource):
         remote_task_dir = f"{self._remote_sweep_dir}/tasks/{local_task_dir.name}"
 
         slot = await self._acquire_slot()
-        cuda_visible = ",".join(str(i) for i in slot) if slot else None
+        cuda_visible = None if slot is None else ",".join(str(i) for i in slot)
 
         script_content = render_template(
             "ssh_compute_source.sh.j2",
@@ -696,14 +714,15 @@ class SSHComputeSource(ComputeSource):
 # ---------------------------------------------------------- config factory
 
 
-def parse_gpus_arg(arg: str | None) -> None | int | list[int]:
+def parse_gpus_arg(arg: str | None) -> None | str | int | list[int]:
     """Parse a ``--gpus`` CLI value into the shape :func:`normalize_gpu_allowlist` expects.
 
-    Accepts (case-insensitive):
+    Accepts (case-insensitive); indices are nvidia-smi's (PCI order):
 
-    - ``None`` / ``""`` / ``"all"`` → ``None`` (use every detected GPU)
+    - ``None`` / ``""`` → ``None`` (no allowlist: every free GPU)
+    - ``"all"`` → ``"all"`` (every detected GPU, busy or not)
     - ``"cpu"`` → ``0`` (CPU-only)
-    - ``"N"`` (single int) → ``N`` (take the first N detected GPUs)
+    - ``"N"`` (single int) → ``N`` (take the first N free GPUs)
     - ``"i,j,k"`` (any comma) → ``[i, j, k]`` (explicit allowlist)
 
     A single ``"0"`` is treated as the int form (CPU-only) — that's the only
@@ -712,8 +731,10 @@ def parse_gpus_arg(arg: str | None) -> None | int | list[int]:
     if arg is None:
         return None
     s = arg.strip()
-    if not s or s.lower() == "all":
+    if not s:
         return None
+    if s.lower() == "all":
+        return "all"
     if s.lower() == "cpu":
         return 0
     if "," in s:
@@ -792,6 +813,8 @@ def build_ssh_source(
         gpus_value: None | int | Sequence[int] = gpus_override
     else:
         gpus_value = remote_cfg.get("gpus")
+        if isinstance(gpus_value, str):  # YAML `gpus: "1,2"` / `ALL` / `cpu`, never char by char
+            gpus_value = parse_gpus_arg(gpus_value)
 
     remote_root = remote_cfg.get("remote_root", distributed_cfg.get("remote_root", "~/.hsm/runs"))
     rsync_excludes = remote_cfg.get("rsync_excludes", distributed_cfg.get("rsync_excludes"))

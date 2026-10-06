@@ -347,6 +347,10 @@ class FakeGPUs:
         """Make nvidia-smi behave as if there are no GPUs (exits non-zero)."""
         self._monkeypatch.setenv("HSM_FAKE_GPU_COUNT", "0")
 
+    def set_busy(self, *indices: int) -> None:
+        """Make these GPUs report memory in use and high utilisation (a co-tenant's)."""
+        self._monkeypatch.setenv("HSM_FAKE_GPU_BUSY", ",".join(map(str, indices)))
+
 
 @pytest.fixture
 def fake_gpus(tmp_path, monkeypatch) -> FakeGPUs:
@@ -363,6 +367,7 @@ def fake_gpus(tmp_path, monkeypatch) -> FakeGPUs:
 
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ.get('PATH', '')}")
     monkeypatch.setenv("HSM_FAKE_GPU_COUNT", "4")
+    monkeypatch.delenv("HSM_FAKE_GPU_BUSY", raising=False)
     return FakeGPUs(bin_dir=bin_dir, _monkeypatch=monkeypatch)
 
 
