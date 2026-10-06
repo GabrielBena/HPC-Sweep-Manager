@@ -99,6 +99,17 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `<project>/{code,sweeps,snapshots}`. The prompt shows the canonical path,
   `-y` skips only the prompt, and the `rm` is quoted. A root with shell
   metacharacters, or a default-mode run outside a project, is refused first.
+- **Arrays can be throttled (S5).** `spec.array_throttle: N` renders
+  `--array=1-K%N`; before, HSM had no throttle and the consumer ran
+  `scontrol update ArrayTaskThrottle=N` after every submission. On a `backend:
+  slurm` remote, `max_parallel_jobs` now becomes that throttle when the spec sets
+  none: it used to be a client-side count that Slurm arrays never saw. A multi-GPU-type
+  sweep shares the throttle across its per-type arrays, so `N` caps the whole sweep. An
+  older HSM running `hsm sweep advance` on a newer chain drops the throttle: upgrade
+  together.
+- **`hsm queue share` (FR#10).** How loaded the shared account is, and how much of it
+  is you: the account's usage against its share, running CPUs by user, co-workers
+  waiting and why. It exits 3 when the account is hot. One SSH round trip.
 
 ### Removed (2026-10 maintenance pass)
 
