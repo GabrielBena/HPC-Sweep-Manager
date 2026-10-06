@@ -457,6 +457,28 @@ was auto-cleaned.
 For the SSH-Slurm variant, see
 [`examples/smoke_ssh_slurm_cli.sh`](../../examples/smoke_ssh_slurm_cli.sh).
 
+## How a task runs on an ssh box
+
+Each task starts detached (`setsid nohup`), in one short command, so it holds no
+ssh channel (sshd's `MaxSessions` no longer caps your parallelism) and outlives
+the launcher:
+
+- Its output goes to `tasks/<task>/hsm.log`, pulled back with its results.
+- Its exit code goes to `tasks/<task>/.hsm_rc`; one command per poll reads every
+  running task's. A task whose process group died without one (killed hard, the
+  box rebooted) is FAILED.
+- A network blip reconnects and changes no status. A host unreachable for 30 min
+  ends the launcher (its tasks keep running). A task that can't be started in
+  three tries ends the sweep (`--mode distributed` hands it to another remote).
+- **Ctrl-C stops the launcher, not the tasks** (as with Slurm). HSM logs the
+  command that stops them: `ssh <host> kill -TERM -<pid> …`. A cancel TERMs the
+  task's whole process group, and the task keeps its GPU until it has exited.
+- `hsm remote clean` refuses a tree where a task still runs.
+- HSM's commands run in `bash` whatever your login shell is. One alias must mean
+  one machine (a load-balanced alias can't find its tasks again). On a host whose
+  logind kills a user's processes at logout (`KillUserProcesses`), tasks end with
+  the launcher's ssh session; HSM warns at setup.
+
 ## Troubleshooting
 
 - **`Connection reset by peer` (or a login that hangs) while `ssh my-box`

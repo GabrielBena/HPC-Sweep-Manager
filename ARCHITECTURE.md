@@ -25,7 +25,7 @@ view, start with [CLAUDE.md](CLAUDE.md). For user-facing recipes see
   Local          Slurm           SSH              Distributed
   (process       (sbatch)        (asyncssh +      (fan-out wrapper
    pool +                         rsync +          over child
-   slots)                         create_process)  ComputeSources)
+   slots)                         setsid nohup)    ComputeSources)
 ```
 
 The CLI is the only sync boundary; everything below it is `async` and is
@@ -95,26 +95,29 @@ sweep.
                                   │
             ┌─────────────────────┴─────────────────────┐
             ▼                                           ▼
-┌── submit_job (per task) ──┐               ┌── wait_for_all ──┐
-│ slot = await queue.get()  │               │ await each       │
-│ render ssh_compute_source │               │ monitor task →   │
-│   .sh.j2 (CUDA pin, conda │               │ final_statuses   │
-│   init, modules, command) │               └──────────────────┘
-│ conn.run("cat > script",  │
-│   input=script_text)      │                         │
-│ proc = conn.create_process│                         ▼
-│   (f"bash {script}")      │              ┌── collect_results ──┐
-│ spawn monitor coro:       │              │ rsync pull tasks/ ← │
-│   await proc.wait()       │              │ if no FAILED jobs:  │
-│   → status COMPLETED|FAIL │              │   rm -rf remote     │
-│   release slot to queue   │              │   per-sweep dir     │
+┌── submit_job (per task) ──┐               ┌── wait_for_all (base) ──┐
+│ slot: free, else poll     │               │ every poll_interval:    │
+│ render ssh_compute_source │               │ ONE command reads each  │
+│   .sh.j2 (CUDA pin, conda │               │ task's .hsm_rc (or run/ │
+│   init, modules, command) │               │ gone) → status, slot    │
+│ ONE conn.run: cat > script│               │ freed; a dropped link   │
+│   && setsid nohup bash    │               │ reconnects, no status   │
+│   script > hsm.log &      │               │ changes                 │
+│   echo $! → pid           │               └─────────────────────────┘
+│ (no channel held: the     │                         │
+│  task outlives us; its    │                         ▼
+│  exit code → .hsm_rc,     │              ┌── collect_results ──┐
+│  a cancel TERMs its group)│              │ rsync pull tasks/ ← │
+│ 3 failed launches → FAILED│              │ if none FAILED or   │
+│                           │              │ running: rm -rf the │
+│                           │              │ per-sweep dir       │
 └───────────────────────────┘              └─────────────────────┘
                                                       │
                                                       ▼
-                                            ┌── cleanup ──┐
-                                            │ close conn  │
-                                            │ wait_closed │
-                                            └─────────────┘
+                                            ┌── cleanup ──────────┐
+                                            │ close conn; running │
+                                            │ tasks keep running  │
+                                            └─────────────────────┘
 ```
 
 Key properties:
@@ -241,9 +244,10 @@ No docker. No real cluster needed.
 - **Fake `nvidia-smi`** at `tests/fixtures/fake_nvidia_smi/` for GPU
   detection tests.
 - **Fake asyncssh conn** for `SSHComputeSource` tests — a tiny class
-  that records `run()` and `create_process()` calls so tests can
-  assert on what would have gone over the wire. See
-  `tests/unit/test_ssh_compute_source.py:FakeConn`.
+  that records `run()` calls, answers a launch with a pid and a poll
+  with scripted task states. See `tests/unit/test_ssh_compute_source.py:FakeConn`.
+  `tests/unit/test_ssh_detached.py` runs the remote side in a real local
+  bash instead (traps, `setsid`, the process-group kill).
 
 Integration tests under `tests/integration/` exercise the full
 setup→submit→wait→collect→cleanup lifecycle against the fake

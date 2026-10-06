@@ -116,13 +116,17 @@ the remote besides bash + rsync + optionally nvidia-smi.
   rsyncs the local project to `{remote_root}/{project}/code/`,
   `nvidia-smi`-probes the remote, partitions GPU slots, computes the
   run prefix (`conda run -n <env> python` or bare interpreter).
-- `submit_job()`: acquires a slot, renders
+- `submit_job()`: takes a free slot (polling until one frees), renders
   [`ssh_compute_source.sh.j2`](../../src/hpc_sweep_manager/templates/ssh_compute_source.sh.j2),
-  writes it remotely via `conn.run("cat > script", input=...)`, launches
-  with `conn.create_process("bash script")`, spawns a monitor coro.
+  and in one `conn.run` writes it and starts it detached (`setsid nohup`,
+  output to `tasks/<task>/hsm.log`), returning its pid. No channel is held.
+- `update_all_job_statuses()`: one command per poll reads every running
+  task's `.hsm_rc`; the base `wait_for_all` drives it. A dropped connection
+  is reopened once and changes no status.
+- `cancel_job()`: TERMs the task's process group.
 - `collect_results()`: rsync-pull `tasks/` back; `rm -rf` the remote
   per-sweep dir on full success (preserves the code cache for next sweep).
-- `cleanup()`: closes the asyncssh connection.
+- `cleanup()`: closes the asyncssh connection; running tasks keep running.
 
 Used by `--mode remote` (single host) and as a child of
 `--mode distributed` (many hosts).
