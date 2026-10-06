@@ -506,13 +506,28 @@ class TestArrayThrottle:
 
     @pytest.mark.parametrize("value", ["350", True, 0.5])
     def test_a_bad_max_parallel_jobs_is_named(self, tmp_path, value):
-        with pytest.raises(ValueError, match="max_parallel_jobs must be an integer"):
+        with pytest.raises(ValueError, match="max_parallel_jobs must be a whole number"):
             build_ssh_slurm_source(
                 name="uzh",
                 remote_cfg={"max_parallel_jobs": value},
                 project_dir=str(tmp_path),
                 script_path="t.py",
             )
+
+    @pytest.mark.parametrize("value", ["350", -1, True])
+    def test_a_bad_max_parallel_jobs_is_named_beside_a_throttle(self, tmp_path, value):
+        cfg = {"max_parallel_jobs": value, "spec": {"array_throttle": 50}}
+        with pytest.raises(ValueError, match="max_parallel_jobs must be a whole number"):
+            build_ssh_slurm_source(
+                name="uzh", remote_cfg=cfg, project_dir=str(tmp_path), script_path="t.py"
+            )
+
+    def test_zero_max_parallel_jobs_still_means_no_cap(self, tmp_path):
+        cfg = {"max_parallel_jobs": 0}
+        src = build_ssh_slurm_source(
+            name="uzh", remote_cfg=cfg, project_dir=str(tmp_path), script_path="t.py"
+        )
+        assert src.default_spec.array_throttle is None and src.max_parallel_jobs == 10_000
 
     def test_an_explicit_throttle_wins(self, tmp_path):
         cfg = {"max_parallel_jobs": 350, "spec": {"array_throttle": 50}}

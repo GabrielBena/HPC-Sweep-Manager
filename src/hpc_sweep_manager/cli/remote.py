@@ -70,7 +70,7 @@ def _write_project_config(path: Path, text: str, data: dict, hint: str, entry: d
 def _remotes_block(data: dict, path: Path) -> dict:
     """The project config's ``distributed.remotes`` (created if absent); malformed → error."""
     if data.get("distributed") is None:
-        data["distributed"] = {"enabled": False, "strategy": "round_robin", "sync_method": "rsync"}
+        data["distributed"] = {"enabled": False}
     dist = data["distributed"]
     if isinstance(dist, dict) and dist.get("remotes") is None:
         dist["remotes"] = {}

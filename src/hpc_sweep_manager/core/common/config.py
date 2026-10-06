@@ -400,7 +400,8 @@ class HSMConfig:
     def get_local_spec(self):
         """Read the typed ``local:`` block as a :class:`ResourceSpec`, or ``None``.
 
-        Applies *only* to ``--mode local`` — never to Slurm or remote/distributed.
+        Applies to ``--mode local`` and the local child of ``--mode distributed`` —
+        never to Slurm or remotes.
         Restricted to fields that make sense outside a batch scheduler:
         ``walltime``, ``cpus_per_task``, ``mem``, ``gpus``, ``pre_script``.
         Slurm-only fields (``gpu_type``, ``modules``, ``qos``, ``account``,

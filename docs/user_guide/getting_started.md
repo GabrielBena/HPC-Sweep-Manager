@@ -223,7 +223,7 @@ hsm sweep run --mode distributed
 
 HSM fans the parameter combinations across all sources (local + every
 enabled remote — including mixed SSH-bash and SSH-Slurm backends in one
-sweep) using a round-robin or least-loaded strategy. Schema details in
+sweep): each source takes the next task whenever it has room. Schema details in
 [SSH_EXECUTION.md](SSH_EXECUTION.md#hsmconfigyaml--the-distributed-block).
 For the full HQ-on-workstation pattern (laptop → workstation → S3IT)
 see [MULTI_CLUSTER.md](MULTI_CLUSTER.md).

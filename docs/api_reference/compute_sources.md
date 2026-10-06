@@ -153,18 +153,15 @@ composes from:
 
 **Source:** [`core/distributed/distributed_compute_source.py`](../../src/hpc_sweep_manager/core/distributed/distributed_compute_source.py)
 
-Wraps the legacy 1736-LOC `DistributedJobManager` (still the interior
-fan-out engine) behind the unified ABC. Used by `--mode distributed`.
+Fans a sweep across child sources. Used by `--mode distributed`.
 
 - Constructor takes either an explicit `child_sources=[...]` list or
   an `hsm_config=...` which it uses to build children in `setup()`
-  (one `LocalComputeSource` for `local`, one `SSHComputeSource` per
-  enabled entry in `distributed.remotes`).
-- `submit_batch()` is a **fused** submit+wait+collect (delegates to the
-  manager's blocking `submit_distributed_sweep`); `wait_for_all` returns
-  the already-final statuses. A future refactor will split these.
-- Strategies (round-robin, least-loaded) come from
-  `DistributedSweepConfig` in `distributed_manager.py`.
+  (one `LocalComputeSource` for `local`, one `SSHComputeSource` or
+  `SSHSlurmComputeSource` per enabled entry in `distributed.remotes`).
+- `submit_batch()` runs one worker per child over a shared task queue;
+  `wait_for_all()` waits on every child; `collect_results()` has each
+  child pull its own results once no task is active.
 
 ## Boundary objects
 

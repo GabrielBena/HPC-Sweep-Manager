@@ -1,10 +1,7 @@
-"""Fast unit tests for the DistributedComputeSource ABC wrapper surface.
+"""Unit tests for DistributedComputeSource: construction, setup, delegation, config.
 
-The full blocking submit→complete lifecycle is exercised in
-tests/integration/test_distributed_compute_source_e2e.py (it costs ~5s due to
-the manager's poll loop). These tests cover construction, capacity
-aggregation, setup delegation, status/cancel delegation, health aggregation,
-and the wait_for_all short-circuit — all without a real run.
+Whole runs (task placement, collection, failures) are in
+tests/integration/test_distributed_compute_source_e2e.py.
 """
 
 from __future__ import annotations
@@ -24,16 +21,19 @@ from hpc_sweep_manager.core.distributed.distributed_compute_source import (
 class MockChild(ComputeSource):
     """Minimal child source; jobs complete instantly on submit."""
 
-    def __init__(self, name: str, max_parallel_jobs: int = 2, health: str = "healthy"):
+    def __init__(
+        self, name: str, max_parallel_jobs: int = 2, health: str = "healthy", setup_ok=True
+    ):
         super().__init__(name, "mock", max_parallel_jobs)
         self._health = health
+        self._setup_ok = setup_ok
         self.setup_called = False
         self.cleanup_called = False
         self._counter = 0
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         self.setup_called = True
-        return True
+        return self._setup_ok
 
     async def submit_job(self, params, job_name, sweep_id, wandb_group=None, spec=None) -> str:
         self._counter += 1
@@ -102,6 +102,13 @@ class TestSetup:
         assert src.stats.health_status == "healthy"
         assert src.sweep_id == "sweep_test"
 
+    async def test_a_child_that_fails_setup_gets_no_tasks_and_is_cleaned(self, tmp_path):
+        a, b = MockChild("a"), MockChild("b", setup_ok=False)
+        src = DistributedComputeSource(child_sources=[a, b])
+        assert await src.setup(tmp_path / "sweep", "sweep_test") is True
+        assert src._child_sources == [a]
+        assert b.cleanup_called and not a.cleanup_called
+
 
 class TestStatusAndCancel:
     pytestmark = pytest.mark.asyncio
@@ -129,27 +136,12 @@ class TestStatusAndCancel:
         child = MockChild("a")
         src = DistributedComputeSource(child_sources=[child])
         await src.setup(tmp_path / "sweep", "sweep_test")
-        # Wire the manager's job→source mapping by hand.
-        src._manager.job_to_source["j1"] = "a"
-        assert await src.cancel_job("j1") is True
+        [job_id] = await src.submit_batch([{"x": 1}], "sweep_test")
+        assert await src.cancel_job(job_id) is True
 
 
-class TestWaitAndHealth:
+class TestHealth:
     pytestmark = pytest.mark.asyncio
-
-    async def test_wait_for_all_returns_completed_statuses(self):
-        src = DistributedComputeSource(child_sources=[MockChild("a")])
-        src.completed_jobs["j1"] = JobInfo("j1", "n", {}, "a", status="COMPLETED")
-        src.completed_jobs["j2"] = JobInfo("j2", "n", {}, "a", status="FAILED")
-        final = await src.wait_for_all(poll_interval=0.01)
-        assert final == {"j1": "COMPLETED", "j2": "FAILED"}
-
-    async def test_wait_for_all_reports_progress(self):
-        src = DistributedComputeSource(child_sources=[MockChild("a")])
-        src.completed_jobs["j1"] = JobInfo("j1", "n", {}, "a", status="COMPLETED")
-        seen = []
-        await src.wait_for_all(on_progress=lambda d, t: seen.append((d, t)))
-        assert seen == [(1, 1)]
 
     async def test_health_check_aggregates_children(self):
         src = DistributedComputeSource(
@@ -267,6 +259,8 @@ class TestBuildSshChildren:
         assert uzh.archive_dir == "/shares/payvand.ini.uzh/hsm-archive"
         assert uzh.default_spec.walltime == "06:00:00"
         assert uzh.default_spec.gpu_type == "H100"
+        # No max_parallel_jobs: the fair-share cap, never the whole queue at once.
+        assert uzh.max_parallel_jobs == 50
 
     async def test_bad_spec_value_fails_instead_of_dropping_remote(self, tmp_path):
         """A config error must fail the run — dropping the remote would shift its
@@ -295,7 +289,26 @@ class TestBuildSshChildren:
         src = DistributedComputeSource(hsm_config=FakeConfig())
         with pytest.raises(ValueError, match="remote 'uzh' spec"):
             await src.setup(tmp_path / "sweep", "sweep_x")
-        assert src._child_sources == [] and src._manager is None
+        assert src._child_sources == []
+
+    async def test_a_slurm_child_keeps_its_own_cap(self, tmp_path):
+        from hpc_sweep_manager.core.distributed.distributed_compute_source import (
+            _build_ssh_children,
+        )
+
+        class FakeConfig:
+            config_data = {"distributed": {}}
+
+            def get_project_root(self):
+                return str(tmp_path)
+
+            def get_default_script_path(self):
+                return "train.py"
+
+        [uzh] = await _build_ssh_children(
+            FakeConfig(), {"uzh": {"backend": "slurm", "max_parallel_jobs": 8}}
+        )
+        assert uzh.max_parallel_jobs == 8
 
     async def test_unknown_backend_skipped(self, tmp_path, caplog):
         """Misconfigured `backend:` doesn't kill the whole sweep — just skips."""
@@ -326,3 +339,84 @@ class TestBuildSshChildren:
         names = {s.name for s in sources}
         assert names == {"ok"}
         assert any("Unknown backend" in r.message for r in caplog.records)
+
+
+class TestConfig:
+    """Children built from a real HSMConfig: the local child's `local:` block, retired keys."""
+
+    pytestmark = pytest.mark.asyncio
+
+    @staticmethod
+    def _config(tmp_path, distributed, local=None):
+        from hpc_sweep_manager.core.common.config import HSMConfig
+
+        data = {
+            "project": {"root": str(tmp_path)},
+            "paths": {"python_interpreter": "python", "train_script": "train.py"},
+            "distributed": {"enabled": True, **distributed},
+        }
+        return HSMConfig({**data, "local": local} if local else data)
+
+    async def test_the_local_child_respects_visible_gpus_and_the_local_spec(
+        self, tmp_path, monkeypatch
+    ):
+        from hpc_sweep_manager.core.local import local_compute_source
+
+        async def four_gpus():
+            return [0, 1, 2, 3]
+
+        monkeypatch.setattr(local_compute_source, "_detect_gpus", four_gpus)
+        cfg = self._config(
+            tmp_path, {"local_max_jobs": 2}, local={"gpus": 1, "visible_gpus": [1, 2]}
+        )
+        src = DistributedComputeSource(hsm_config=cfg)
+        assert await src.setup(tmp_path / "sweep", "sw")
+
+        [local] = src._child_sources
+        assert local.default_spec.gpus == 1
+        slots = [local._slot_queue.get_nowait() for _ in range(local._slot_queue.qsize())]
+        assert slots == [[1], [2]]  # GPU 0 (and 3) never get a task
+
+    async def test_retired_dispatcher_keys_warn(self, tmp_path, caplog):
+        cfg = self._config(
+            tmp_path,
+            {"strategy": "least_loaded", "collect_interval": 30, "local_max_jobs": 0},
+        )
+        with caplog.at_level("WARNING"):
+            await DistributedComputeSource(hsm_config=cfg)._build_children_from_config()
+        assert any(
+            "strategy, collect_interval no longer change anything" in r.message
+            for r in caplog.records
+        )
+
+
+def test_the_dry_run_shows_each_slurm_child_s_cap():
+    from rich.console import Console
+
+    from hpc_sweep_manager.cli.sweep import _render_placement
+    from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+
+    class FakeConfig:
+        config_data = {
+            "distributed": {
+                "local_max_jobs": 0,
+                "remotes": {
+                    "uzh": {"backend": "slurm"},
+                    "uzh-v100": {"backend": "slurm", "max_parallel_jobs": 8},
+                },
+            }
+        }
+
+    console = Console(record=True, width=200)
+    _render_placement(
+        source=None,
+        resolved_mode="distributed",
+        spec=ResourceSpec(),
+        num_tasks=4,
+        remote_alias=None,
+        hsm_config=FakeConfig(),
+        console=console,
+    )
+    out = console.export_text()
+    assert "uzh (uzh, backend=slurm): scheduler-bound, up to 50 job(s)" in out
+    assert "uzh-v100 (uzh-v100, backend=slurm): scheduler-bound, up to 8 job(s)" in out

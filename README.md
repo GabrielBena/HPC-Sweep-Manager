@@ -153,7 +153,7 @@ are detected for `local:`). Each `--mode` reads only its own block:
 
 | Block | Read by | Holds |
 |---|---|---|
-| `local:` | `--mode local` | `walltime` / `cpus_per_task` / `mem` / `gpus` / `pre_script` |
+| `local:` | `--mode local`, and the local child of `--mode distributed` | `walltime` / `cpus_per_task` / `mem` / `gpus` / `pre_script` (+ `visible_gpus`) |
 | `slurm:` | `--mode array` / `--mode individual` | full Slurm spec including `gpu_type` / `modules` / `qos` / `account` / `max_array_size` |
 | `distributed.remotes.<alias>.spec:` | `--remote <alias>` / `--mode distributed` | per-remote default `ResourceSpec` |
 

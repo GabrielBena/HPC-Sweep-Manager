@@ -222,6 +222,8 @@ def _render_placement(
     """
     import math
 
+    from ..core.hpc.fair_share import DEFAULT_THROTTLE
+
     try:
         gpus_per_task = spec.gpus or 0
         console.print("\n[bold]Placement:[/bold]")
@@ -345,9 +347,11 @@ def _render_placement(
                             gpu_desc = f"--gres=gpu:{gtype + ':' if gtype else ''}{gres}"
                     else:
                         gpu_desc = "scheduler-managed"
+                    # As the runtime: a child without max_parallel_jobs gets the fair-share cap.
+                    cap = rcfg.get("max_parallel_jobs") or DEFAULT_THROTTLE
                     console.print(
-                        f"    • [cyan]{rname}[/cyan] ({host}, backend=slurm): "
-                        f"scheduler-bound, GPUs: {gpu_desc}"
+                        f"    • [cyan]{rname}[/cyan] ({host}, backend=slurm): scheduler-bound, "
+                        f"up to {cap} job(s) queued or running, GPUs: {gpu_desc}"
                     )
                 else:
                     cap = rcfg.get("max_parallel_jobs") or 1
@@ -2061,9 +2065,12 @@ def cancel_cmd(ctx, sweep_id, yes):
     - Slurm → ``scancel <job_id>`` per job ID.
     - PBS   → ``qdel <job_id>`` per job ID.
     - Local → kills processes matching the sweep ID via ``pkill -f``.
-    - SSH push / distributed → cannot remote-cancel reliably (no remote-pid
-      tracking once the local ``hsm sweep run`` exits). Documents this and
-      tells the user to Ctrl+C the local driver process instead.
+    - SSH push → cannot remote-cancel reliably (no remote-pid tracking once
+      the local ``hsm sweep run`` exits). Documents this and tells the user
+      to Ctrl+C the local driver process instead.
+    - Distributed → Ctrl-C on the driver cancels nothing. Points to
+      ``hsm queue mine --remote <alias>`` + ``scancel`` for Slurm children,
+      and ``pkill -f <sweep_id>`` locally and on each ssh host.
     """
     import shutil
     import subprocess
@@ -2109,7 +2116,15 @@ def cancel_cmd(ctx, sweep_id, yes):
         msg = "✓ killed local processes" if killed else "no matching local processes found"
         console.print(f"[green]{msg}[/green]")
         return
-    elif backend in ("ssh_remote", "distributed"):
+    elif backend == "distributed":
+        console.print(
+            "[yellow]A distributed sweep can't be cancelled from here, and Ctrl-C on the "
+            "driver cancels nothing. Slurm children: `hsm queue mine --remote <alias>`, then "
+            "`ssh <host> scancel <job ids>` (source_mapping.yaml lists each task's host and "
+            f"job id). Everything else: `pkill -f {sweep_id}` here and on each ssh host.[/yellow]"
+        )
+        return
+    elif backend == "ssh_remote":
         console.print(
             "[yellow]Cannot reliably remote-cancel push-model SSH sweeps from here. "
             "If the local `hsm sweep run` process is still active, Ctrl+C it; "

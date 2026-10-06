@@ -71,9 +71,8 @@ select = ["E", "F", "W", "I", "N", "UP", "B"]
 ignore = ["N803", "N806", "E741"]
 
 [tool.ruff.lint.per-file-ignores]
-# Due for deletion in the 2026-10 pass (docs/dev/maintenance-2026-10.md): the distributed rewrite (X-3)
-# and the dead-code chore (chore-6). Drop these lines with the files.
-"src/hpc_sweep_manager/core/distributed/distributed_manager.py" = ["E501", "F841", "B007", "E722"]
+# Due for deletion in the 2026-10 pass (docs/dev/maintenance-2026-10.md): the dead-code chore
+# (chore-6). Drop this line with the file.
 "src/hpc_sweep_manager/cli/configure.py" = ["F841", "E722"]
 
 [tool.mypy]

@@ -188,12 +188,16 @@ for the schema.
 `DistributedComputeSource`
 ([source](src/hpc_sweep_manager/core/distributed/distributed_compute_source.py))
 fans a sweep across multiple child `ComputeSource`s. Children are built
-from `hsm_config.yaml`'s `distributed:` block (one local +
-N SSH push sources via `build_ssh_source(...)`). The internal
-`DistributedJobManager` (the 1736-LOC monolith in
-`core/distributed/distributed_manager.py`) handles
-round-robin/least-loaded dispatch, monitoring, and result normalization.
-It's wrapped behind the ABC; decomposing it further is future work.
+from `hsm_config.yaml`'s `distributed:` block: one local child (with the
+`local:` block's spec and `visible_gpus`) plus one child per enabled remote
+(`build_ssh_source` or `build_ssh_slurm_source`, by `backend:`). It only
+hands out the work: `submit_batch` runs one worker per child over a shared
+task queue (a child takes the next task when it has fewer active jobs than
+its `max_parallel_jobs`; a failed submit retires the child and hands the
+task to another, up to 3 tries), `wait_for_all` waits on every child, and
+`collect_results` has each child pull and clean its own results once no task
+is active. It writes `source_mapping.yaml` (child, host, job id per task) for
+`hsm sweep status`.
 
 ## Sweep completion (status today)
 
@@ -267,10 +271,8 @@ The config is read by `HSMConfig.load()` in
   works but produces nested-quote sequences. Fix requires touching
   every wrapper template (`slurm_*.sh.j2`, `local_compute_source.sh.j2`,
   `ssh_compute_source.sh.j2`).
-- **Distributed dispatch is fused.** `DistributedComputeSource.submit_batch`
-  blocks until completion (delegates to the manager's
-  `submit_distributed_sweep`). A future cross-host queueing UX would
-  split submission from waiting.
+- **Distributed has no re-attach.** Ctrl-C or a dead launcher leaves the
+  children's tasks running, and nothing collects them later.
 
 ## References
 
