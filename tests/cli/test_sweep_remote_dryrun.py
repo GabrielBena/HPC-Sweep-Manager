@@ -110,6 +110,68 @@ class TestRemoteDryRun:
         assert "default for slurm remotes" in out  # the change is announced
 
 
+class TestRemoteAliasGuards:
+    def test_mode_auto_with_remote_runs_remote(self, tmp_path, monkeypatch):
+        # C1: `--remote uzh --mode auto` used to resolve auto → local/array and
+        # silently ignore the alias. Drive the real CLI through to the dry-run.
+        from click.testing import CliRunner
+
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        buf = io.StringIO()
+        obj = {"console": Console(file=buf, width=200), "logger": logging.getLogger("t")}
+        args = ["run", "-c", "sweeps/sweep.yaml", "--remote", "uzh", "--mode", "auto", "--dry-run"]
+        CliRunner().invoke(sweep_cli.sweep_cmd, args, obj=obj, catch_exceptions=False)
+        out = buf.getvalue()
+        assert "mode=remote" in out, out
+        assert "DRY RUN" in out
+
+    def test_unknown_alias_errors_with_suggestion(self, tmp_path, monkeypatch):
+        # C6: a typo'd alias used to become a bare ssh-bash remote (which on a
+        # cluster alias means training on the login node).
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        out = _dry_run(remote_alias="uhz")
+        assert "not in distributed.remotes" in out
+        assert "did you mean 'uzh'" in out
+        assert "Execution backend" not in out
+
+    def test_null_remotes_block_keeps_bare_alias(self, tmp_path, monkeypatch):
+        # `remotes:` with no entries loads as None — must not AttributeError.
+        _make_project(tmp_path)
+        cfg_path = tmp_path / ".hsm" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg["distributed"]["remotes"] = None
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        monkeypatch.chdir(tmp_path)
+        out = _dry_run(remote_alias="my-box")
+        assert "Execution backend" in out and "DRY RUN" in out
+
+
+class TestSpecBlockErrors:
+    @pytest.mark.parametrize("mode,block", [("local", "local"), ("array", "slurm")])
+    def test_bad_value_is_one_clean_message(self, tmp_path, monkeypatch, mode, block):
+        # C2 review: spec_from_cli sat outside the CLI's error handling, so a bad
+        # value printed a traceback (twice) instead of the red one-liner.
+        from click.testing import CliRunner
+
+        _make_project(tmp_path)
+        cfg_path = tmp_path / ".hsm" / "config.yaml"
+        cfg = yaml.safe_load(cfg_path.read_text())
+        cfg[block] = {"cpus_per_task": 0}
+        cfg_path.write_text(yaml.safe_dump(cfg))
+        monkeypatch.chdir(tmp_path)
+        buf = io.StringIO()
+        obj = {"console": Console(file=buf, width=200), "logger": logging.getLogger("t")}
+        args = ["run", "-c", "sweeps/sweep.yaml", "--mode", mode, "--dry-run"]
+        result = CliRunner().invoke(sweep_cli.sweep_cmd, args, obj=obj)
+        out = buf.getvalue()
+        assert result.exception is None, result.exception
+        assert f"`{block}:` block: ResourceSpec: cpus_per_task must be >= 1" in out
+        assert "Traceback" not in out + result.output
+        assert "Execution backend" not in out
+
+
 class TestRemoteModeReconciliation:
     """run_cmd reconciles `--remote <alias> --mode array|individual` into
     remote execution + a submission style (and still rejects local/distributed)."""
@@ -154,6 +216,16 @@ class TestRemoteModeReconciliation:
         )
         assert calls.get("mode") == "remote"
         assert calls.get("remote_submission") == "individual"
+
+    def test_remote_mode_auto_means_remote(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        _result, _out, calls = self._run_cmd(
+            monkeypatch,
+            ["-c", "sweeps/sweep.yaml", "--remote", "uzh", "--mode", "auto"],
+        )
+        assert calls.get("mode") == "remote"
+        assert calls.get("remote_submission") is None
 
     def test_remote_mode_local_rejected(self, tmp_path, monkeypatch):
         _make_project(tmp_path, spec={"walltime": "01:00:00"})

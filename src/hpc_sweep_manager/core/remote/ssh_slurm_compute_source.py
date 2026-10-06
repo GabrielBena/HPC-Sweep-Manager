@@ -71,6 +71,7 @@ from ..hpc.slurm_protocol import (
     parse_sbatch_job_id,
     render_sbatch_directives,
 )
+from .discovery import agent_stalled
 from .push_exec import (
     DEFAULT_RSYNC_EXCLUDES,
     build_rsync_pull_cmd,
@@ -329,6 +330,7 @@ class SSHSlurmComputeSource(SlurmBase):
             host=self.host,
             remote_dir=self._remote_code_dir,
             excludes=self.rsync_excludes,
+            agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync push to {self.host}:{self._remote_code_dir}")
         rc = await self._run_rsync(push_cmd)
@@ -788,7 +790,11 @@ class SSHSlurmComputeSource(SlurmBase):
         # _pull_excludes is set by the resumable driver to skip the heavy
         # checkpoint subdir (issue #12); empty for ordinary sweeps.
         pull_cmd = build_rsync_pull_cmd(
-            self.host, remote_tasks, local_tasks, excludes=self._pull_excludes
+            self.host,
+            remote_tasks,
+            local_tasks,
+            excludes=self._pull_excludes,
+            agentless=agent_stalled(self.host),
         )
         logger.info(f"rsync pull from {self.host}:{remote_tasks}")
         return await self._run_rsync(pull_cmd)
@@ -1043,24 +1049,15 @@ def build_ssh_slurm_source(
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:
         if "speed_factors" in remote_spec_dict:
             # Plausible misplacement: it belongs BESIDE spec:, not inside it
-            # (per-source planner knob, not a per-job resource). Dropping it
-            # here would otherwise surface as an opaque "unexpected keyword
-            # argument" that nukes the whole spec block.
+            # (per-source planner knob, not a per-job resource). Filtered here
+            # so this hint replaces from_dict's generic unknown-key warning.
             logger.warning(
                 f"remote {name!r}: `speed_factors` belongs at the remote "
                 f"level (sibling of `spec:`), not inside it — ignoring the "
                 f"misplaced entry. Move it up one level."
             )
             remote_spec_dict = {k: v for k, v in remote_spec_dict.items() if k != "speed_factors"}
-        try:
-            per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
-            per_remote_spec = None
-    else:
-        per_remote_spec = None
-
-    if per_remote_spec is not None:
+        per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
     conda_env = (

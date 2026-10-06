@@ -14,8 +14,11 @@ to derive a modified spec.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import logging
+from dataclasses import dataclass, fields, replace
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -70,13 +73,21 @@ class ResourceSpec:
         return isinstance(self.gpu_type, tuple) and len(self.gpu_type) > 1
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> ResourceSpec:
-        """Build a spec from a plain dict, converting list/dict fields to tuples."""
+    def from_dict(cls, data: dict[str, Any] | None, where: str = "spec") -> ResourceSpec:
+        """Build a spec from a plain dict, converting list/dict fields to tuples.
+
+        Unknown keys are dropped with a warning (a typo must not cost the whole
+        block); invalid values raise ``ValueError`` naming ``where``, the block.
+        """
         if not data:
             return cls()
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(data) - known)
+        if unknown:
+            logger.warning(f"{where}: ignoring unknown key(s) {unknown}; known: {sorted(known)}")
         normalized: dict[str, Any] = {}
         for k, v in data.items():
-            if v is None:
+            if v is None or k not in known:
                 continue
             if k == "modules":
                 normalized[k] = tuple(v) if not isinstance(v, str) else (v,)
@@ -97,7 +108,10 @@ class ResourceSpec:
                     normalized[k] = tuple((str(kk), str(vv)) for kk, vv in v)
             else:
                 normalized[k] = v
-        return cls(**normalized)
+        try:
+            return cls(**normalized)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{where}: {e}") from e
 
     def merge(self, other: ResourceSpec | dict[str, Any] | None) -> ResourceSpec:
         """Return a new spec with non-``None`` fields of ``other`` overriding ``self``.

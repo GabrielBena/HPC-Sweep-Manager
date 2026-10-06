@@ -222,6 +222,16 @@ class TestSetup:
         assert push[-1].startswith("anahita:")
         assert push[-1].endswith("/code/")
 
+    async def test_rsync_skips_an_agent_that_stalled(self, tmp_path, monkeypatch):
+        from hpc_sweep_manager.core.remote import discovery
+
+        monkeypatch.setattr(discovery, "_AGENT_STALLED", {"anahita"})
+        src = _make_src(tmp_path, fake_conn=FakeConn())
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        await src.collect_results()
+        push, pull = src._rsync_calls
+        assert all("-o IdentityAgent=none" in cmd[cmd.index("-e") + 1] for cmd in (push, pull))
+
     async def test_setup_creates_remote_layout(self, tmp_path):
         fake_conn = FakeConn()
         src = _make_src(tmp_path, fake_conn=fake_conn)

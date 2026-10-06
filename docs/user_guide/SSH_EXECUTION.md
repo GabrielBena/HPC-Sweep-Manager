@@ -152,8 +152,11 @@ goes stale if you change the project name or `remote_root`.
 
 You can submit a sweep with **just** a bare `~/.ssh/config` alias and no
 HSM-side registration (`hsm sweep run --remote my-box` works as long as
-`ssh my-box` works). Registering the remote in `.hsm/config.yaml` lets
-you set per-remote knobs:
+`ssh my-box` works) — but only while the project has no
+`distributed.remotes:` block. Once it has one, an alias missing from it is
+an error with a "did you mean" hint, so a typo can't quietly run bash on
+some other host (a cluster login node, say). Registering the remote in
+`.hsm/config.yaml` lets you set per-remote knobs:
 
 ```yaml
 distributed:
@@ -236,7 +239,8 @@ hsm sweep run --remote uzh -c sweeps/sweep.yaml                   # one sbatch -
 hsm sweep run --remote uzh -c sweeps/sweep.yaml --mode individual # one sbatch per combo
 ```
 
-`--remote` implies remote execution; the optional `--mode array|individual`
+`--remote` implies remote execution (`--mode auto` is the same as omitting
+`--mode`); the optional `--mode array|individual`
 picks the **submission style**. The default is `array`: the whole sweep is one
 `sbatch --array`, written and submitted over one SSH channel. `--mode individual`
 submits one `sbatch` per parameter combo, which costs SSH channels and a
@@ -430,6 +434,17 @@ For the SSH-Slurm variant, see
 
 ## Troubleshooting
 
+- **`Connection reset by peer` (or a login that hangs) while `ssh my-box`
+  works:** usually a stale SSH agent — `SSH_AUTH_SOCK` points at an agent that
+  no longer answers, often one forwarded by an old session. HSM ends the login
+  after 30 s, retries once without the agent and logs a warning naming it; for
+  the rest of the run it skips the agent for that host, rsync included. Lasting
+  fix: `IdentityAgent none` under the host in `~/.ssh/config` (asyncssh and
+  OpenSSH both honour it) — unless the host's key lives only in the agent; then
+  restart the agent or refresh `SSH_AUTH_SOCK`.
+- **`Could not reach <host> within 60 s`:** the host is down or the network/VPN
+  is off — or a `ProxyJump` hop is stuck. The 60 s bound covers the jump leg, but
+  the agent-less retry doesn't, so give the jump host `IdentityAgent none` too.
 - **`ssh my-box` works but HSM hangs:** check `~/.ssh/known_hosts` —
   HSM honors strict host-key checking. Connect once interactively to
   record the host key.

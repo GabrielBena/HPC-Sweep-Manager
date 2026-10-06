@@ -134,6 +134,8 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
                 )
                 continue
             sources.append(source)
+        except ValueError:
+            raise  # a config error (e.g. a bad spec value) fails the run; never drop the remote
         except Exception as e:  # noqa: BLE001 - a bad remote shouldn't kill the run
             logger.warning(f"Failed to add {backend} source {remote_name!r}: {e}")
     return sources
@@ -188,7 +190,7 @@ class DistributedComputeSource(ComputeSource):
 
         remotes = {
             name: cfg
-            for name, cfg in distributed_cfg.get("remotes", {}).items()
+            for name, cfg in (distributed_cfg.get("remotes") or {}).items()
             if cfg.get("enabled", True)
         }
         if remotes:

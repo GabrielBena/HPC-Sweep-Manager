@@ -6,6 +6,8 @@ the kwargs HSM would hand it.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from hpc_sweep_manager.core.remote import discovery
@@ -87,3 +89,119 @@ async def test_no_ssh_config_file_omits_config(captured_connect, monkeypatch, tm
     await discovery.create_ssh_connection("plainhost")
     assert "config" not in captured_connect
     assert captured_connect["host"] == "plainhost"
+
+
+async def test_login_and_connect_are_bounded(captured_connect, ssh_config_present):
+    await discovery.create_ssh_connection("gpubox")
+    assert captured_connect["login_timeout"] == 30
+    assert captured_connect["connect_timeout"] == 60
+    # No forced keepalive: without a reconnect it would turn a network stall into a dead
+    # launcher, and it would override the user's ServerAliveInterval.
+    assert "keepalive_interval" not in captured_connect
+
+
+# --- stale SSH agent (field report 2026-09-29): login stalls until the server resets
+
+
+@pytest.fixture(autouse=True)
+def no_stalled_agents(monkeypatch):
+    """Each test starts with no host remembered as agent-stalled."""
+    monkeypatch.setattr(discovery, "_AGENT_STALLED", set())
+
+
+def _failing_connect(monkeypatch, tmp_path, exc_factory):
+    """asyncssh.connect raises ``exc_factory()`` unless the agent is disabled; record each call."""
+    calls: list[dict] = []
+
+    async def fake_connect(**kwargs):
+        calls.append(kwargs)
+        if "agent_path" not in kwargs:
+            raise exc_factory()
+        return object()
+
+    monkeypatch.setattr(discovery.asyncssh, "connect", fake_connect)
+    monkeypatch.setenv("HOME", str(tmp_path))  # asyncssh's default-key lookup stays hermetic
+    return calls
+
+
+@pytest.fixture(
+    params=[
+        lambda: ConnectionResetError(104, "Connection reset by peer"),  # sshd's LoginGraceTime
+        lambda: discovery.asyncssh.ConnectionLost("Login timeout expired"),  # our login_timeout
+    ],
+    ids=["reset", "login-timeout"],
+)
+def stalls_on_agent(request, monkeypatch, tmp_path):
+    return _failing_connect(monkeypatch, tmp_path, request.param)
+
+
+async def test_stale_agent_is_retried_without_it(
+    stalls_on_agent, ssh_config_present, monkeypatch, caplog
+):
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    assert await discovery.create_ssh_connection("gpubox") is not None
+    assert len(stalls_on_agent) == 2
+    assert stalls_on_agent[1]["agent_path"] is None
+    assert "/tmp/stale-agent.sock" in caplog.text and "IdentityAgent none" in caplog.text
+    assert discovery.agent_stalled("gpubox") and not discovery.agent_stalled("other")
+    assert os.environ["SSH_AUTH_SOCK"] == "/tmp/stale-agent.sock"  # the process env is untouched
+
+    # The next login to that host skips the agent from the start.
+    await discovery.create_ssh_connection("gpubox")
+    assert len(stalls_on_agent) == 3 and stalls_on_agent[2]["agent_path"] is None
+
+
+async def test_no_agent_means_no_retry_and_a_clear_error(
+    stalls_on_agent, ssh_config_present, monkeypatch
+):
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    with pytest.raises(ConnectionError, match="SSH login to gpubox timed out or was reset"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(stalls_on_agent) == 1
+
+
+async def test_identity_agent_none_counts_as_no_agent(
+    stalls_on_agent, ssh_config_present, monkeypatch
+):
+    ssh_config_present.write_text("Host gpubox\n    IdentityAgent none\n")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(ConnectionError, match="timed out or was reset"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(stalls_on_agent) == 1
+
+
+async def test_failed_retry_is_a_clear_error(ssh_config_present, monkeypatch, tmp_path):
+    calls = []
+
+    async def fake_connect(**kwargs):
+        calls.append(kwargs)
+        raise discovery.asyncssh.ConnectionLost("Login timeout expired")
+
+    monkeypatch.setattr(discovery.asyncssh, "connect", fake_connect)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(ConnectionError, match="SSH login to gpubox timed out or was reset"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(calls) == 2
+    assert not discovery.agent_stalled("gpubox")  # the agent wasn't the cause
+
+
+async def test_unreachable_host_is_not_blamed_on_the_agent(
+    ssh_config_present, monkeypatch, tmp_path, caplog
+):
+    # connect_timeout fires (asyncio.wait_for → TimeoutError): no retry, no agent warning.
+    calls = _failing_connect(monkeypatch, tmp_path, TimeoutError)
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(ConnectionError, match="Could not reach gpubox within 60 s"):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(calls) == 1
+    assert "stalled" not in caplog.text
+
+
+async def test_other_connection_loss_is_not_retried(ssh_config_present, monkeypatch, tmp_path):
+    lost = discovery.asyncssh.ConnectionLost
+    calls = _failing_connect(monkeypatch, tmp_path, lambda: lost("Connection lost"))
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/stale-agent.sock")
+    with pytest.raises(lost):
+        await discovery.create_ssh_connection("gpubox")
+    assert len(calls) == 1

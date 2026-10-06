@@ -475,8 +475,7 @@ def _run_sweep_via_orchestrator(
     remote_resumable_block = None
     if remote_alias and hsm_config is not None:
         remote_resumable_block = (
-            hsm_config.config_data.get("distributed", {})
-            .get("remotes", {})
+            (hsm_config.config_data.get("distributed", {}).get("remotes") or {})
             .get(remote_alias, {})
             .get("resumable")
         )
@@ -498,14 +497,14 @@ def _run_sweep_via_orchestrator(
     # otherwise mode='auto' would silently read the slurm: block on every machine.
     resolved_mode_for_spec = resolve_auto_mode(mode)
     scheduler_hint = "slurm" if resolved_mode_for_spec in ("array", "individual") else None
-    spec = spec_from_cli(
-        walltime=walltime,
-        resources=resources,
-        scheduler=scheduler_hint,
-        hsm_config=hsm_config,
-        mode=resolved_mode_for_spec,
-    )
     try:
+        spec = spec_from_cli(
+            walltime=walltime,
+            resources=resources,
+            scheduler=scheduler_hint,
+            hsm_config=hsm_config,
+            mode=resolved_mode_for_spec,
+        )
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
@@ -673,8 +672,8 @@ def _run_sweep_via_orchestrator(
         console.print(f"\nTotal combinations: {len(combinations)}")
         return
 
-    sweep_id = create_sweep_id()
-    sweep_dir = resolve_sweep_dir(hsm_config, sweep_id, project_dir=Path(project_dir))
+    sweep_dir = resolve_sweep_dir(hsm_config, create_sweep_id(), project_dir=Path(project_dir))
+    sweep_id = sweep_dir.name  # `_2`-suffixed if a same-second launch took the id
     console.print(f"\n[green]Sweep ID: {sweep_id}[/green]")
     console.print(f"Sweep directory: {sweep_dir}")
 
@@ -981,7 +980,7 @@ def sweep_cmd(ctx):
     "--mode",
     type=click.Choice(["auto", "individual", "array", "local", "distributed", "remote"]),
     default=None,
-    help="Job submission mode (default: 'remote' if --remote given, else 'auto')",
+    help="Job submission mode (default 'auto'; with --remote, omitted or 'auto' means 'remote')",
 )
 @click.option(
     "--remote",
@@ -1049,8 +1048,8 @@ def run_cmd(
 ):
     """Run parameter sweep."""
     remote_submission = None
-    if mode is None:
-        mode = "remote" if remote_alias else "auto"
+    if mode in (None, "auto"):
+        mode = "remote" if remote_alias else "auto"  # with --remote, auto means remote
     elif mode == "remote" and not remote_alias:
         ctx.obj["console"].print("[red]--mode remote requires --remote <alias>[/red]")
         return
@@ -1060,7 +1059,7 @@ def run_cmd(
         # local block (per-remote spec lives under distributed.remotes.<alias>).
         remote_submission = mode
         mode = "remote"
-    elif remote_alias and mode not in ("remote", "auto"):
+    elif remote_alias and mode != "remote":
         ctx.obj["console"].print(
             f"[red]--remote can't be combined with --mode {mode!r} "
             f"(use --mode array|individual to pick submission style, or omit it).[/red]"
