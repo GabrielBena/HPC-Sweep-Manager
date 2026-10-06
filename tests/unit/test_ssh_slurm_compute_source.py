@@ -506,7 +506,7 @@ class TestArrayThrottle:
 
     @pytest.mark.parametrize("value", ["350", True, 0.5])
     def test_a_bad_max_parallel_jobs_is_named(self, tmp_path, value):
-        with pytest.raises(ValueError, match="max_parallel_jobs must be an integer"):
+        with pytest.raises(ValueError, match="max_parallel_jobs must be a whole number"):
             build_ssh_slurm_source(
                 name="uzh",
                 remote_cfg={"max_parallel_jobs": value},
