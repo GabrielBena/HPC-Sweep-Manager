@@ -198,8 +198,9 @@ def build_rsync_pull_cmd(
     excludes: Sequence[str] = (),
     agentless: bool = False,
 ) -> list[str]:
-    """rsync a remote results dir back down (no ``--delete`` — purely additive). ``--partial``
-    keeps a file cut off mid-transfer, so the next try resumes it instead of starting over.
+    """rsync a remote results dir back down (no ``--delete`` — purely additive). A file cut off
+    mid-transfer waits in ``.rsync-partial/`` (``--partial-dir``), so the next try resumes it,
+    and a truncated file never stands under its real name.
 
     ``excludes`` lets the resumable chain (issue #12) skip the heavy per-task
     ``resume/`` checkpoint dir on intermediate pulls so a multi-GB checkpoint
@@ -207,7 +208,7 @@ def build_rsync_pull_cmd(
     cluster-internal archive instead. ``agentless`` as in :func:`build_rsync_push_cmd`.
     """
     ssh = RSYNC_SSH + (" -o IdentityAgent=none" if agentless else "")
-    cmd = ["rsync", "-az", "--partial", "-e", ssh]
+    cmd = ["rsync", "-az", "--partial-dir=.rsync-partial", "-e", ssh]
     for pattern in excludes:
         cmd.append(f"--exclude={pattern}")
     cmd.append(f"{host}:{remote_dir.rstrip('/')}/")
@@ -217,7 +218,7 @@ def build_rsync_pull_cmd(
 
 async def run_rsync(cmd: list[str], host: str) -> int:
     """Run an rsync command and return its exit code. A dropped link (:data:`RSYNC_RETRY_RCS`)
-    is tried again after each pause of :data:`RSYNC_BACKOFF_S`; the pull's ``--partial`` lets
+    is tried again after each pause of :data:`RSYNC_BACKOFF_S`; the pull's ``--partial-dir`` lets
     a retry resume a big file."""
     pauses = list(RSYNC_BACKOFF_S)
     while True:

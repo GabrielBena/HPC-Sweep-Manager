@@ -380,7 +380,8 @@ SSH session) no longer strands results:
 - While jobs run, HSM pulls `tasks/` back every 10 minutes (only what changed),
   so a stuck task or a dead launcher strands at most a few minutes of finished
   work. A pull or push cut by a dropped link is tried again (5 s, then 20 s
-  later), and a pull resumes a file it was cut off in (`--partial`).
+  later), and a pull resumes a file it was cut off in (`--partial-dir`; an unfinished file waits in
+  `.rsync-partial/`, never under its real name).
 - At submit, HSM warns if the cluster has a Slurm reservation whose window
   could outlast this launcher.
 - Submit writes a `.hsm_manifest.json` (locally + on the remote). Re-attach any

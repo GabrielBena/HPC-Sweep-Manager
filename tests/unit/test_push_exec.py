@@ -144,7 +144,7 @@ class TestRsyncCommands:
     def test_pull_has_no_delete(self):
         cmd = build_rsync_pull_cmd("anahita", "/remote/tasks", "/local/tasks")
         assert "--delete" not in cmd
-        assert "--partial" in cmd  # a file cut off by a dropped link resumes on the next try
+        assert "--partial-dir=.rsync-partial" in cmd  # resumed on the next try, never truncated
         assert cmd[-2] == "anahita:/remote/tasks/"
         assert cmd[-1] == "/local/tasks/"
 

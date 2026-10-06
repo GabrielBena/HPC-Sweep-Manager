@@ -217,7 +217,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   job (the final pull is `collect`'s); a failed pull logs a warning and the wait goes on.
   Every rsync of both SSH sources, push and pull, is tried again after a dropped link
   (rc 255, 10, 12, 30 or 35), 5 s and then 20 s later; any other rc is final. Pulls use
-  `--partial`, so a retry resumes a big file instead of starting it over. **For
+  `--partial-dir=.rsync-partial`, so a retry resumes a big file instead of starting it
+  over, and a file cut off never stands under its real name. **For
   consumers:** finished tasks reach the local sweep dir within about 10 min; with
   `--mode individual`, a job's tasks arrive up to 10 min after it ends instead of at
   the next poll.
