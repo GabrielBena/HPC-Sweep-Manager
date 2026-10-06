@@ -179,14 +179,16 @@ def plan_gpu_split(
     """
     if not gpu_types:
         raise ValueError("plan_gpu_split: gpu_types must be non-empty")
-    if base_walltime and len(base_walltime.split(":")) != 3:
+    if base_walltime and (
+        base_walltime in ("UNLIMITED", "INFINITE")
+        or (base_walltime.count(":") == 1 and "-" not in base_walltime)
+    ):
         # parse_walltime reads "48:00" as 48 MINUTES (MM:SS) — scaled and
         # multiplied across sub-arrays, that silent 60x under-provision
-        # would TIMEOUT everything. Multi-type mode demands the explicit form.
+        # would TIMEOUT everything; and an unlimited one can't be scaled.
         raise ValueError(
-            f"plan_gpu_split: base walltime must be HH:MM:SS when gpu_type "
-            f"is a list, got {base_walltime!r} (ambiguous — '48:00' would "
-            f"mean 48 minutes, not 48 hours)"
+            f"plan_gpu_split: base walltime must be a bounded H:M:S (or D-H:M:S) when "
+            f"gpu_type is a list, got {base_walltime!r} ('48:00' would mean 48 minutes)"
         )
     factors_norm = {str(k).lower(): float(v) for k, v in (speed_factors or {}).items()}
     bins: list[dict] = []

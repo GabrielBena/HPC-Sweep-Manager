@@ -22,10 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
+from .yaml_loader import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +76,7 @@ class SweepCompletionAnalyzer:
             # Load source mapping if it exists
             if self.source_mapping_path.exists():
                 with open(self.source_mapping_path) as f:
-                    self.source_mapping = yaml.safe_load(f)
+                    self.source_mapping = load_yaml(f)
             else:
                 logger.warning(f"Source mapping not found: {self.source_mapping_path}")
                 self.source_mapping = {"task_assignments": {}}
@@ -332,7 +331,7 @@ class SweepCompletionAnalyzer:
         if status_fixes_count > 0:
             try:
                 with open(self.source_mapping_path, "w") as f:
-                    yaml.dump(self.source_mapping, f, default_flow_style=False, indent=2)
+                    f.write(dump_yaml(self.source_mapping))
                 logger.info(
                     f"Updated source_mapping.yaml with {status_fixes_count} status corrections"
                 )
@@ -465,8 +464,6 @@ class SweepCompletionAnalyzer:
         with actual task directory statuses.
         """
         try:
-            import yaml
-
             if not self.source_mapping_path.exists() or overwrite:
                 # Create initial source mapping if it doesn't exist
                 mapping_data = {
@@ -480,7 +477,7 @@ class SweepCompletionAnalyzer:
                 }
             else:
                 with open(self.source_mapping_path) as f:
-                    mapping_data = yaml.safe_load(f) or {}
+                    mapping_data = load_yaml(f) or {}
 
             # Update task assignments with actual statuses
             for task_id, task_info in task_statuses.items():
@@ -507,7 +504,7 @@ class SweepCompletionAnalyzer:
 
             # Save updated mapping
             with open(self.source_mapping_path, "w") as f:
-                yaml.dump(mapping_data, f, default_flow_style=False, indent=2)
+                f.write(dump_yaml(mapping_data))
 
             logger.info(f"Updated source_mapping.yaml with {len(task_statuses)} task statuses")
 

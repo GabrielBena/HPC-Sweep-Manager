@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
+from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ def _load_yaml_dict(path: Path) -> dict[str, Any] | None:
     """
     try:
         with open(path) as f:
-            data = yaml.safe_load(f)
+            data = load_yaml(f)
     except Exception as e:
         logger.warning(f"Failed to load HSM config from {path}: {e}")
         return None
@@ -116,7 +116,7 @@ class SweepConfig:
             raise FileNotFoundError(f"Sweep config not found: {config_path}")
 
         with open(config_path) as f:
-            raw_config = yaml.safe_load(f)
+            raw_config = load_yaml(f)
 
         return cls.from_dict(raw_config)
 
@@ -218,14 +218,6 @@ class SweepConfig:
         if self.script:
             result["script"] = self.script
         return result
-
-    def save(self, output_path: str | Path) -> None:
-        """Save sweep config to YAML file."""
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_path, "w") as f:
-            yaml.dump(self.to_dict(), f, default_flow_style=False, indent=2)
 
 
 class HSMConfig:

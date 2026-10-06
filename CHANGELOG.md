@@ -102,10 +102,10 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   loses its connection mid-run has its jobs reported FAILED, and the other
   children are still collected.
 - **A distributed Slurm child no longer sbatches the whole queue (X3).** Without
-  `max_parallel_jobs` it is capped at 50 jobs queued or running, the fair-share
-  default; `--dry-run` shows each Slurm child's cap. A `max_parallel_jobs` that is
-  not an integer ≥ 1 is an error even when the spec sets `array_throttle` (`0`,
-  which meant no cap, included).
+  `max_parallel_jobs` (or with `0`) it is capped at 50 jobs queued or running, the
+  fair-share default; `--dry-run` shows each Slurm child's cap. A `max_parallel_jobs`
+  that isn't a whole number is an error even when the spec sets `array_throttle`;
+  `0` still means no cap outside distributed mode.
 - **`source_mapping.yaml` records the submitted jobs (X3).** Each task has its
   host and job id, a Slurm child's task is keyed by its real dir
   (`<sweep_id>_task_003`, which `hsm sweep status` reads), and the file is
@@ -124,6 +124,42 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   after the handler's cleanup. The `strategy`, `collect_interval` and failsafe
   keys of the `distributed:` block change nothing (the failsafe keys never did),
   and HSM warns when it sees them.
+- **YAML 1.1 numbers changed sweep values and walltimes (C4).** `1e-1`
+  loaded as a string, `[007, 010]` as `[7, 8]` (octal), and an unquoted
+  `walltime: 12:00:00` as the int 43200, which rendered `--time=43200`
+  (30 days); an unquoted `chunk_walltime` crashed the resumable check. Sweep
+  files and `.hsm/config.yaml` now load with YAML 1.2 numbers (decimal ints,
+  `1e-1` floats; `yes`/`no` unchanged), and HSM writes them back quoting every
+  string either grammar would read as a number. A `walltime` must be a Slurm
+  time: `H:M:S`, `D-H[:M[:S]]`, an int of minutes, or `UNLIMITED` (`0` still
+  writes no limit, as before). **A two-part `walltime: 23:00` is now an error:**
+  unquoted it used to mean 23 hours (YAML 1.1's 1380 minutes), while Slurm
+  reads `"23:00"` as 23 minutes, so write `"23:00:00"`. `chunk_walltime` must
+  be a quoted `HH:MM:SS`, and an unquoted `signal_grace: 5:00` is an error
+  asking for seconds. Two things a job sees differently: a sweep value written
+  `2e-4` reaches it as `0.0002` (the same float), and a list value such as
+  `[1e-3, 1e-4]` now arrives as floats where it used to arrive as strings.
+  `hsm sweep advance` re-reads the sweep file with the new loader, so finish a
+  chain started before this change with the HSM that started it.
+- **`hsm remote add/remove` rewrote the project file from the merged config
+  (C3).** They stripped every comment, copied machine keys
+  (`local.sweeps_root`, `visible_gpus`) into the git-tracked project file, and
+  `add` replaced an existing entry, so re-adding `uzh` erased `backend: slurm`,
+  `workdir` and `spec`. They now edit the project file only (never the machine
+  config, even from `$HOME`), `add` updates just the fields you pass, and a
+  file with comments is left untouched: the YAML to paste is printed and the
+  command exits 1.
+- **`hsm remote clean` could delete the wrong directory, or `~` (C8).** It ran
+  an unquoted `rm -rf`, named the project after the cwd, ignored a slurm
+  remote's `workdir`, and with `remote_root: ~` plus `--all-projects` removed
+  the home directory. It now targets the same dir the sweep sources use
+  (`workdir` or `remote_root`, plus the project root's name). Before any
+  prompt, one remote command canonicalises the target with `realpath` and
+  lists it; the target is refused if it is `/` or `$HOME` (or above it) under
+  any spelling or symlink, or if it holds anything but HSM's own
+  `<project>/{code,sweeps,snapshots}`. The prompt shows the canonical path,
+  `-y` skips only the prompt, and the `rm` is quoted. A root with shell
+  metacharacters, or a default-mode run outside a project, is refused first.
 - **Arrays can be throttled (S5).** `spec.array_throttle: N` renders
   `--array=1-K%N`; before, HSM had no throttle and the consumer ran
   `scontrol update ArrayTaskThrottle=N` after every submission. On a `backend:
@@ -135,6 +171,14 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 - **`hsm queue share` (FR#10).** How loaded the shared account is, and how much of it
   is you: the account's usage against its share, running CPUs by user, co-workers
   waiting and why. It exits 3 when the account is hot. One SSH round trip.
+- **Slurm launches check the account's fair share (S-4).** `hsm sweep run` prints the
+  account's load before every Slurm launch whose spec has an `account` (not a dry run
+  or `--mode distributed`), and when the
+  account is hot, or the check can't tell (it failed, or `sshare` gave nothing), it
+  asks: throttle to 50 at once and go (the default, also taken with no terminal, so
+  an unattended launch on a hot account is throttled), launch as asked (`--force`
+  skips the question), wait for the account to cool (re-checked every 30 min, at
+  most 12 h), or cancel.
 
 ### Removed (2026-10 maintenance pass)
 

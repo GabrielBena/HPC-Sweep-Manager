@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
@@ -19,6 +18,7 @@ from rich.table import Table
 
 from ..core.common.config import MACHINE_CONFIG_PATH
 from ..core.common.path_detector import PathDetector
+from ..core.common.yaml_loader import dump_yaml, load_yaml
 from .common import common_options
 
 _MIN_DISK_FREE_BYTES = 50 * 1024**3  # 50 GB — anything smaller isn't worth redirecting to.
@@ -576,7 +576,7 @@ def init_project(
         try:
             # Load existing config to preserve settings
             with open(old_config_path) as f:
-                existing_config = yaml.safe_load(f)
+                existing_config = load_yaml(f)
 
             config = _extract_config_from_existing(existing_config, project_path)
             migrating = True
@@ -916,7 +916,7 @@ def _create_sweep_infrastructure(
                 f"  💾 Existing config backed up to {backup_path.relative_to(project_path)}"
             )
         with open(hsm_config_path, "w") as f:
-            yaml.dump(hsm_config, f, default_flow_style=False, indent=2)
+            f.write(dump_yaml(hsm_config))
             f.write(_render_typed_config_scaffold(len(gpu_indices)))
 
         console.print(
@@ -963,7 +963,7 @@ def _create_sweep_infrastructure(
         }
 
         with open(example_sweep_path, "w") as f:
-            yaml.dump(example_sweep, f, default_flow_style=False, indent=2)
+            f.write(dump_yaml(example_sweep))
 
         console.print("  ✅ Created example sweep configuration")
 
