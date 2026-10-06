@@ -655,7 +655,7 @@ chain FAILED once the rest is done), and a FAILED chain is archived unless
 | `render_sbatch_directives(dependency=, signal=)` + `format_signal`; `{% if resumable %}` template block (resume env, sentinel skip-check, resume-arg, SIGTERM-forwarding run-block) | `slurm_protocol.py`, `templates/slurm_array.sh.j2` |
 | `submit_batch(dependency=, resumable=)`, `chunk_progress`, deferred cleanup, checkpoint-excluded pulls, manifest chain state + `from_manifest` restore (SSH-Slurm + native parity) | both Slurm sources |
 | CLI `--resumable`/`--chunk-walltime` + dry-run plan; **`hsm sweep advance <id>`** (re-drive a detached chain; `collect` refuses a chain); `queue mine` `(chunk k/max)`; analyzer treats `.hsm_done` as authoritative | `cli/sweep.py`, `cli/queue.py`, `sweep_analysis.py` |
-| Deferred (candidates for new issues): eager pre-queue + scancel; `.hsm_chain.lock` vs live-launcher-vs-cron double-submit + the submit→persist crash-window orphan; `hsm sweep cancel` | — |
+| Deferred (candidates for new issues): eager pre-queue + scancel; `.hsm_chain.lock` vs live-launcher-vs-cron double-submit + the submit→persist crash-window orphan (`hsm sweep cancel` landed in the 2026-10 pass, S9: one `scancel` for the live chunk, then the chain is marked stopped) | — |
 
 **The contract HSM imposes on a consumer training script (the ONLY specificity
 that leaves HSM — it knows only PATHS):** consume `HSM_RESUME_FROM` (env; resume

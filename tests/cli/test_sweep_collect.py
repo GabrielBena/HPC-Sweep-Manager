@@ -102,7 +102,7 @@ class TestCollectViaManifest:
             Console(file=buf, width=200),
         )
         out = buf.getvalue()
-        assert "2 COMPLETED, 0 FAILED" in out
+        assert "terminal: 2 COMPLETED." in out
         assert rsync_calls, "expected a tasks/ pull"
         # All succeeded → remote cleaned.
         assert any(c.startswith("rm -rf") for c in conn.run_calls)
@@ -226,3 +226,17 @@ class TestCollectViaManifest:
         assert any("/shares/lab/hsm-archive/sw1" in c for c in conn.run_calls)  # archived
         assert "--exclude=*/resume/" in rsync_calls[-1]  # the checkpoints ride the archive
         assert any(c.startswith("rm -rf") for c in conn.run_calls)
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_chain_is_pulled_and_kept(self, tmp_path, patched):
+        # Review of #47: `hsm sweep cancel` marks a chain failed; collect brings its results home
+        # and keeps the remote dir (its checkpoints), even if every job ended COMPLETED.
+        conn, rsync_calls = patched
+        conn.add("sacct", _Result(0, stdout="101|COMPLETED\n"))
+        manifest = _manifest(tmp_path, job_ids=["101"])
+        manifest["resumable"] = {"enabled": True, "chunk_walltime": "23:00:00"}
+        manifest["chain"] = {"state": {"chunk_index": 1, "failed": True}}
+        await _collect_via_manifest(
+            tmp_path / "sweeps" / "outputs" / "sw1", manifest, Console(file=io.StringIO())
+        )
+        assert rsync_calls and not any(c.startswith("rm -rf") for c in conn.run_calls)

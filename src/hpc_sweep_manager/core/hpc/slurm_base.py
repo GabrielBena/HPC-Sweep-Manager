@@ -6,21 +6,26 @@ squeue or sacct fails (slurmctld or slurmdbd down, a maintenance) no job changes
 A job that left the queue waits for sacct to name its terminal state; it is assumed COMPLETED only
 when accounting has no answer for it (no rows, or accounting absent) on ``SACCT_GRACE`` polls in a
 row. Subclasses provide :meth:`_sh`, the one transport seam, and may set :attr:`slurm_user`.
+Both write ``.hsm_manifest.json`` as they submit, naming the jobs (``hsm sweep cancel``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import getpass
+import json
 import logging
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from ..common.compute_source import TERMINAL_STATES, ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
 from ..common.utils import format_walltime, parse_walltime
+from .gpu_planner import jobs_manifest_entries
 from .scheduler_queue import (
     Reservation,
     parse_reservations_output,
@@ -83,6 +88,8 @@ class SlurmBase(ComputeSource):
 
     slurm_user: str | None = None  # whose queue to read; defaults to the local user
     poll_interval = 60.0  # Slurm jobs run for hours: a poll a minute is soon enough
+    sweep_dir: Path | None = None  # set by setup(); the manifest is written there
+    sweep_id: str | None = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -149,6 +156,49 @@ class SlurmBase(ComputeSource):
                 await asyncio.sleep(pause)
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
+
+    async def _write_manifest(
+        self,
+        job_ids: list[str],
+        submission_mode: str,
+        num_tasks: int,
+        *,
+        resumable_manifest: dict[str, Any] | None = None,
+        chain: dict[str, Any] | None = None,
+    ) -> None:
+        """Write ``.hsm_manifest.json``: the sweep's jobs, and a chain's state. SSH-Slurm's
+        override also records what a re-attach needs, and writes a copy on the remote."""
+        params = {jid: info.params or {} for jid, info in self.active_jobs.items()}
+        manifest: dict[str, Any] = {
+            "sweep_id": self.sweep_id,
+            "backend": "slurm",
+            "name": self.name,
+            "submission_mode": submission_mode,
+            "job_ids": list(job_ids),
+            "num_tasks": num_tasks,
+            "jobs": jobs_manifest_entries(job_ids, params),
+            "submitted_at": datetime.now().isoformat(),
+        }
+        if chain is not None:
+            manifest |= {"resumable": resumable_manifest, "chain": chain}
+        if self.sweep_dir is not None:
+            try:
+                (self.sweep_dir / ".hsm_manifest.json").write_text(json.dumps(manifest, indent=2))
+            except OSError as e:
+                logger.warning(f"could not write the manifest: {e}")
+
+    async def persist_chain_manifest(
+        self,
+        *,
+        resumable: dict[str, Any],
+        chain: dict[str, Any],
+        job_ids: list[str],
+        num_tasks: int,
+    ) -> None:
+        """A chain's manifest: its state, so a detached ``hsm sweep advance`` can drive it."""
+        await self._write_manifest(
+            job_ids, "array", num_tasks, resumable_manifest=resumable, chain=chain
+        )
 
     async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
         """A CPU-only job (:func:`cpu_only`) excludes its partition's GPU nodes, unless that is

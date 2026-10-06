@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fake scancel: marks the targeted job as CANCELLED in jobs.jsonl."""
+"""Fake scancel: marks the targeted jobs as CANCELLED in jobs.jsonl.
+
+Each call's arguments are appended to ``scancel.log`` (one line per call). Like real Slurm with
+the default signal, an unknown or ended job id is no error; ``HSM_FAKE_SCANCEL_RC`` forces a
+failure.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +22,9 @@ def main() -> int:
     if len(sys.argv) < 2:
         print("scancel: missing job id", file=sys.stderr)
         return 1
-    target = sys.argv[1]
+    targets = set(sys.argv[1:])
+    with open(os.path.join(state_dir, "scancel.log"), "a") as f:
+        f.write(" ".join(sys.argv[1:]) + "\n")
 
     state_path = os.path.join(state_dir, "jobs.jsonl")
     if not os.path.exists(state_path):
@@ -31,17 +38,20 @@ def main() -> int:
                 continue
             jobs.append(json.loads(line))
 
-    found = False
+    found = set()
     for j in jobs:
-        if j["id"] == target:
+        if j["id"] in targets:
             j["state"] = "CANCELLED"
-            found = True
+            found.add(j["id"])
 
     with open(state_path, "w") as f:
         for j in jobs:
             f.write(json.dumps(j) + "\n")
 
-    return 0 if found else 1
+    rc = int(os.environ.get("HSM_FAKE_SCANCEL_RC", "0"))
+    if rc:
+        print("scancel: error: Unable to contact slurm controller", file=sys.stderr)
+    return rc
 
 
 if __name__ == "__main__":

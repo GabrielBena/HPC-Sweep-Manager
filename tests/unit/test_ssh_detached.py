@@ -180,14 +180,19 @@ async def test_a_task_runs_while_any_of_its_group_does(box, tmp_path):
     assert await box.wait_for_all(poll_interval=0.05) == {job: "FAILED"}
 
 
-async def _collect(box, tmp_path, monkeypatch) -> str:
-    """Run `hsm sweep collect`'s ssh path from the manifest, against the same local box."""
+def _reach_local_box(box, monkeypatch) -> None:
+    """A source re-attached from the manifest (collect, cancel) reaches the same local box."""
 
     async def open_local(self):
         return BashConn(box.home)
 
     monkeypatch.setattr(SSHComputeSource, "_open_connection", open_local)
     monkeypatch.setattr(SSHComputeSource, "_run_rsync", LocalBox._run_rsync)
+
+
+async def _collect(box, tmp_path, monkeypatch) -> str:
+    """Run `hsm sweep collect`'s ssh path from the manifest, against the same local box."""
+    _reach_local_box(box, monkeypatch)
     manifest = json.loads((tmp_path / "sweep" / ".hsm_manifest.json").read_text())
     out = io.StringIO()
     await _collect_ssh(tmp_path / "sweep", manifest, Console(file=out, width=300))
@@ -201,7 +206,7 @@ async def test_collect_re_attaches_after_the_launcher_is_gone(box, tmp_path, mon
     await box.cleanup()  # the launcher dies; its tasks don't
     await _until(lambda: all(rc.exists() for rc in rcs))
     out = await _collect(box, tmp_path, monkeypatch)
-    assert "2 task(s) ended (1 FAILED), 1 still running" in out
+    assert "2 task(s) ended (1 not COMPLETED), 1 still running" in out
     assert "trained 5" in (tmp_path / "sweep" / "tasks" / "task_002" / "hsm.log").read_text()
     assert Path(box._remote_sweep_dir).is_dir()  # kept: a task still runs there
 
@@ -211,7 +216,7 @@ async def test_a_finished_sweep_is_collected_and_cleaned_once(box, tmp_path, mon
     await box.submit_batch([{"code": 0}, {"code": 0}], "s1")
     await box.cleanup()
     await _until(lambda: (_remote_task(box, "task_002") / ".hsm_rc").exists())
-    assert "2 task(s) ended (0 FAILED), 0 still running" in await _collect(
+    assert "2 task(s) ended (0 not COMPLETED), 0 still running" in await _collect(
         box, tmp_path, monkeypatch
     )
     assert not Path(box._remote_sweep_dir).exists()
@@ -237,7 +242,7 @@ async def test_a_task_listed_without_its_pid_keeps_the_dir(box, tmp_path, monkey
     _drop_pid(tmp_path, "task_002")  # the launcher died before the reply came back
     await _until((_remote_task(box, "task_001") / ".hsm_rc").exists)
     out = await _collect(box, tmp_path, monkeypatch)
-    assert "1 task(s) ended (0 FAILED), 1 still running" in out  # its pid was read back
+    assert "1 task(s) ended (0 not COMPLETED), 1 still running" in out  # its pid was read back
     assert Path(box._remote_sweep_dir).is_dir()
 
 
@@ -249,7 +254,7 @@ async def test_a_listed_task_that_never_started_is_failed_and_keeps_the_dir(
     await box.cleanup()
     _drop_pid(tmp_path, "task_002", dir_too=True)
     await _until((_remote_task(box, "task_001") / ".hsm_rc").exists)
-    assert "2 task(s) ended (1 FAILED)" in await _collect(box, tmp_path, monkeypatch)
+    assert "2 task(s) ended (1 not COMPLETED)" in await _collect(box, tmp_path, monkeypatch)
     assert Path(box._remote_sweep_dir).is_dir()
 
 
@@ -281,3 +286,85 @@ async def test_a_task_not_yet_its_own_group_is_running(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+async def test_cancel_ends_the_running_tasks_and_collect_keeps_the_dir(box, tmp_path, monkeypatch):
+    from hpc_sweep_manager.cli.sweep import _cancel_ssh
+
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}, {"sleep": 30}], "s1")
+    rc = _remote_task(box, "task_001") / ".hsm_rc"
+    await _until(rc.exists)
+    out = io.StringIO()
+    manifest = json.loads((tmp_path / "sweep" / ".hsm_manifest.json").read_text())
+    assert await _cancel_ssh(tmp_path / "sweep", manifest, Console(file=out)) == 1  # launcher on
+    assert "launcher is still running" in out.getvalue()
+    await box.cleanup()  # the launcher stops; its task runs on until cancelled
+    _reach_local_box(box, monkeypatch)
+    assert await _cancel_ssh(tmp_path / "sweep", manifest, Console(file=out)) == 0
+    assert "Sent TERM to 1 of 1 running task(s)" in out.getvalue()
+    killed = _remote_task(box, "task_002") / ".hsm_rc"
+    await _until(killed.exists)
+    assert killed.read_text().strip() == "143"
+    assert "2 task(s) ended (1 not COMPLETED)" in await _collect(box, tmp_path, monkeypatch)
+    assert Path(box._remote_sweep_dir).is_dir()  # a cancelled task is no success: kept
+
+
+async def test_cancel_sends_nothing_when_the_poll_fails(box, tmp_path, monkeypatch):
+    from hpc_sweep_manager.cli.sweep import _cancel_ssh
+
+    class DroppedPoll(BashConn):  # the link dies mid-poll: asyncssh gives no exit status
+        async def run(self, cmd, **kw):
+            if "p() {" in cmd:
+                return SimpleNamespace(returncode=None, stdout="", stderr="")
+            return await super().run(cmd, **kw)
+
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"sleep": 30}], "s1")
+    await _until((_remote_task(box) / ".hsm_pid").exists)
+    await box.cleanup()
+
+    conns = []
+
+    async def open_dropping(self):
+        conns.append(DroppedPoll(box.home))
+        return conns[-1]
+
+    monkeypatch.setattr(SSHComputeSource, "_open_connection", open_dropping)
+    manifest = json.loads((tmp_path / "sweep" / ".hsm_manifest.json").read_text())
+    out = io.StringIO()
+    assert await _cancel_ssh(tmp_path / "sweep", manifest, Console(file=out)) == 1
+    assert "Could not read the tasks" in out.getvalue()
+    assert not any("kill -TERM" in cmd for conn in conns for cmd, _ in conn.calls)
+    assert _group_alive(int((_remote_task(box) / ".hsm_pid").read_text()))
+
+
+async def test_cancel_never_signals_a_reused_pid(box, tmp_path, monkeypatch):
+    # A task killed hard leaves no .hsm_rc; its pid now belongs to another process of ours.
+    import subprocess
+
+    from hpc_sweep_manager.cli.sweep import _cancel_ssh
+
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"sleep": 30}], "s1")
+    await _until((_remote_task(box) / ".hsm_pid").exists)
+    await box.cleanup()
+    (pgid,) = box._pids.values()
+    os.killpg(pgid, signal.SIGKILL)
+    decoy = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        pid_file = _remote_task(box) / ".hsm_pid"
+        pid_file.write_text(f"{decoy.pid}\n")
+        os.utime(pid_file, (0, os.path.getmtime(pid_file) - 3600))  # the task started long ago
+        path = tmp_path / "sweep" / ".hsm_manifest.json"
+        manifest = json.loads(path.read_text())
+        for info in manifest["tasks"].values():
+            info["pid"] = decoy.pid
+        _reach_local_box(box, monkeypatch)
+        out = io.StringIO()
+        assert await _cancel_ssh(tmp_path / "sweep", manifest, Console(file=out)) == 1
+        assert "Sent TERM to 0 of 1" in out.getvalue()
+        assert decoy.poll() is None  # never signalled
+    finally:
+        decoy.kill()
+        decoy.wait()

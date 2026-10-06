@@ -8,6 +8,7 @@ focus on directive rendering, spec resolution, and QOS validation.
 from __future__ import annotations
 
 import getpass
+import json
 
 import pytest
 
@@ -791,6 +792,37 @@ class TestMultiGpuTypeLocal:
                     mode="array",
                 )
         assert any("301" in r.message and "scancel" in r.message for r in caplog.records)
+        # The live sub-array is in the manifest too, so `hsm sweep cancel` finds it (S9).
+        assert json.loads((tmp_path / ".hsm_manifest.json").read_text())["job_ids"] == ["301"]
+
+
+class TestManifestAtSubmit:
+    """Native Slurm names its jobs in .hsm_manifest.json at submission, before any wait, so
+    `hsm sweep cancel` can find a live sweep (tracker S9)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["array", "individual"])
+    async def test_submission_writes_the_manifest(self, tmp_path, fake_slurm, mode):
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+        assert await src.setup(tmp_path / "sw", "sw")
+        ids = await src.submit_batch([{"seed": 0}, {"seed": 1}], "sw", mode)
+        manifest = json.loads((tmp_path / "sw" / ".hsm_manifest.json").read_text())
+        assert manifest["backend"] == "slurm" and "host" not in manifest
+        assert manifest["job_ids"] == ids == [j["id"] for j in fake_slurm.jobs()]
+        assert manifest["submission_mode"] == mode and manifest["num_tasks"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_chain_driver_owns_the_manifest(self, tmp_path):
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+        src.sweep_dir, src.sweep_id = tmp_path, "sw"
+        src.active_jobs["500"] = JobInfo("500", "sw", {"_array_size": 2}, "slurm")
+        chain = {"state": {"chunk_index": 0}, "chunks": [{"index": 0, "job_ids": ["500"]}]}
+        await src.persist_chain_manifest(
+            resumable={"enabled": True}, chain=chain, job_ids=["500"], num_tasks=2
+        )
+        manifest = json.loads((tmp_path / ".hsm_manifest.json").read_text())
+        assert manifest["chain"] == chain and manifest["resumable"] == {"enabled": True}
+        assert manifest["jobs"] == [{"job_id": "500", "gpu_type": None, "num_tasks": 2}]
 
 
 class TestNativeResumable:

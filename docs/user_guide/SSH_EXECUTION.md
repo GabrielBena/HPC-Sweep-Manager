@@ -406,6 +406,9 @@ SSH session) no longer strands results:
   It classifies each job via `sacct`, pulls everything terminal, and runs the
   `/scratch → /shares` archive once all tasks are done. Idempotent — re-run as
   more tasks finish. No dependence on the original process.
+- `hsm sweep cancel <sweep_id>` reads the same manifest to stop the sweep: one
+  `scancel` over ssh names all its jobs; a `scancel` that fails or gets no answer
+  exits 1.
 
 Every task dir also carries a `params.yaml` with that task's exact overrides,
 so a synced checkpoint is self-describing (pair it with the project code to
@@ -498,6 +501,10 @@ the launcher:
   every task COMPLETED. Re-run it as more tasks finish; once cleaned, it's a no-op.
   While the launcher still runs, collect refuses (the launcher collects the sweep
   itself).
+- **`hsm sweep cancel <sweep_id>`** sends TERM to each running task's process
+  group, from the same manifest, once the launcher has stopped (Ctrl-C it first:
+  it would start the tasks still queued). `collect` then pulls them and keeps the
+  remote dir, as for any task that didn't COMPLETE.
 - `hsm remote clean` refuses a tree where a task still runs.
 - HSM's commands run in `bash` whatever your login shell is. One alias must mean
   one machine (a load-balanced alias can't find its tasks again). On a host whose
