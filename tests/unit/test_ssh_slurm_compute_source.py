@@ -898,7 +898,10 @@ class TestPeriodicPull:
         assert await src.wait_for_all(poll_interval=0) == {"1": "COMPLETED"}
         # At 10 and 20 min, never more often (a failed pull too), none once the job is done.
         assert [t for t, _ in pulls] == [600, 1200]
-        assert all("--partial-dir=.rsync-partial" in cmd and cmd[-2].endswith("/tasks/") for _, cmd in pulls)
+        assert all(
+            "--partial-dir=.rsync-partial" in cmd and cmd[-2].endswith("/tasks/")
+            for _, cmd in pulls
+        )
         failed = caplog.text.count("periodic tasks/ pull from uzh failed")
         assert failed == (2 if outcome else 0)  # a failure is a warning; the wait went on
 
