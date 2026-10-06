@@ -17,6 +17,7 @@ fold in once the SSH + distributed backends finish their own refactor.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import shutil
 from collections.abc import Callable, Sequence
@@ -177,6 +178,8 @@ def build_compute_source(
             f"build_compute_source: unsupported mode {mode!r}; "
             f"expected one of {sorted(SUPPORTED_MODES)}"
         )
+    if remote_alias and mode != "remote":
+        raise ValueError(f"remote_alias={remote_alias!r} needs mode='remote', got {mode!r}")
 
     mode = resolve_auto_mode(mode)
 
@@ -214,7 +217,7 @@ def build_compute_source(
     if mode == "remote":
         if not remote_alias:
             raise RuntimeError("--mode remote requires --remote <alias>")
-        # Lookup precedence: registered remote → bare ssh-config alias (empty cfg).
+        # Lookup: a registered remote, or a bare ssh-config alias (empty cfg) if none are.
         distributed_cfg = dict(hsm_config.config_data.get("distributed", {}) if hsm_config else {})
         # paths.conda_env is the lowest-priority fallback for the SSH
         # factories. Per-remote / distributed.conda_env still win because
@@ -223,12 +226,18 @@ def build_compute_source(
             _proj_env = getattr(hsm_config, "get_conda_env", lambda: None)()
             if _proj_env and "conda_env" not in distributed_cfg:
                 distributed_cfg["conda_env"] = _proj_env
-        registered = distributed_cfg.get("remotes", {})
-        remote_cfg = registered.get(remote_alias, {})
-        if remote_alias not in registered:
-            logger.info(
-                f"Remote {remote_alias!r} not in hsm_config — using bare ~/.ssh/config alias"
+        registered = distributed_cfg.get("remotes") or {}
+        if registered and remote_alias not in registered:
+            # A typo must not become a bare ssh-bash remote (e.g. a login node).
+            close = difflib.get_close_matches(remote_alias, registered, n=1)
+            raise ValueError(
+                f"Remote {remote_alias!r} is not in distributed.remotes "
+                f"({', '.join(sorted(registered))})"
+                + (f"; did you mean {close[0]!r}?" if close else "")
             )
+        remote_cfg = registered.get(remote_alias, {})
+        if not registered:
+            logger.info(f"No distributed.remotes — using bare ~/.ssh/config alias {remote_alias!r}")
 
         # Dispatch on the per-remote `backend:` field (default `ssh`).
         # `slurm` routes through SSHSlurmComputeSource which drives sbatch

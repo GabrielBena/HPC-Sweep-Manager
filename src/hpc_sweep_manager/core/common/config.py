@@ -406,8 +406,9 @@ class HSMConfig:
         The ``slurm:`` block in ``.hsm/config.yaml`` is the canonical place to
         express HPC fields the opaque ``--resources`` CLI string can't reach:
         ``gpu_type``, ``modules``, ``pre_script``, ``account``,
-        ``extra_directives``. All keys are optional. Extra (non-ResourceSpec)
-        keys like ``qos_whitelist`` are stripped before construction.
+        ``extra_directives``. All keys are optional. Sibling keys like
+        ``qos_whitelist`` are stripped before construction; other unknown keys
+        are dropped with a warning, and invalid values raise ``ValueError``.
 
         Example::
 
@@ -435,11 +436,7 @@ class HSMConfig:
         # Strip orchestrator-/scheduler-only keys before handing to ResourceSpec.
         _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size", "speed_factors"}
         filtered = {k: v for k, v in block.items() if k not in _NON_SPEC_KEYS}
-        try:
-            return ResourceSpec.from_dict(filtered)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `slurm:` block in HSM config: {e}")
-            return None
+        return ResourceSpec.from_dict(filtered, where="`slurm:` block")
 
     def get_local_spec(self):
         """Read the typed ``local:`` block as a :class:`ResourceSpec`, or ``None``.
@@ -482,11 +479,7 @@ class HSMConfig:
                 f"move them to the `slurm:` block. Ignoring."
             )
         filtered = {k: v for k, v in block.items() if k in _LOCAL_SPEC_FIELDS}
-        try:
-            return ResourceSpec.from_dict(filtered)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `local:` block in HSM config: {e}")
-            return None
+        return ResourceSpec.from_dict(filtered, where="`local:` block")
 
     def get_local_visible_gpus(self):
         """Read ``local.visible_gpus`` as a list of int indices, or ``None`` if unset.
@@ -599,6 +592,22 @@ class HSMConfig:
         )
 
 
+def _mkdir_fresh(parent: Path, sweep_id: str) -> Path:
+    """Create ``parent/<sweep_id>`` exclusively, suffixing ``_2``, ``_3``, … on collision.
+
+    Sweep ids have 1-second resolution: without this, two same-second launches
+    share their local and remote sweep dirs (and one's cleanup deletes the other's).
+    """
+    path, n = parent / sweep_id, 1
+    while True:
+        try:
+            path.mkdir(parents=True)
+            return path
+        except FileExistsError:
+            n += 1
+            path = parent / f"{sweep_id}_{n}"
+
+
 def resolve_sweep_dir(
     hsm_config: Optional["HSMConfig"],
     sweep_id: str,
@@ -617,7 +626,9 @@ def resolve_sweep_dir(
 
     The returned ``Path`` is the *target* (where data actually lives),
     not the symlink, so callers using it for ``mkdir``, ``glob``, etc.
-    operate on the canonical location.
+    operate on the canonical location. It is always a NEW dir: if
+    ``<sweep_id>`` is taken it becomes ``<sweep_id>_2`` (``_3``, …), so the
+    caller must take the returned dir's ``.name`` as the sweep id.
 
     Raises:
         FileNotFoundError: when ``local.sweeps_root`` is set but resolves
@@ -628,12 +639,11 @@ def resolve_sweep_dir(
             been a mount point.
     """
     project_dir = project_dir or Path.cwd()
-    default = project_dir / "sweeps" / "outputs" / sweep_id
+    link_parent = project_dir / "sweeps" / "outputs"
 
     sweeps_root = hsm_config.get_local_sweeps_root() if hsm_config is not None else None
     if not sweeps_root:
-        default.mkdir(parents=True, exist_ok=True)
-        return default
+        return _mkdir_fresh(link_parent, sweep_id)
 
     expanded = Path(os.path.expandvars(os.path.expanduser(sweeps_root)))
     if not expanded.exists():
@@ -645,16 +655,13 @@ def resolve_sweep_dir(
             f"field from your HSM config (machine: {MACHINE_CONFIG_PATH}, "
             f"or this project's `.hsm/config.yaml`)."
         )
-    expanded = expanded.resolve()
-    target = expanded / sweep_id
-    target.mkdir(parents=True, exist_ok=True)
+    target = _mkdir_fresh(expanded.resolve(), sweep_id)
 
-    link_parent = project_dir / "sweeps" / "outputs"
     link_parent.mkdir(parents=True, exist_ok=True)
-    link = link_parent / sweep_id
+    link = link_parent / target.name
 
-    # If a stale symlink already exists at the link path (e.g., from a
-    # collision on sweep_id), replace it with one pointing at the new
+    # If a stale symlink already exists at the link path (e.g., its old
+    # target was deleted), replace it with one pointing at the new
     # target. Never touch a real directory living at the link path —
     # that would be data loss.
     if link.is_symlink():

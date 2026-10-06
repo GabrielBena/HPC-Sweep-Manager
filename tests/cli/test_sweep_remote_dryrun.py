@@ -109,6 +109,33 @@ class TestRemoteDryRun:
         assert "submission=individual" in out
 
 
+class TestRemoteAliasGuards:
+    def test_mode_auto_with_remote_runs_remote(self, tmp_path, monkeypatch):
+        # C1: `--remote uzh --mode auto` used to resolve auto → local/array and
+        # silently ignore the alias. Drive the real CLI through to the dry-run.
+        from click.testing import CliRunner
+
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        buf = io.StringIO()
+        obj = {"console": Console(file=buf, width=200), "logger": logging.getLogger("t")}
+        args = ["run", "-c", "sweeps/sweep.yaml", "--remote", "uzh", "--mode", "auto", "--dry-run"]
+        CliRunner().invoke(sweep_cli.sweep_cmd, args, obj=obj, catch_exceptions=False)
+        out = buf.getvalue()
+        assert "mode=remote" in out, out
+        assert "DRY RUN" in out
+
+    def test_unknown_alias_errors_with_suggestion(self, tmp_path, monkeypatch):
+        # C6: a typo'd alias used to become a bare ssh-bash remote (which on a
+        # cluster alias means training on the login node).
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        out = _dry_run(remote_alias="uhz")
+        assert "not in distributed.remotes" in out
+        assert "did you mean 'uzh'" in out
+        assert "Execution backend" not in out
+
+
 class TestRemoteModeReconciliation:
     """run_cmd reconciles `--remote <alias> --mode array|individual` into
     remote execution + a submission style (and still rejects local/distributed)."""
@@ -153,6 +180,16 @@ class TestRemoteModeReconciliation:
         )
         assert calls.get("mode") == "remote"
         assert calls.get("remote_submission") == "individual"
+
+    def test_remote_mode_auto_means_remote(self, tmp_path, monkeypatch):
+        _make_project(tmp_path, spec={"walltime": "01:00:00"})
+        monkeypatch.chdir(tmp_path)
+        _result, _out, calls = self._run_cmd(
+            monkeypatch,
+            ["-c", "sweeps/sweep.yaml", "--remote", "uzh", "--mode", "auto"],
+        )
+        assert calls.get("mode") == "remote"
+        assert calls.get("remote_submission") is None
 
     def test_remote_mode_local_rejected(self, tmp_path, monkeypatch):
         _make_project(tmp_path, spec={"walltime": "01:00:00"})

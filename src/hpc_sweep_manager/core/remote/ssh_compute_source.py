@@ -594,15 +594,7 @@ def build_ssh_source(
     # flags (--walltime, --resources) still override.
     remote_spec_dict = remote_cfg.get("spec")
     if isinstance(remote_spec_dict, dict) and remote_spec_dict:
-        try:
-            per_remote_spec = ResourceSpec.from_dict(remote_spec_dict)
-        except (TypeError, ValueError) as e:
-            logger.warning(f"Invalid `spec:` block in remote {name!r}: {e}. Ignoring.")
-            per_remote_spec = None
-    else:
-        per_remote_spec = None
-
-    if per_remote_spec is not None:
+        per_remote_spec = ResourceSpec.from_dict(remote_spec_dict, where=f"remote {name!r} spec")
         default_spec = per_remote_spec.merge(default_spec or ResourceSpec())
 
     conda_env = (
