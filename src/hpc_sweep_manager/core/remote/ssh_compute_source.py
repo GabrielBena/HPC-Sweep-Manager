@@ -28,6 +28,7 @@ unit-testable by overriding the two narrow I/O seams
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import re
@@ -80,6 +81,19 @@ _KILL_USER_PROCESSES = (
     "busctl get-property org.freedesktop.login1 /org/freedesktop/login1 "
     "org.freedesktop.login1.Manager KillUserProcesses 2>/dev/null"
 )
+
+
+def launcher_lock(sweep_dir: Path) -> Any:
+    """Take ``<sweep_dir>/.hsm_launcher.lock`` (an open file; closing it releases the lock,
+    and so does the process ending, even killed), or None when another process holds it.
+    A launcher holds it while it drives the sweep; ``hsm sweep collect`` refuses without it."""
+    lock = open(sweep_dir / ".hsm_launcher.lock", "a")  # noqa: SIM115 — held past this call
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock
 
 
 class SSHComputeSource(ComputeSource):
@@ -160,6 +174,7 @@ class SSHComputeSource(ComputeSource):
         self._slots: dict[str, Any] = {}
         self.slot_poll_s = 10.0  # how often a submit waiting for a slot polls
         self._manifest = False  # keep .hsm_manifest.json current (only as the sweep's own source)
+        self._lock: Any = None  # the sweep's launcher lock, held from submit_batch to cleanup()
         self._cancelled: set[str] = set()  # TERM sent, not yet ended
         self._down_since: float | None = None  # when the link went down (None: up)
         self._warned = False
@@ -382,6 +397,8 @@ class SSHComputeSource(ComputeSource):
         )
         self._slots[job_id], self._task_dirs[job_id] = slot, remote_task_dir
         self.stats.total_submitted += 1
+        if self._manifest:  # listed before it starts: a collect never removes it unknowingly
+            self._write_manifest()
         for attempt in range(1, LAUNCH_TRIES + 1):
             try:
                 out = ((await self._run(launch, input=script_content)).stdout or "").strip()
@@ -403,6 +420,9 @@ class SSHComputeSource(ComputeSource):
         """The base batch, with ``.hsm_manifest.json`` rewritten as each task starts, so that
         ``hsm sweep collect`` can re-attach (not as a distributed child: siblings share the dir)."""
         self._manifest = True
+        self._lock = self.sweep_dir and launcher_lock(self.sweep_dir)
+        if self.sweep_dir and not self._lock:
+            logger.warning(f"{self.sweep_dir}: another process holds its launcher lock")
         try:
             return await super().submit_batch(*args, **kwargs)
         except BaseException:  # Ctrl-C, or a launch that kept failing
@@ -433,13 +453,16 @@ class SSHComputeSource(ComputeSource):
             },
         }
         path = self.sweep_dir / ".hsm_manifest.json"
-        path.with_suffix(".tmp").write_text(json.dumps(manifest, indent=2))
-        path.with_suffix(".tmp").replace(path)  # never a half-written manifest
+        try:
+            path.with_suffix(".tmp").write_text(json.dumps(manifest, indent=2))
+            path.with_suffix(".tmp").replace(path)  # never a half-written manifest
+        except OSError as e:
+            logger.warning(f"could not write {path}: {e}")
 
     @classmethod
     def from_manifest(cls, manifest: dict[str, Any], sweep_dir: Path) -> SSHComputeSource:
         """A source re-attached to a launched sweep (``hsm sweep collect``): no push, no setup.
-        A task with no pid never started: FAILED. The others are polled for their state."""
+        Statuses come from the remote: :meth:`recover_pids`, then a poll."""
         src = cls(
             name=manifest["name"],
             host=manifest["host"],
@@ -453,11 +476,27 @@ class SSHComputeSource(ComputeSource):
         src._remote_code_dir = manifest.get("remote_code_dir")
         for job, task in manifest["tasks"].items():
             src.active_jobs[job] = JobInfo(job, task["name"], {}, src.name, "RUNNING")
+            src._task_dirs[job] = task["dir"]
             if task.get("pid"):
-                src._pids[job], src._task_dirs[job] = task["pid"], task["dir"]
-            else:
-                src.update_job_status(job, "FAILED")
+                src._pids[job] = task["pid"]
         return src
+
+    async def recover_pids(self) -> None:
+        """Tasks listed without a pid (the launcher died mid-launch): read their ``.hsm_pid``.
+        One that has none never started (FAILED). Raises when the remote can't be read."""
+        if not (lost := [j for j in self.active_jobs if j not in self._pids]):
+            return
+        q = shlex.quote
+        reads = "; ".join(f"echo {q(j)} $(cat {q(self._task_dirs[j])}/.hsm_pid)" for j in lost)
+        result = await self._run(f"{{ {reads}; }} 2>/dev/null")
+        if result.returncode != 0:
+            raise ConnectionError(f"could not read the task pids on {self.host}")
+        for job, *pid in (line.split() for line in (result.stdout or "").splitlines()):
+            if job in lost and pid and pid[0].isdigit():
+                self._pids[job] = int(pid[0])
+        for job in lost:
+            if job not in self._pids:
+                self.update_job_status(job, "FAILED")
 
     async def _acquire_slot(self) -> Any:
         """A free slot; while none is, poll, so that finished tasks free theirs."""
@@ -630,8 +669,11 @@ class SSHComputeSource(ComputeSource):
         )
 
     async def cleanup(self) -> None:
-        """Close the connection. Tasks still running keep running (as Slurm jobs do)."""
+        """Close the connection (and the launcher lock). Tasks still running keep running."""
         self._warn_running()
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
         if self._conn is not None:
             try:
                 self._conn.close()

@@ -210,8 +210,11 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `.hsm_manifest.json` (each task's host, pid and dir) as its tasks start. After a
   Ctrl-C or a dead launcher, `hsm sweep collect <id>` reads every task's exit code in
   one command, pulls `tasks/` back, and removes the remote sweep dir once every task
-  COMPLETED; re-run it as more tasks finish. (A distributed sweep's ssh children write
-  none: they share the sweep dir.)
+  COMPLETED; re-run it as more tasks finish. A task is listed before it starts, and one
+  listed without a pid has it read back from the remote, so a launcher killed mid-launch
+  never gets a running task's dir removed. While the launcher still runs (it holds a lock
+  on the sweep dir), collect refuses: the launcher collects the sweep itself. (A
+  distributed sweep's ssh children write no manifest: they share the sweep dir.)
 
 ### Removed (2026-10 maintenance pass)
 

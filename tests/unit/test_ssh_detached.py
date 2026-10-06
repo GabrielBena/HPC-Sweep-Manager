@@ -216,3 +216,48 @@ async def test_a_finished_sweep_is_collected_and_cleaned_once(box, tmp_path, mon
     )
     assert not Path(box._remote_sweep_dir).exists()
     assert "Nothing left to collect" in await _collect(box, tmp_path, monkeypatch)
+
+
+def _drop_pid(tmp_path, task: str, *, dir_too: bool = False) -> None:
+    """Rewrite the manifest as the launcher left it had it died mid-launch: no pid yet."""
+    path = tmp_path / "sweep" / ".hsm_manifest.json"
+    manifest = json.loads(path.read_text())
+    for info in manifest["tasks"].values():
+        if info["name"].endswith(task):
+            info["pid"] = None
+            if dir_too:
+                info["dir"] += "_never_started"
+    path.write_text(json.dumps(manifest))
+
+
+async def test_a_task_listed_without_its_pid_keeps_the_dir(box, tmp_path, monkeypatch):
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}, {"sleep": 30}], "s1")
+    await box.cleanup()
+    _drop_pid(tmp_path, "task_002")  # the launcher died before the reply came back
+    await _until((_remote_task(box, "task_001") / ".hsm_rc").exists)
+    out = await _collect(box, tmp_path, monkeypatch)
+    assert "1 task(s) ended (0 FAILED), 1 still running" in out  # its pid was read back
+    assert Path(box._remote_sweep_dir).is_dir()
+
+
+async def test_a_listed_task_that_never_started_is_failed_and_keeps_the_dir(
+    box, tmp_path, monkeypatch
+):
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}, {"code": 0}], "s1")
+    await box.cleanup()
+    _drop_pid(tmp_path, "task_002", dir_too=True)
+    await _until((_remote_task(box, "task_001") / ".hsm_rc").exists)
+    assert "2 task(s) ended (1 FAILED)" in await _collect(box, tmp_path, monkeypatch)
+    assert Path(box._remote_sweep_dir).is_dir()
+
+
+async def test_no_collect_while_the_launcher_runs(box, tmp_path, monkeypatch):
+    # It may start a task during the collect, whose rm -rf would remove it.
+    assert await box.setup(tmp_path / "sweep", "s1")
+    await box.submit_batch([{"code": 0}], "s1")  # holds the launcher lock until cleanup()
+    await _until((_remote_task(box, "task_001") / ".hsm_rc").exists)
+    assert "launcher is still running" in await _collect(box, tmp_path, monkeypatch)
+    assert Path(box._remote_sweep_dir).is_dir()
+    await box.cleanup()
