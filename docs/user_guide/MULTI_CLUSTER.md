@@ -117,7 +117,6 @@ local:
 # Multi-cluster fan-out
 distributed:
   enabled: true
-  strategy: least_loaded
 
   remotes:
     # An SSH workstation, e.g., another lab box. backend: ssh is the
@@ -169,15 +168,19 @@ HSM:
    `SSHSlurmComputeSource` — based on the `distributed:` block.
 2. Rsyncs your project up to each remote in parallel.
 3. Verifies `sbatch`/`squeue` on the Slurm remote.
-4. Submits tasks to whichever source is least-loaded (each parameter
-   combination lands on one source's queue).
+4. Hands out the tasks: each child takes the next one whenever it has
+   room (fewer active jobs than its `max_parallel_jobs`), so faster
+   children take more. A child whose submit fails takes no more tasks;
+   that task is reported FAILED and the others carry on.
 5. Polls each remote's status (squeue over SSH for `backend: slurm`;
    process exit codes for `backend: ssh`).
-6. When the cluster's portion finishes, server-side rsyncs
-   `/scratch → /shares` and writes a `.archived` sentinel.
-7. Pulls each remote's `tasks/` back to HQ's sweep dir.
-8. Cleans up the per-sweep dir on each remote (failed runs are kept on
-   `/scratch` for inspection).
+6. Once **every** task of the sweep is done, each child collects its own
+   results: the cluster archives `/scratch → /shares` server-side (with a
+   `.archived` sentinel), every remote's `tasks/` is pulled back to HQ's
+   sweep dir, and each remote's per-sweep dir is cleaned up (a child with a
+   failed task keeps its dir for inspection). Nothing is pulled or deleted
+   while any task still runs.
+7. Writes `source_mapping.yaml` (which child ran each task).
 
 Final state on HQ:
 
@@ -244,11 +247,11 @@ run. On S3IT, 32–64 is usually fine.
 
 ### What about the queue time itself?
 
-Long queue waits on one child **don't block the other children**. The
-dispatcher polls all sources every ~5 seconds; if anahita has free
-slots and S3IT has 32 jobs sitting PENDING, anahita keeps churning
-through the remaining work. You only see head-of-line behavior when
-*every* child is at `max_parallel_jobs`.
+Long queue waits on one child **don't block the other children**. A
+child at its `max_parallel_jobs` re-checks its jobs every 10 s before it
+takes another task; meanwhile, if anahita has free slots and S3IT has 32
+jobs sitting PENDING, anahita keeps churning through the remaining work.
+You only see head-of-line behavior when *every* child is full.
 
 Status polling itself is cheap: every Slurm source asks one `squeue -u <user>`
 and one `sacct` per poll cycle, whatever the number of jobs in flight. A
@@ -263,30 +266,22 @@ blocks for five hours. Two practical implications:
 
 - **Use `tmux`/`screen` on anahita** so dropping your laptop SSH
   doesn't kill the driver.
-- **Ctrl-C does the right thing**: HSM's signal handler calls
-  `scancel` on every still-pending S3IT job before exiting. You won't
-  leave orphans, but the rsync-pull doesn't run, so re-submit after
-  fixing the cause if you want results back.
+- **Ctrl-C stops the driver, not the jobs.** Tasks already started keep
+  running and Slurm jobs stay queued; nothing is pulled. Cancel the
+  cluster's with `scancel` (`hsm queue mine --remote uzh` lists them).
 
 There's no "submit-and-detach" mode yet. If you need one, run the
 driver under a long-lived `tmux` session.
 
-### Strategies — pick `least_loaded`
+### How tasks are placed
 
-The three available `distributed.strategy` values interact very
-differently with Slurm children:
-
-| Strategy | Slurm-friendly? | Why |
-|---|---|---|
-| `round_robin` | ⚠️ | Fills anahita to `max_parallel_jobs` then cycles to uzh regardless of queue depth. For a 5-task sweep with 4-slot anahita, task 5 lands on uzh and sits in queue while anahita is idle. |
-| `least_loaded` (**recommended**) | ✓ | Picks `min(sources, key=utilization)`. Local sources are built before SSH children, so anahita wins ties at the start of a sweep — small sweeps stay on anahita and only overflow goes to uzh. |
-| `capability_based` | ✗ **avoid with Slurm** | Picks `max(sources, key=available_slots)`. uzh's 32 always beats anahita's 4, so this dumps everything on the cluster and leaves anahita idle. Fine for SSH-only fan-out; bad for SSH + Slurm. |
-
-A future `queue_aware` strategy that consults `SlurmQueue.position()`
-and prefers the source with shortest expected wait is on the wishlist;
-plumbing in `core/hpc/scheduler_queue.py` already exists. Until then,
-`least_loaded` + a sensibly capped `max_parallel_jobs` is the right
-combination.
+There is no placement strategy to pick: each child takes the next task as
+soon as it has room. A `backend: slurm` child counts its PENDING jobs as
+active, so with a large `max_parallel_jobs` it can take tasks that would
+have started sooner on anahita. Cap it (see above) to keep small sweeps
+local. The old `strategy`, `collect_interval` and failsafe keys of the
+`distributed:` block no longer change anything; HSM warns when it sees
+them.
 
 ### When to skip distributed entirely
 

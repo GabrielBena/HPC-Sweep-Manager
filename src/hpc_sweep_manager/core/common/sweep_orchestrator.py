@@ -210,7 +210,7 @@ def build_compute_source(
                 "No compute sources configured under distributed: in hsm_config.yaml"
             )
 
-        source = DistributedComputeSource(hsm_config=hsm_config, show_progress=False)
+        source = DistributedComputeSource(hsm_config=hsm_config)
         # Distributed always fans out individual jobs across child sources.
         return source, "distributed", "individual"
 

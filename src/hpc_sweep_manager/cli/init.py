@@ -379,8 +379,6 @@ def _render_typed_config_scaffold(gpu_count: int) -> str:
 #               flow on clusters that auto-clean scratch.
 # distributed:
 #   enabled: false
-#   strategy: round_robin
-#   sync_method: rsync
 #   remotes:
 #     my-box:                      # ~/.ssh/config alias (host defaults to alias)
 #       max_parallel_jobs: 4

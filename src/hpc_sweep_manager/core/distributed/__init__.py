@@ -1,15 +1,5 @@
-"""Distributed execution components."""
+"""Distributed execution: one sweep fanned across several compute sources."""
 
 from .distributed_compute_source import DistributedComputeSource
-from .distributed_manager import (
-    DistributedJobManager,
-    DistributedSweepConfig,
-    DistributionStrategy,
-)
 
-__all__ = [
-    "DistributedComputeSource",
-    "DistributedJobManager",
-    "DistributedSweepConfig",
-    "DistributionStrategy",
-]
+__all__ = ["DistributedComputeSource"]

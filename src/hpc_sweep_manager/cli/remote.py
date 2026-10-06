@@ -102,10 +102,7 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool)
     hsm_config = HSMConfig.load()
     config_data = hsm_config.config_data if hsm_config else {}
 
-    distributed = config_data.setdefault(
-        "distributed",
-        {"enabled": False, "strategy": "round_robin", "sync_method": "rsync"},
-    )
+    distributed = config_data.setdefault("distributed", {"enabled": False})
     distributed.setdefault("remotes", {})
 
     # Only persist connection fields that were explicitly given — a bare entry

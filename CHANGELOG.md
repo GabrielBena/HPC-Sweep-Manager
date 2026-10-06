@@ -69,6 +69,28 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   launches shared their local and remote dirs, and one's cleanup could delete
   the other's. The dir is now created exclusively; on a collision the id gets
   a `_2` (`_3`, …) suffix.
+- **`--mode distributed` deleted results under running tasks (X3).** Its
+  collector ran every 30 s and called an ssh child's `collect_results`, which
+  `rm -rf`'d the remote sweep dir while other tasks still ran there; the last
+  tasks to finish were never pulled, and `backend: slurm` children were never
+  pulled, archived or cleaned. `distributed_manager.py` (1,632 lines) is deleted;
+  `DistributedComputeSource` now hands out the tasks itself: one worker per child
+  takes the next task whenever the child has room, then every child waits on its
+  own jobs and collects its own results, only once no task of the sweep is active.
+- **A failed submit hung a distributed sweep (X3).** A task whose submit failed
+  three times was never counted, so the launcher waited forever, and a Ctrl-C was
+  swallowed. Now that task is reported FAILED and the child takes no more tasks;
+  the sweep carries on with the others and exits non-zero. Tasks no child could
+  take are FAILED too. A child that loses its connection mid-run has its jobs
+  reported FAILED (its remote dir is kept), and the other children are still
+  collected.
+- **The local child of a distributed sweep ignored the `local:` block (X3).** It
+  ran without `local.visible_gpus` and the per-task spec, so its tasks could land
+  on a reserved GPU (anahita's GPU 0). It now uses both, like `--mode local`.
+- **Distributed no longer installs process-wide signal handlers (X3).** Ctrl-C
+  stops the driver and leaves started tasks running and Slurm jobs queued, as in
+  the other modes. The `strategy`, `collect_interval` and failsafe keys of the
+  `distributed:` block no longer change anything, and HSM warns when it sees them.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
