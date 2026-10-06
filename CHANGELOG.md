@@ -221,6 +221,15 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   exited. Commands run in `bash` whatever the login shell. The remote root must resolve
   to an absolute path without spaces (a relative one is under `~`), and the remote sweep
   dir is never removed while a task runs, by a collect or by `hsm remote clean`.
+- **`hsm sweep collect` re-attaches ssh sweeps (X-2).** An ssh sweep keeps a
+  `.hsm_manifest.json` (each task's host, pid and dir) as its tasks start. After a
+  Ctrl-C or a dead launcher, `hsm sweep collect <id>` reads every task's exit code in
+  one command, pulls `tasks/` back, and removes the remote sweep dir once every task
+  COMPLETED; re-run it as more tasks finish. A task is listed before it starts, and one
+  listed without a pid has it read back from the remote, so a launcher killed mid-launch
+  never gets a running task's dir removed. While the launcher still runs (it holds a lock
+  on the sweep dir), collect refuses: the launcher collects the sweep itself. (A
+  distributed sweep's ssh children write no manifest: they share the sweep dir.)
 
 ### Removed (2026-10 maintenance pass)
 

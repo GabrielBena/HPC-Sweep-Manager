@@ -1213,6 +1213,54 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         await source.cleanup()
 
 
+async def _collect_ssh(sweep_dir: Path, manifest: dict, console: Console) -> None:
+    """Re-attach to an ssh sweep: one poll for every task's exit code, then pull, and clean
+    the remote dir once every task COMPLETED (``collect_results``). Never while its launcher
+    still runs (it collects the sweep itself), as a task it starts could lose its dir."""
+    import shlex
+
+    import asyncssh
+
+    from ..core.remote.ssh_compute_source import SSHComputeSource, launcher_lock
+
+    if not (lock := launcher_lock(sweep_dir)):
+        console.print(
+            "[yellow]This sweep's launcher is still running and collects it itself; run "
+            "collect once it has stopped.[/yellow]"
+        )
+        return
+    source = SSHComputeSource.from_manifest(manifest, sweep_dir)
+    try:
+        source._conn = await source._open_connection()
+        found = await source._run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
+        if found.returncode == 1:  # a collect already pulled and cleaned it
+            console.print(f"[green]Nothing left to collect on {source.host}.[/green]")
+            return
+        if found.returncode == 0:
+            await source.recover_pids()
+            await source.update_all_job_statuses()
+        if found.returncode != 0 or source._down_since:  # None: the link dropped mid-command
+            console.print(f"[red]Could not read the tasks on {source.host}; try again.[/red]")
+            return
+        ok = await source.collect_results()
+        states = [info.status for info in source.completed_jobs.values()]
+        running, failed = len(source.active_jobs), states.count("FAILED")
+        colour = "red" if failed or not ok else "yellow" if running else "green"
+        kept = "kept" if running or failed or not ok else "cleaned"
+        console.print(
+            f"[{colour}]{len(states)} task(s) ended ({failed} FAILED), {running} still running; "
+            f"pulled → {sweep_dir / 'tasks'} ({'ok' if ok else 'the pull failed'}); "
+            f"the remote dir is {kept}.[/{colour}]"
+        )
+        if running:
+            console.print(f"Re-run [bold]hsm sweep collect {source.sweep_id}[/bold] later.")
+    except (OSError, asyncssh.Error) as e:
+        console.print(f"[red]Could not reach {source.host} to collect: {e}[/red]")
+    finally:
+        await source.cleanup()
+        lock.close()
+
+
 @sweep_cmd.command("collect")
 @click.argument("sweep_id")
 @common_options
@@ -1220,11 +1268,11 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
 def collect_cmd(ctx, sweep_id, verbose, quiet):
     """Re-attach to a sweep and pull/archive whatever finished.
 
-    For SSH-Slurm sweeps whose launching `hsm sweep run` process is gone (long
-    run + overnight + a maintenance window). Reads the sweep's
-    `.hsm_manifest.json`, classifies each job via `sacct`, pulls terminal task
-    dirs back, and runs the server-side archive once everything is done.
-    Idempotent: safe to re-run as more tasks finish.
+    For SSH-Slurm and ssh sweeps whose launching `hsm sweep run` process is gone
+    (long run + overnight + a maintenance window, or a Ctrl-C). Reads the sweep's
+    `.hsm_manifest.json`, asks the remote which tasks ended (`sacct`, or each ssh
+    task's exit code), pulls the task dirs back, and archives/cleans up once
+    everything is done. Idempotent: safe to re-run as more tasks finish.
     """
     import json
 
@@ -1236,7 +1284,7 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
         console.print(f"[red]No manifest at {manifest_path}.[/red]")
         console.print(
             "[yellow]`hsm sweep collect` needs the .hsm_manifest.json written at "
-            "submit time (SSH-Slurm sweeps from this build onward).[/yellow]"
+            "submit time (SSH-Slurm and ssh sweeps from this build onward).[/yellow]"
         )
         return
     try:
@@ -1244,9 +1292,17 @@ def collect_cmd(ctx, sweep_id, verbose, quiet):
     except (OSError, ValueError) as e:
         console.print(f"[red]Could not read manifest {manifest_path}: {e}[/red]")
         return
+    if manifest.get("backend") == "ssh":
+        if missing := [
+            k for k in ("name", "host", "remote_sweep_dir", "tasks") if k not in manifest
+        ]:
+            console.print(f"[red]Manifest {manifest_path} lacks {', '.join(missing)}.[/red]")
+            return
+        asyncio.run(_collect_ssh(sweep_dir, manifest, console))
+        return
     if manifest.get("backend") != "slurm":
         console.print(
-            f"[red]collect supports backend=slurm sweeps only "
+            f"[red]collect supports backend=slurm and ssh sweeps only "
             f"(manifest backend={manifest.get('backend')!r}).[/red]"
         )
         return
