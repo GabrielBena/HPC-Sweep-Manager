@@ -178,7 +178,7 @@ These were deliberately removed; resist resurrecting them.
   `SSHComputeSource.collect_results()` does rsync-pull automatically as part
   of `run_sweep_async()`. NOTE: this is NOT the same as the **live**
   `hsm sweep collect <sweep_id>` (added for field-report #8 Tier 0) — that one
-  *re-attaches* to an already-submitted SSH-Slurm sweep via its
+  *re-attaches* to an already-submitted SSH-Slurm or ssh sweep via its
   `.hsm_manifest.json` and pulls/archives after the launcher died. Distinct
   command, distinct purpose; don't conflate or delete it.
 - **`RemoteJobManager` / `RemoteDiscovery` / `RemoteValidator` /

@@ -466,6 +466,12 @@ the launcher:
 - **Ctrl-C stops the launcher, not the tasks** (as with Slurm). HSM logs the
   command that stops them: `ssh <host> kill -TERM -<pid> …`. A cancel TERMs the
   task's whole process group, and the task keeps its GPU until it has exited.
+- **`hsm sweep collect <sweep_id>` re-attaches** after a Ctrl-C or a dead
+  launcher: from the sweep's `.hsm_manifest.json` it reads every task's exit
+  code in one command, pulls `tasks/` back, and removes the remote sweep dir once
+  every task COMPLETED. Re-run it as more tasks finish; once cleaned, it's a no-op.
+  While the launcher still runs, collect refuses (the launcher collects the sweep
+  itself).
 - `hsm remote clean` refuses a tree where a task still runs.
 - HSM's commands run in `bash` whatever your login shell is. One alias must mean
   one machine (a load-balanced alias can't find its tasks again). On a host whose
