@@ -514,9 +514,10 @@ absent; it's safe to delete and re-create.
 
 By default `LocalComputeSource` asks `nvidia-smi` for its GPUs and uses
 every one that is *free* (under 5% utilisation and 500 MB used); a GPU a
-co-tenant is using is skipped, and the setup log names it. On a shared GPU
-box where (e.g.) `GPU:0` is reserved for interactive work, set
-`visible_gpus` to exclude it even when idle. Indices are **nvidia-smi's**
+co-tenant is using is skipped, and the setup log names it. HSM never joins a
+busy GPU unless you pass `--gpus all`. On a shared GPU box where (e.g.)
+`GPU:0` is reserved for interactive work, set `visible_gpus` to exclude it
+even when idle. Indices are **nvidia-smi's**
 (PCI bus order), not CUDA's default fastest-first order; the task script
 exports `CUDA_DEVICE_ORDER=PCI_BUS_ID` so CUDA agrees:
 
@@ -529,19 +530,20 @@ local:
 CLI `--gpus` uses the same shape and overrides the config value:
 
 ```bash
-hsm sweep run --mode local --gpus 1,2,3        # explicit allowlist (overrides config)
-hsm sweep run --mode local --gpus 2            # first 2 visible GPUs
+hsm sweep run --mode local --gpus 1,2,3        # explicit allowlist (overrides config), busy ones skipped
+hsm sweep run --mode local --gpus 2            # first 2 free GPUs
 hsm sweep run --mode local --gpus cpu          # CPU-only (CUDA_VISIBLE_DEVICES=)
 hsm sweep run --mode local --gpus all          # every detected GPU, busy or not
 ```
 
-An explicit allowlist is used as given, busy GPUs included. Indices in
-`visible_gpus` that aren't in `nvidia-smi` output are
+Indices in `visible_gpus` that aren't in `nvidia-smi` output are
 warned-and-dropped at setup time (stale allowlists fail loud but don't
-crash the sweep). A task with `gpus: N` that finds no full slot of allowed
-GPUs runs on CPU with no GPU visible, and HSM warns. The source runs one
-task per slot at a time (`--parallel-jobs` / `local_max_jobs` only sizes
-the CPU fallback).
+crash the sweep). A task with `gpus: N` that finds no full slot of free
+allowed GPUs stops the run at setup, naming the busy GPUs: wait, or pass
+`--gpus all`. It runs on CPU (with a warning) only on a box without GPUs or
+with `--gpus cpu`. `--mode local` runs one task per slot at a time; in
+`--mode distributed`, `local_max_jobs` caps the local child, at most one task
+per slot.
 
 **Precedence** (highest wins): CLI `--gpus` > `local.visible_gpus` >
 every free GPU.

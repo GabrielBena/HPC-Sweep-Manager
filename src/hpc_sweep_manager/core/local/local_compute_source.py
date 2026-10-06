@@ -15,6 +15,7 @@ uses, so a task directory looks the same regardless of backend.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -29,13 +30,15 @@ from ..common.resource_spec import ResourceSpec
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.gpu_probe import NVIDIA_SMI_QUERY, GpuInfo, parse_nvidia_smi_csv
 from ..remote.push_exec import (
+    check_gpu_slots,
+    cpu_only,
     normalize_gpu_allowlist,
     partition_gpu_slots,
     resolve_run_prefix,
-    warn_cpu_fallback,
 )
 
 logger = logging.getLogger(__name__)
+_PROBE_TIMEOUT_S = 30
 
 
 async def _detect_gpus() -> list[GpuInfo]:
@@ -48,7 +51,13 @@ async def _detect_gpus() -> list[GpuInfo]:
         )
     except (FileNotFoundError, OSError):
         return []
-    stdout, _ = await proc.communicate()
+    try:  # a hung nvidia-smi must not hang setup or the dry run
+        stdout, _ = await asyncio.wait_for(proc.communicate(), _PROBE_TIMEOUT_S)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        logger.warning(f"nvidia-smi did not answer in {_PROBE_TIMEOUT_S} s: no GPU is used")
+        return []
     if proc.returncode != 0:
         return []
     return parse_nvidia_smi_csv(stdout.decode("utf-8", errors="replace"))
@@ -71,7 +80,7 @@ class LocalComputeSource(ComputeSource):
         ``visible_gpus`` is the GPU allowlist (same shape as the ``--gpus``
         CLI flag and ``normalize_gpu_allowlist``): ``None`` = every free GPU
         (``"all"``: busy too), ``0`` = CPU-only, ``N`` = first N
-        detected, ``[i, j, k]`` = exactly those indices. Filter is applied
+        free, ``[i, j, k]`` = those indices, if free. Filter is applied
         in :meth:`setup` after detection; indices in the allowlist that
         aren't actually present are warned-and-dropped.
 
@@ -130,18 +139,21 @@ class LocalComputeSource(ComputeSource):
                 if missing:
                     logger.warning(
                         f"LocalComputeSource: visible_gpus references indices "
-                        f"not present in nvidia-smi -L output: {missing}. "
+                        f"not present in nvidia-smi output: {missing}. "
                         f"Detected: {detected}. Dropping the missing ones."
                     )
         self._gpu_indices, gpus_per_job = plan["visible_gpus"], plan["gpus_per_job"]
-        warn_cpu_fallback("LocalComputeSource", slots, gpus_per_job, self._gpu_indices)
-        # Capacity = slot count, so a distributed dispatcher never queues a task behind a slot.
-        self._slot_count = self.max_parallel_jobs = len(slots)
+        if not check_gpu_slots("LocalComputeSource", slots, gpus_per_job, detected, busy):
+            self.stats.health_status = "unhealthy"
+            return False
+        # At most one task per slot, so a distributed dispatcher never queues one behind a slot.
+        self._slot_count = len(slots)
+        self.max_parallel_jobs = min(self.max_parallel_jobs, self._slot_count)
         self._slot_queue = asyncio.Queue()
         for slot in slots:
             self._slot_queue.put_nowait(slot)
         kind = f"GPU slot(s) of {gpus_per_job}" if slots[0] else "CPU slot(s)"
-        skipped = f", busy GPU(s) skipped: {busy}" if self._visible_gpus is None and busy else ""
+        skipped = f", busy GPU(s) skipped: {busy}" if self._visible_gpus != "all" and busy else ""
         logger.info(
             f"LocalComputeSource: {self._slot_count} {kind}, "
             f"GPUs {self._gpu_indices} of {detected}{skipped}"
@@ -165,7 +177,8 @@ class LocalComputeSource(ComputeSource):
         busy = [g.index for g in gpus if not g.is_free]
         visible = normalize_gpu_allowlist(self._visible_gpus, detected, busy)
         gpus_per_job = self.default_spec.gpus or 0
-        slots = partition_gpu_slots(visible, gpus_per_job, self.max_parallel_jobs)
+        cpu = cpu_only(self._visible_gpus)
+        slots = partition_gpu_slots(visible, gpus_per_job, self.max_parallel_jobs, cpu)
         return {
             "detected_gpus": detected,
             "busy_gpus": busy,

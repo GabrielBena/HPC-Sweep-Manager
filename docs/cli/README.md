@@ -45,7 +45,8 @@ hsm sweep run [OPTIONS]
                                      Default 'auto'; with --remote, omitted or 'auto' means 'remote'
   --remote TEXT                      ssh-config alias to push the sweep to. Implies --mode remote.
   --gpus TEXT                        GPU allowlist (local or remote), nvidia-smi indices: every free GPU
-                                     (default), 'all' (busy ones too), 'cpu', int N, or '0,1,3'.
+                                     (default), 'all' (busy ones too), 'cpu', int N (first N free),
+                                     or '0,1,3' (busy ones skipped).
   -d, --dry-run                      Show resolved spec + the exact task-1 command; no submission.
   --count-only                       Count parameter combinations and exit.
   --max-runs INTEGER                 Cap N for testing.

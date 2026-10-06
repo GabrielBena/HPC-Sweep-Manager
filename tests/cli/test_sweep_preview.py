@@ -36,7 +36,7 @@ class TestDescribeGpuAllowlist:
         assert _describe_gpu_allowlist(0) == "CPU only"
 
     def test_int_n(self):
-        assert _describe_gpu_allowlist(3) == "first 3 GPU(s)"
+        assert _describe_gpu_allowlist(3) == "first 3 free GPU(s)"
 
     def test_index_list(self):
         assert _describe_gpu_allowlist([1, 2, 3]) == "GPUs [1, 2, 3]"
@@ -91,14 +91,13 @@ class TestRenderPairedGroups:
         assert _capture(lambda c: _render_paired_groups({}, c)) == ""
 
 
-def test_the_local_placement_names_the_busy_gpus_it_skips(fake_gpus):
+def _local_placement() -> str:
     from hpc_sweep_manager.cli.sweep import _render_placement
     from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
     from hpc_sweep_manager.core.local.local_compute_source import LocalComputeSource
 
-    fake_gpus.set_busy(0)
     spec = ResourceSpec(gpus=1)
-    out = _capture(
+    return _capture(
         lambda console: _render_placement(
             source=LocalComputeSource(max_parallel_jobs=1, default_spec=spec),
             resolved_mode="local",
@@ -109,5 +108,17 @@ def test_the_local_placement_names_the_busy_gpus_it_skips(fake_gpus):
             console=console,
         )
     )
+
+
+def test_the_local_placement_names_the_busy_gpus_it_skips(fake_gpus):
+    fake_gpus.set_busy(0)
+    out = _local_placement()
     assert "using [1, 2, 3] (of [0, 1, 2, 3] detected, busy: [0])" in out
     assert "Concurrency: 3 parallel slot(s)" in out
+
+
+def test_the_local_placement_says_a_gpu_job_with_every_gpu_busy_stops(fake_gpus):
+    fake_gpus.set_busy(0, 1, 2, 3)
+    out = _local_placement()
+    assert "no full slot of 1 free allowed GPU(s)" in out
+    assert "The run stops at setup: wait, or pass --gpus all" in out

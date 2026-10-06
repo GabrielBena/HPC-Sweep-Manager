@@ -298,37 +298,50 @@ class TestSetup:
         assert src._gpu_indices == []
         assert src._slot_count == 3
         slots = [src._slot_queue.get_nowait() for _ in range(3)]
-        assert slots == [[], [], []]  # CPU slots, no GPU visible
+        assert slots == [None, None, None]  # CPU slots; the probe failed: environment left alone
 
-    async def test_no_allowlist_skips_busy_gpus_and_capacity_is_the_slot_count(self, tmp_path):
+    async def test_no_allowlist_skips_busy_gpus_and_capacity_is_bounded_by_slots(self, tmp_path):
         busy_0_2 = NVIDIA_SMI_SAMPLE_4_GPUS.replace(
             "0, NVIDIA H100, 12, 81920, 0", "0, NVIDIA H100, 30000, 81920, 97"
         ).replace("2, NVIDIA H100, 12", "2, NVIDIA H100, 9000")
         src = _make_src(
             tmp_path,
             fake_conn=FakeConn(gpu_csv=busy_0_2),
-            max_parallel_jobs=1,
+            max_parallel_jobs=8,
             default_spec=ResourceSpec(gpus=1),
         )
         await src.setup(tmp_path / "sweep", "test_sweep")
         assert [src._slot_queue.get_nowait() for _ in range(2)] == [[1], [3]]
         assert src.max_parallel_jobs == src._slot_count == 2
 
-    async def test_an_explicit_allowlist_keeps_a_busy_gpu(self, tmp_path):
+    async def test_only_all_takes_a_busy_gpu(self, tmp_path):
         busy_0 = NVIDIA_SMI_SAMPLE_4_GPUS.replace(
             "0, NVIDIA H100, 12, 81920, 0", "0, NVIDIA H100, 30000, 81920, 97"
         )
-        for gpus, want in (([0, 1], [[0], [1]]), ("all", [[0], [1], [2], [3]])):
+        for gpus, want in (([0, 1], [[1]]), (1, [[1]]), ("all", [[0], [1], [2], [3]])):
             src = _make_src(
                 tmp_path,
                 fake_conn=FakeConn(gpu_csv=busy_0),
                 gpus=gpus,
+                max_parallel_jobs=4,
                 default_spec=ResourceSpec(gpus=1),
             )
             await src.setup(tmp_path / "sweep", "test_sweep")
-            assert [src._slot_queue.get_nowait() for _ in range(len(want))] == want
+            slots = [src._slot_queue.get_nowait() for _ in range(src._slot_queue.qsize())]
+            assert slots == want, gpus
 
-    async def test_a_gpu_job_left_on_cpu_warns(self, tmp_path, caplog):
+    async def test_a_gpu_job_with_every_gpu_busy_fails_before_any_remote_write(
+        self, tmp_path, caplog
+    ):
+        every_gpu_busy = NVIDIA_SMI_SAMPLE_4_GPUS.replace(", 12, 81920, 0", ", 30000, 81920, 97")
+        fake_conn = FakeConn(gpu_csv=every_gpu_busy)
+        src = _make_src(tmp_path, fake_conn=fake_conn, default_spec=ResourceSpec(gpus=1))
+        assert await src.setup(tmp_path / "sweep", "test_sweep") is False
+        assert "busy: [0, 1, 2, 3]: wait, or pass --gpus all" in caplog.text
+        assert src._rsync_calls == []
+        assert not any("mkdir" in c["cmd"] for c in fake_conn.run_calls)
+
+    async def test_gpus_cpu_keeps_a_gpu_job_on_cpu_with_a_warning(self, tmp_path, caplog):
         src = _make_src(
             tmp_path,
             fake_conn=FakeConn(gpu_csv=NVIDIA_SMI_SAMPLE_4_GPUS),
@@ -336,8 +349,9 @@ class TestSetup:
             default_spec=ResourceSpec(gpus=1),
         )
         with caplog.at_level("WARNING"):
-            await src.setup(tmp_path / "sweep", "test_sweep")
-        assert any("anahita@anahita: 1 GPU(s) per task" in r.message for r in caplog.records)
+            assert await src.setup(tmp_path / "sweep", "test_sweep")
+        assert src._slot_queue.get_nowait() == []
+        assert "anahita@anahita: 1 GPU(s) per task, but --gpus cpu" in caplog.text
 
     async def test_rsync_failure_marks_unhealthy(self, tmp_path):
         fake_conn = FakeConn()

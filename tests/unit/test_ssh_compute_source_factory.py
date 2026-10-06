@@ -71,6 +71,12 @@ class TestBuildSshSource:
         assert src.keep_remote_on_success is False
         assert src.rsync_excludes  # populated from DEFAULT_RSYNC_EXCLUDES
 
+    def test_a_yaml_string_gpus_is_parsed_like_the_cli_flag(self):
+        # Never iterated char by char ("1,2" used to become [] — CPU only).
+        for raw, want in (("1,2", [1, 2]), ("ALL", "all"), ("cpu", 0), ("2", 2)):
+            src = build_ssh_source(name="box", remote_cfg={"gpus": raw}, **self.DEFAULTS)
+            assert src._gpus_config == want, raw
+
     def test_per_remote_overrides_global(self):
         distributed = {
             "conda_env": "lab",

@@ -77,18 +77,20 @@ Two **different** concepts, both required for real GPU sweeps:
   task script exports `CUDA_DEVICE_ORDER=PCI_BUS_ID` with
   `CUDA_VISIBLE_DEVICES`, so CUDA numbers them the same way (its default
   order is fastest-first, which can differ).
-  - not set (default): every GPU `nvidia-smi` reports *free* (under 5%
-    utilisation and 500 MB used); the busy ones are skipped and logged, so a
-    sweep never joins a co-tenant's GPU.
+  Every form but `all` skips the GPUs `nvidia-smi` shows busy (5%
+  utilisation or more, or 500 MB used) and logs them, so a sweep never joins
+  a co-tenant's GPU.
+  - not set (default): every free GPU.
   - `all`: every GPU `nvidia-smi` reports, busy or not.
   - `cpu` or `0`: CPU-only; tasks get `CUDA_VISIBLE_DEVICES=` (no GPU).
-  - `N` (single int): take the first `N` detected GPUs.
-  - `i,j,k` (comma-list): explicit GPU indices, busy or not.
+  - `N` (single int): take the first `N` free GPUs.
+  - `i,j,k` (comma-list): explicit GPU indices, if free.
 - **`spec.gpus = N`** (in `--resources "--gpus=N"`): how many GPUs each
   task gets. Set this if you want CUDA_VISIBLE_DEVICES exported per
   task. Without it the slot queue falls back to CPU slots. A task asking
-  for GPUs that finds no full slot of allowed GPUs runs on CPU (no GPU
-  visible), with a warning. The remote runs one task per slot at a time.
+  for GPUs that finds no full slot of free allowed GPUs stops the run at
+  setup (it runs on CPU, with a warning, only on a box without GPUs or with
+  `--gpus cpu`). The remote runs at most one task per slot at a time.
 
 Example combos:
 
@@ -512,10 +514,9 @@ the launcher:
 - **`CUDA_VISIBLE_DEVICES=<unset>` in sentinel:** you ran with `--gpus`
   but no `--resources "--gpus=N"`, so the slot queue picked CPU slots.
   Pass both.
-- **`CUDA_VISIBLE_DEVICES=` (empty) and a "running … on CPU" warning:** no full
-  slot of allowed GPUs: every GPU was busy (see the setup log), or the
-  allowlist is smaller than `--gpus=N`. Name the GPUs with `--gpus` to use a
-  busy one anyway.
+- **Setup fails with "no full slot of free allowed GPUs … busy: [...]":** every
+  allowed GPU is in use (or the allowlist is smaller than `--gpus=N`). Wait,
+  or pass `--gpus all` to share a busy GPU anyway.
 
 ## See also
 

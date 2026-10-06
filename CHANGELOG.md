@@ -190,21 +190,29 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   reservation at setup. It now warns at submission only about a maintenance window
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
-- **GPU indices are nvidia-smi's, and co-tenants' GPUs are avoided (X4).** HSM numbers
-  GPUs as `nvidia-smi` does (PCI bus order), but CUDA's default order is fastest-first,
-  so on anahita `--gpus 1` ran on nvidia-smi #3. The local and SSH task scripts now
-  export `CUDA_DEVICE_ORDER=PCI_BUS_ID` with `CUDA_VISIBLE_DEVICES`. With no allowlist
-  (`--gpus` / `local.visible_gpus` / a remote's `gpus`), HSM now uses only the GPUs
-  `nvidia-smi` shows free (under 5% utilisation and 500 MB used) and logs the busy ones
-  it skipped; it used to take every GPU, a co-tenant's included. `--gpus all` (or a
-  remote's `gpus: all`, which used to mean CPU-only) takes every GPU, busy or not, and
-  an explicit list is used as given. `--gpus cpu` renders `CUDA_VISIBLE_DEVICES=` (no
-  GPU visible; it used to leave the variable unset), and so does a GPU job that finds
-  no full slot of allowed GPUs, which now runs on CPU with a warning instead of
-  silently. A local or SSH source's `max_parallel_jobs` is its slot count after setup,
-  so a distributed sweep hands it as many tasks as it has slots. **Compatibility:** an
-  allowlist written in CUDA's default order must be restated in nvidia-smi order (on
-  anahita, `local.visible_gpus: [2, 3]`, the A6000s, becomes `[1, 2]`).
+- **GPU indices are nvidia-smi's, and HSM never joins a busy GPU unless told `all` (X4).**
+  HSM numbers GPUs as `nvidia-smi` does (PCI bus order), but CUDA's default order is
+  fastest-first, so on anahita an index inside a list (`--gpus 1,2`) ran on nvidia-smi #3
+  and #1. The local and SSH task scripts now export `CUDA_DEVICE_ORDER=PCI_BUS_ID` with
+  `CUDA_VISIBLE_DEVICES`. HSM now skips the GPUs `nvidia-smi` shows busy (5% utilisation
+  or more, 500 MB used or more, or unreadable as on a MIG GPU) and logs them, for no
+  allowlist, a list (`--gpus 1,2`, `local.visible_gpus`, a remote's `gpus:`) and a count
+  (`--gpus N` = the first N free); it used to take them, a co-tenant's included. Only
+  `--gpus all` takes every GPU, busy or not. A GPU job (`spec.gpus > 0`) that finds no
+  full slot of free allowed GPUs on a box with GPUs now fails setup with an error naming
+  the busy ones ("wait, or pass --gpus all"), instead of running on CPU; it still runs on
+  CPU, with a warning, on a box without GPUs or with `--gpus cpu`. A task's GPU
+  visibility follows the config, not the load: `--gpus cpu` renders
+  `CUDA_VISIBLE_DEVICES=` (no GPU; the variable used to be unset), and a CPU task under
+  any other allowlist keeps its environment. A local or SSH source takes at most one task
+  per slot in `--mode distributed` (its `max_parallel_jobs` is capped by its slot count).
+  A remote's `gpus:` written as a string (`"1,2"`, `ALL`, `cpu`) is parsed like `--gpus`
+  (`"1,2"` used to mean CPU-only, as did `gpus: all`), and a hung local `nvidia-smi` times
+  out after 30 s. **Compatibility:** an allowlist written in CUDA's default order must be
+  restated in nvidia-smi order (on anahita, `local.visible_gpus: [2, 3]`, the A6000s,
+  becomes `[1, 2]`). **For consumers:** a remote's `gpus: 0` now renders an empty
+  `CUDA_VISIBLE_DEVICES` (no GPU), and lists and counts skip busy GPUs (`--gpus all`
+  takes them).
 
 - **ssh tasks run detached (X1, X-2).** Each task held an ssh channel for its whole run, so
   about 10 concurrent tasks hit sshd's `MaxSessions` and a submit failure aborted the sweep;

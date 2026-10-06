@@ -224,7 +224,7 @@ class DistributedComputeSource(ComputeSource):
         if not ready:
             logger.error("DistributedComputeSource: no child source is ready")
         self._child_sources = ready
-        self.max_parallel_jobs = sum(c.max_parallel_jobs for c in ready) or 1  # set up: slot counts
+        self.max_parallel_jobs = sum(c.max_parallel_jobs for c in ready) or 1  # now slot-capped
         self.sweep_dir, self.sweep_id = sweep_dir, sweep_id
         self.stats.health_status = "healthy" if ready else "unhealthy"
         self.stats.last_health_check = datetime.now()

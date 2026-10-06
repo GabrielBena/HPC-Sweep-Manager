@@ -193,7 +193,7 @@ def _describe_gpu_allowlist(allow) -> str:
     if isinstance(allow, bool):  # bool is an int subclass — guard first
         return "all detected GPUs" if allow else "CPU only"
     if isinstance(allow, int):
-        return "CPU only" if allow == 0 else f"first {allow} GPU(s)"
+        return "CPU only" if allow == 0 else f"first {allow} free GPU(s)"
     if isinstance(allow, (list, tuple)):
         return f"GPUs {list(allow)}" if allow else "CPU only"
     return str(allow)
@@ -256,13 +256,17 @@ def _render_placement(
                 )
             else:
                 workers = plan["slot_count"]
-                if detected and gpus_per_task == 0:
-                    why = f"{len(detected)} GPU(s) present but spec.gpus=0 — set local.gpus"
-                elif detected and gpus_per_task:
-                    why = (
-                        f"allowed {plan['visible_gpus']} (of {detected}{busy}) "
-                        f"smaller than {gpus_per_task} GPU/task"
+                if detected and gpus_per_task and plan["slots"][0] is None:
+                    console.print(
+                        f"  GPUs: no full slot of {gpus_per_task} free allowed GPU(s): allowed "
+                        f"{plan['visible_gpus']} (of {detected}{busy}). The run stops at setup: "
+                        "wait, or pass --gpus all"
                     )
+                    return
+                if plan["slots"][0] == []:
+                    why = "--gpus cpu"
+                elif detected:
+                    why = f"{len(detected)} GPU(s) present but spec.gpus=0 — set local.gpus"
                 else:
                     why = "no GPUs detected"
                 console.print(f"  GPUs: CPU-only ({why})")
@@ -1031,8 +1035,8 @@ def sweep_cmd(ctx):
     "gpus_arg",
     help=(
         "GPU allowlist, nvidia-smi indices: every free GPU by default; 'all' (busy "
-        "ones too), 'cpu', an int N (first N detected), or a comma-separated list "
-        "like '0,1,3'. Works with both "
+        "ones too), 'cpu', an int N (first N free), or a comma-separated list "
+        "like '0,1,3' (busy ones skipped). Works with both "
         "--mode local and --mode remote. For --mode local, the sticky-per-machine "
         "default lives in `local.visible_gpus`; CLI here overrides it."
     ),
