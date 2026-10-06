@@ -19,6 +19,7 @@ from rich.table import Table
 
 from ..core.common.config import MACHINE_CONFIG_PATH
 from ..core.common.path_detector import PathDetector
+from ..core.common.yaml_loader import load_yaml
 from .common import common_options
 
 _MIN_DISK_FREE_BYTES = 50 * 1024**3  # 50 GB — anything smaller isn't worth redirecting to.
@@ -577,7 +578,7 @@ def init_project(
         try:
             # Load existing config to preserve settings
             with open(old_config_path) as f:
-                existing_config = yaml.safe_load(f)
+                existing_config = load_yaml(f)
 
             config = _extract_config_from_existing(existing_config, project_path)
             migrating = True

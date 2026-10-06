@@ -26,6 +26,7 @@ import yaml
 
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
+from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class SweepCompletionAnalyzer:
             # Load source mapping if it exists
             if self.source_mapping_path.exists():
                 with open(self.source_mapping_path) as f:
-                    self.source_mapping = yaml.safe_load(f)
+                    self.source_mapping = load_yaml(f)
             else:
                 logger.warning(f"Source mapping not found: {self.source_mapping_path}")
                 self.source_mapping = {"task_assignments": {}}
@@ -480,7 +481,7 @@ class SweepCompletionAnalyzer:
                 }
             else:
                 with open(self.source_mapping_path) as f:
-                    mapping_data = yaml.safe_load(f) or {}
+                    mapping_data = load_yaml(f) or {}
 
             # Update task assignments with actual statuses
             for task_id, task_info in task_statuses.items():

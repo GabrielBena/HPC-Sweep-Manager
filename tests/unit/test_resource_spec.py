@@ -92,6 +92,19 @@ class TestResourceSpecValidation:
             ResourceSpec(modules=(123,))  # type: ignore[arg-type]
 
 
+class TestWalltime:
+    """C4: walltime must be a Slurm time STRING — an int renders as minutes."""
+
+    @pytest.mark.parametrize("ok", ["12:00:00", "1:00:00", "48:00:00", "1-00:00:00", "30:00"])
+    def test_valid_forms(self, ok):
+        assert ResourceSpec(walltime=ok).walltime == ok
+
+    @pytest.mark.parametrize("bad", [43200, 12.5, "2h", "12:0:00", "1-2", ""])
+    def test_rejected_with_quote_hint(self, bad):
+        with pytest.raises(ValueError, match="quote it"):
+            ResourceSpec(walltime=bad)
+
+
 class TestResourceSpecFromDict:
     def test_empty_dict(self):
         assert ResourceSpec.from_dict({}) == ResourceSpec()

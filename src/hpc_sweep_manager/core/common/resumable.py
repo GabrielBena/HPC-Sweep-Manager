@@ -48,7 +48,7 @@ def is_hms(walltime: str) -> bool:
     two-part ``MM:SS`` form — a chunk cap written ``23:00`` would silently mean
     23 *minutes*, the exact gpu_planner trap. Slurm ``--time`` wants HH:MM:SS.
     """
-    parts = (walltime or "").split(":")
+    parts = walltime.split(":") if isinstance(walltime, str) else []
     return len(parts) == 3 and all(p.isdigit() for p in parts)
 
 
@@ -101,8 +101,8 @@ class ResumableConfig:
             )
         if self.chunk_walltime is not None and not is_hms(self.chunk_walltime):
             errors.append(
-                f"resumable.chunk_walltime {self.chunk_walltime!r} is not HH:MM:SS "
-                f"(a two-part value like '23:00' would mean 23 MINUTES)"
+                f"resumable.chunk_walltime {self.chunk_walltime!r} is not an HH:MM:SS "
+                f"string; quote it in YAML (a two-part '23:00' would mean 23 MINUTES)"
             )
         if self.signal_grace < 0:
             errors.append("resumable.signal_grace must be >= 0")

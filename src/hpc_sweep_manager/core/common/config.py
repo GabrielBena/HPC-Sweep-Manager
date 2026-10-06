@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 import yaml
 
+from .yaml_loader import load_yaml
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +38,7 @@ def _load_yaml_dict(path: Path) -> dict[str, Any] | None:
     """
     try:
         with open(path) as f:
-            data = yaml.safe_load(f)
+            data = load_yaml(f)
     except Exception as e:
         logger.warning(f"Failed to load HSM config from {path}: {e}")
         return None
@@ -116,7 +118,7 @@ class SweepConfig:
             raise FileNotFoundError(f"Sweep config not found: {config_path}")
 
         with open(config_path) as f:
-            raw_config = yaml.safe_load(f)
+            raw_config = load_yaml(f)
 
         return cls.from_dict(raw_config)
 

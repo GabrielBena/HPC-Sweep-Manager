@@ -80,6 +80,14 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `pre_script` naming it is pointed at `$HSM_CODE_DIR` with a warning. **Upgrade
   every HSM that launches on a remote together:** an older one keeps pushing to the
   shared `code/` dir.
+- **YAML 1.1 numbers changed sweep values and walltimes (C4).** `1e-1`
+  loaded as a string, `[007, 010]` as `[7, 8]` (octal), and an unquoted
+  `walltime: 12:00:00` as the int 43200, which rendered `--time=43200`
+  (30 days); an unquoted `chunk_walltime` crashed the resumable check. Sweep
+  files and `.hsm/config.yaml` now load with YAML 1.2 numbers (decimal ints,
+  `1e-1` floats; `yes`/`no` unchanged), and a `walltime` or `chunk_walltime`
+  that isn't a `[D-]HH:MM:SS` / `MM:SS` string is an error asking you to
+  quote it.
 
 ### Removed (2026-10 maintenance pass)
 
