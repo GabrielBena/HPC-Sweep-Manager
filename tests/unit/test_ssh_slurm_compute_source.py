@@ -564,39 +564,16 @@ class TestStatus:
 
 
 class TestReservationWarning:
-    @pytest.mark.asyncio
-    async def test_setup_warns_on_reservation(self, tmp_path, caplog):
+    """Tracker S7: warn when a maintenance window starts before a job of this walltime ends."""
+
+    MAINT = (
+        "ReservationName=maint StartTime=2026-10-07T06:00:00 EndTime=2026-10-07T18:00:00 "
+        "Duration=12:00:00 Nodes=ALL NodeCnt=400 Flags=MAINT,SPEC_NODES\n"
+    )
+
+    async def _submit(self, tmp_path, caplog, now, walltime):
         import logging
 
-        conn = FakeConn(responder=_setup_ok_responder())
-        conn.add(
-            "scontrol show reservations",
-            _Result(
-                0,
-                stdout=(
-                    "ReservationName=maint StartTime=2026-06-04T06:00:00 "
-                    "EndTime=2026-06-04T18:00:00 Duration=12:00:00 "
-                    "Nodes=n[1-2] NodeCnt=2\n"
-                ),
-            ),
-        )
-        src = _StubSrc(
-            name="uzh",
-            host="uzh",
-            project_dir=str(tmp_path),
-            script_path="t.py",
-            fake_conn=conn,
-        )
-        with caplog.at_level(logging.WARNING):
-            await src.setup(tmp_path / "sweep", "sw1")
-        assert any("reservation" in r.message.lower() for r in caplog.records)
-        assert any("collect" in r.message.lower() for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_setup_quiet_without_reservation(self, tmp_path, caplog):
-        import logging
-
-        # Default responder → scontrol returns empty → no warning.
         conn = FakeConn(responder=_setup_ok_responder())
         src = _StubSrc(
             name="uzh",
@@ -604,10 +581,25 @@ class TestReservationWarning:
             project_dir=str(tmp_path),
             script_path="t.py",
             fake_conn=conn,
+            default_spec=ResourceSpec(walltime=walltime),
         )
+        await src.setup(tmp_path / "sweep", "sw1")
+        conn.add("scontrol show reservations", _Result(0, stdout=f"{now}\n{self.MAINT}"))
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
         with caplog.at_level(logging.WARNING):
-            await src.setup(tmp_path / "sweep", "sw1")
-        assert not any("reservation" in r.message.lower() for r in caplog.records)
+            await src.submit_batch([{"s": 0}], "sw1", mode="array")
+        return [r.message for r in caplog.records if "Reservation" in r.message]
+
+    @pytest.mark.asyncio
+    async def test_a_walltime_crossing_maintenance_is_warned(self, tmp_path, caplog):
+        msgs = await self._submit(tmp_path, caplog, "2026-10-06T10:00:00", "47:30:00")
+        assert len(msgs) == 1
+        assert "won't start before 2026-10-07T18:00:00" in msgs[0]
+        assert "a walltime ≤ 20:00:00 would start now" in msgs[0]
+
+    @pytest.mark.asyncio
+    async def test_a_job_ending_before_maintenance_is_not_warned(self, tmp_path, caplog):
+        assert not await self._submit(tmp_path, caplog, "2026-10-06T10:00:00", "04:00:00")
 
 
 class TestManifest:

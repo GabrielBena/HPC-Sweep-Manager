@@ -43,6 +43,9 @@ class ResourceSpec:
     # At most this many tasks of an array run at once (`--array=1-K%N`): a shared account's
     # co-workers keep their priority (tracker S5).
     array_throttle: int | None = None
+    # A job without GPUs keeps off the partition's GPU nodes (its CPUs and memory belong to GPU
+    # jobs); None means yes. Set False to allow them (tracker S6; Gabriel, 2026-10-06).
+    cpu_only_nodes: bool | None = None
 
     def __post_init__(self) -> None:
         if self.mem is not None and self.mem_per_cpu is not None:

@@ -38,6 +38,12 @@ SLURM_STATE_MAP: dict[str, str] = {
 }
 
 
+def directive_flag(key: str) -> str:
+    """``exclude`` → ``--exclude``: an ``extra_directives`` key without its dashes was
+    rendered verbatim (``#SBATCH exclude=…``), which Slurm ignores (tracker S6)."""
+    return key if key.startswith("-") else f"--{key}"
+
+
 def format_signal(grace: int) -> str:
     """The ``--signal`` token HSM uses for the pre-walltime save (issue #12).
 
@@ -99,6 +105,7 @@ def render_sbatch_directives(
     if spec.account:
         lines.append(f"#SBATCH --account={spec.account}")
     for key, value in spec.extra_directives:
+        key = directive_flag(key)
         if value:
             lines.append(f"#SBATCH {key}={value}")
         else:

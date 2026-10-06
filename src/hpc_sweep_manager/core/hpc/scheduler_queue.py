@@ -96,6 +96,7 @@ class Reservation:
     duration: str
     nodes: str
     node_count: int
+    flags: str = ""  # e.g. "MAINT,SPEC_NODES"
 
 
 @dataclass(frozen=True)
@@ -971,6 +972,7 @@ def parse_reservations_output(stdout: str) -> list[Reservation]:
                 duration=fields.get("Duration", "?"),
                 nodes=fields.get("Nodes", "?"),
                 node_count=node_count,
+                flags=fields.get("Flags", ""),
             )
         )
     return out

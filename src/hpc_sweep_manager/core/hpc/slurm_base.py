@@ -15,10 +15,20 @@ import getpass
 import logging
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
+from datetime import datetime
 
 from ..common.compute_source import TERMINAL_STATES, ComputeSource, JobInfo
-from .scheduler_queue import parse_sacct_job_states, sacct_args, strip_array_suffix
-from .slurm_protocol import SLURM_STATE_MAP
+from ..common.resource_spec import ResourceSpec
+from ..common.utils import format_walltime, parse_walltime
+from .scheduler_queue import (
+    Reservation,
+    parse_reservations_output,
+    parse_sacct_job_states,
+    sacct_args,
+    strip_array_suffix,
+)
+from .slurm_protocol import SLURM_STATE_MAP, directive_flag
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +86,7 @@ class SlurmBase(ComputeSource):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._sacct_misses: dict[str, int] = {}  # job -> polls in a row with no accounting record
+        self._gpu_nodes: dict[str, list[str]] = {}  # partition -> its GPU nodes (one sinfo each)
 
     @abstractmethod
     async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
@@ -137,3 +148,58 @@ class SlurmBase(ComputeSource):
                 await asyncio.sleep(pause)
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
+
+    async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
+        """A CPU-only job excludes its partition's GPU nodes (24 of ~300 CPU tasks once sat on
+        GPU nodes, taking their CPUs and memory); an ``--exclude`` already given is kept."""
+        if spec.gpus or spec.cpu_only_nodes is False:
+            return spec
+        part = spec.partition or ""
+        if part not in self._gpu_nodes:
+            argv = ["sinfo", "-h", "-N", "-o", "%N %G", *(["-p", part] if part else [])]
+            rc, out, _ = await self._sh(argv)
+            rows = [line.split() for line in out.splitlines()] if rc == 0 else []
+            self._gpu_nodes[part] = sorted({r[0] for r in rows if len(r) > 1 and r[1] != "(null)"})
+            if self._gpu_nodes[part]:
+                logger.info(f"CPU-only jobs exclude {len(self._gpu_nodes[part])} GPU node(s)")
+        if not self._gpu_nodes[part]:
+            return spec
+        extra = {directive_flag(k): v for k, v in spec.extra_directives}
+        exclude = [extra.get("--exclude"), *self._gpu_nodes[part]]
+        extra["--exclude"] = ",".join(filter(None, exclude))
+        return replace(spec, extra_directives=tuple(extra.items()))
+
+    async def _warn_reservations(self, walltime: str | None) -> None:
+        """Warn when a maintenance reservation starts before a job of ``walltime`` could end:
+        Slurm then holds the job until the reservation is over (once ~20 h, 1,600 CPUs idle)."""
+        rc, out, _ = await self._sh(["bash", "-c", "date +%FT%T; scontrol show reservations"])
+        try:  # best effort: a check that can't read the cluster's clock says nothing
+            now = datetime.fromisoformat(out.splitlines()[0].strip()) if rc == 0 else None
+        except (ValueError, IndexError):
+            now = None
+        if now is None:
+            return
+        span = parse_walltime(walltime) if walltime else 0
+        for res in blocking_reservations(parse_reservations_output(out), now, span):
+            free = int((datetime.fromisoformat(res.start_time) - now).total_seconds())
+            hint = f"; a walltime ≤ {format_walltime(free)} would start now" if free > 0 else ""
+            logger.warning(
+                f"Reservation {res.name} ({res.start_time} → {res.end_time}) overlaps a "
+                f"{walltime or 'job'} walltime: jobs won't start before {res.end_time}{hint}."
+            )
+
+
+def blocking_reservations(
+    reservations: Iterable[Reservation], now: datetime, walltime_s: int
+) -> list[Reservation]:
+    """Maintenance reservations (MAINT, or all nodes) overlapping ``[now, now + walltime_s]``."""
+    hits = []
+    for res in reservations:
+        try:
+            start, end = (datetime.fromisoformat(t) for t in (res.start_time, res.end_time))
+        except ValueError:
+            continue
+        maint = "MAINT" in res.flags or res.nodes == "ALL"
+        if maint and end > now and start.timestamp() < now.timestamp() + walltime_s:
+            hits.append(res)
+    return hits

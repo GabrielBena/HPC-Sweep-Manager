@@ -5,15 +5,21 @@ Tracker S1 (an outage read as COMPLETED cleaned a live sweep dir) and S2 (per-jo
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
+from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
+from hpc_sweep_manager.core.hpc.scheduler_queue import Reservation
 from hpc_sweep_manager.core.hpc.slurm_base import (
     SACCT_GRACE,
     SlurmBase,
+    blocking_reservations,
     queued_states,
     sacct_verdicts,
 )
+from hpc_sweep_manager.core.hpc.slurm_protocol import render_sbatch_directives
 
 
 class TestQueuedStates:
@@ -168,3 +174,49 @@ class TestRefresh:
         assert await src.get_job_status("1") == "PENDING"
         assert await src.get_job_status("2") == "UNKNOWN"
         assert src.calls == []
+
+
+@pytest.mark.asyncio
+class TestCpuOnlyJobsKeepOffGpuNodes:
+    """Tracker S6 (Gabriel, 2026-10-06): 24 of ~300 CPU tasks once sat on GPU nodes."""
+
+    SINFO = (0, "cpu-1 (null)\ngpu-1 gpu:A100:4\ngpu-1 gpu:A100:4\ngpu-2 gpu:H100:8\n", "")
+
+    async def test_gpu_nodes_join_an_existing_exclude(self):
+        src = ScriptedSlurm([self.SINFO])
+        spec = ResourceSpec(partition="standard", extra_directives=(("exclude", "old-[1-2]"),))
+        got = await src._off_gpu_nodes(spec)
+        assert dict(got.extra_directives) == {"--exclude": "old-[1-2],gpu-1,gpu-2"}
+        assert await src._off_gpu_nodes(spec) == got and src.calls == ["sinfo"]  # once
+
+    @pytest.mark.parametrize(
+        "spec", [ResourceSpec(gpus=1), ResourceSpec(cpu_only_nodes=False)], ids=["gpu", "opt-out"]
+    )
+    async def test_gpu_jobs_and_opt_outs_are_left_alone(self, spec):
+        src = ScriptedSlurm([])
+        assert await src._off_gpu_nodes(spec) == spec and src.calls == []
+
+
+def test_a_directive_key_without_dashes_still_renders():
+    spec = ResourceSpec(extra_directives=(("exclude", "n1"), ("--nice", "100")))
+    assert render_sbatch_directives(spec).splitlines() == [
+        "#SBATCH --exclude=n1",
+        "#SBATCH --nice=100",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "flags", "nodes", "walltime_h", "blocks"),
+    [
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "MAINT", "n[1-9]", 48, True),
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "", "ALL", 48, True),
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "", "n[1-2]", 48, False),  # not maint
+        ("2026-10-07T06:00:00", "2026-10-07T18:00:00", "MAINT", "ALL", 4, False),  # ends first
+        ("2026-10-05T06:00:00", "2026-10-05T18:00:00", "MAINT", "ALL", 48, False),  # over
+        ("2026-10-06T06:00:00", "2026-10-06T18:00:00", "MAINT", "ALL", 1, True),  # running now
+    ],
+)
+def test_blocking_reservations(start, end, flags, nodes, walltime_h, blocks):
+    res = Reservation("r", start, end, "12:00:00", nodes, 1, flags)
+    now = datetime(2026, 10, 6, 10, 0, 0)
+    assert bool(blocking_reservations([res], now, walltime_h * 3600)) is blocks
