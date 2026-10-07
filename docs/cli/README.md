@@ -28,7 +28,7 @@ Project bootstrap. Run once per ML project.
 
 | Subcommand | What it does |
 |---|---|
-| `hsm setup init` | Auto-detect paths, write `.hsm/config.yaml`, `sweeps/example_sweep.yaml`, etc. Idempotent — re-running migrates an old `sweeps/hsm_config.yaml` to the new `.hsm/` layout. |
+| `hsm setup init` | Auto-detect paths, write `.hsm/config.yaml`, `sweeps/example_sweep.yaml`, etc.; migrates an old `sweeps/hsm_config.yaml` to the new `.hsm/` layout. An initialized project is left as it is: `--regenerate` rewrites the generated files (the old config goes to `.hsm/config.yaml.bak`). |
 | `hsm setup configure` | Interactive sweep-config builder. |
 
 ## `hsm sweep`

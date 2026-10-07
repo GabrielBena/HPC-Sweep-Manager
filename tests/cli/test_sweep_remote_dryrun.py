@@ -16,6 +16,7 @@ import io
 import logging
 from pathlib import Path
 
+import click
 import pytest
 import yaml
 from rich.console import Console
@@ -131,10 +132,10 @@ class TestRemoteAliasGuards:
         # cluster alias means training on the login node).
         _make_project(tmp_path, spec={"walltime": "01:00:00"})
         monkeypatch.chdir(tmp_path)
-        out = _dry_run(remote_alias="uhz")
-        assert "not in distributed.remotes" in out
-        assert "did you mean 'uzh'" in out
-        assert "Execution backend" not in out
+        with pytest.raises(click.ClickException) as exc:  # exit 1 (R8: it exited 0)
+            _dry_run(remote_alias="uhz")
+        assert "not in distributed.remotes" in exc.value.message
+        assert "did you mean 'uzh'" in exc.value.message
 
     def test_null_remotes_block_keeps_bare_alias(self, tmp_path, monkeypatch):
         # `remotes:` with no entries loads as None — must not AttributeError.
@@ -162,12 +163,16 @@ class TestSpecBlockErrors:
         cfg_path.write_text(yaml.safe_dump(cfg))
         monkeypatch.chdir(tmp_path)
         buf = io.StringIO()
-        obj = {"console": Console(file=buf, width=200), "logger": logging.getLogger("t")}
+        quiet = logging.getLogger(
+            "hsm-test-quiet"
+        )  # pytest's log_cli would take CliRunner's stderr
+        quiet.handlers, quiet.propagate = [logging.NullHandler()], False
+        obj = {"console": Console(file=buf, width=200), "logger": quiet}
         args = ["run", "-c", "sweeps/sweep.yaml", "--mode", mode, "--dry-run"]
         result = CliRunner().invoke(sweep_cli.sweep_cmd, args, obj=obj)
         out = buf.getvalue()
-        assert result.exception is None, result.exception
-        assert f"`{block}:` block: ResourceSpec: cpus_per_task must be >= 1" in out
+        assert result.exit_code == 1, result.exception  # R8: it exited 0
+        assert f"`{block}:` block: ResourceSpec: cpus_per_task must be >= 1" in result.output
         assert "Traceback" not in out + result.output
         assert "Execution backend" not in out
 
@@ -230,10 +235,11 @@ class TestRemoteModeReconciliation:
     def test_remote_mode_local_rejected(self, tmp_path, monkeypatch):
         _make_project(tmp_path, spec={"walltime": "01:00:00"})
         monkeypatch.chdir(tmp_path)
-        _result, out, calls = self._run_cmd(
+        result, _out, calls = self._run_cmd(
             monkeypatch,
             ["-c", "sweeps/sweep.yaml", "--remote", "uzh", "--mode", "local"],
         )
-        # Rejected before reaching run_sweep.
+        # Rejected before reaching run_sweep, with exit 1 (R8: it exited 0).
         assert calls == {}
-        assert "can't be combined" in out
+        assert result.exit_code == 1
+        assert "can't be combined" in result.output

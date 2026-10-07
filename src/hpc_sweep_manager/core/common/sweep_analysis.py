@@ -201,7 +201,7 @@ class SweepCompletionAnalyzer:
             except Exception as e:
                 logger.warning(f"Error reading task info for {task_id}: {e}")
                 running_tasks.append(task_id)
-                task_statuses[task_id] = "ERROR"
+                task_statuses[task_id]["status"] = "ERROR"
 
         # Determine missing tasks by checking which task numbers don't exist AT ALL
         # (no directory exists for them)

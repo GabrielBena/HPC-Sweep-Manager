@@ -375,6 +375,23 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   exists failed only once the run started, after a sweep dir had been created.
   `HSMConfig.check_paths()` now runs first, ahead of the dry-run output, and the run exits
   2 with an error naming each missing path and its config key.
+- **Commands no longer report a failure as success (R8).** A pre-flight error of `hsm sweep
+  run` (an invalid sweep or resumable config, a bad `spec:` value, an unknown `--remote`
+  alias, `--remote` with `--mode local`, a `gpu_type` list outside array mode, `--max-runs`
+  with `--resumable`, `config.complete:`) printed in red and exited 0, and so did
+  `status`/`report`/`watch`/`cancel` on a sweep id that doesn't exist. They now exit 1 with
+  `Error: …` on stderr. A sweep that ends with CANCELLED jobs exits 1, like one with FAILED
+  jobs. A missing `local.sweeps_root` was reported as "Sweep config file not found"; its own
+  message is shown now. `hsm sweep report` crashed (`unhashable type: 'dict'`) the first time
+  it read a sweep without task assignments in `source_mapping.yaml`, that is every
+  non-distributed sweep, and every time with `--scan-tasks`; it reads them now.
+  `hsm setup init` on an initialized project rewrote `.hsm/config.yaml` and dropped every
+  hand-added block, `distributed:` among them; it now leaves the project as it is, and
+  `--regenerate` rewrites the config (the old copy goes to `.hsm/config.yaml.bak`, as
+  before), `sweeps/README.md` and `sweeps/example_sweep.yaml`.
+  **For consumers:** exit codes only change in one direction: a failure that exited 0 now
+  exits non-zero (1). A script that re-runs `hsm setup init` to refresh the generated files
+  must add `--regenerate`.
 
 ### Removed (2026-10 maintenance pass)
 

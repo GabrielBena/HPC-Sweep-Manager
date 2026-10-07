@@ -35,31 +35,18 @@ from .launch_gate import fair_share_gate
 logger = logging.getLogger(__name__)
 
 
-def _load_and_validate_config(
-    config_path: Path, console: Console, logger: logging.Logger
-) -> Optional["SweepConfig"]:
-    """Load and validate sweep configuration."""
+def _load_and_validate_config(config_path: Path, logger: logging.Logger) -> "SweepConfig":
+    """Load and validate sweep configuration; a bad one is a ClickException (exit 1)."""
     from ..core.common.config import SweepConfig
 
     try:
         config = SweepConfig.from_yaml(config_path)
-        logger.info(f"Loaded sweep config from {config_path}")
-
-        errors = config.validate()
-        if errors:
-            console.print("[red]Configuration validation failed:[/red]")
-            for error in errors:
-                console.print(f"  - {error}")
-            return None
-
-        return config
-    except FileNotFoundError:
-        console.print(f"[red]Error: Sweep config file not found: {config_path}[/red]")
-        return None
     except Exception as e:
-        console.print(f"[red]Error loading configuration: {e}[/red]")
-        logger.error(f"Configuration loading failed: {e}")
-        return None
+        raise click.ClickException(f"Error loading configuration: {e}") from e
+    logger.info(f"Loaded sweep config from {config_path}")
+    if errors := config.validate():
+        raise click.ClickException("Configuration validation failed:\n  - " + "\n  - ".join(errors))
+    return config
 
 
 def _format_param_values(values, limit: int = 110) -> str:
@@ -547,12 +534,8 @@ def _run_sweep_via_orchestrator(
         cli_chunk_walltime=chunk_walltime,
     )
     if rconf.enabled:
-        errs = rconf.validate()
-        if errs:
-            console.print("[red]Invalid resumable config:[/red]")
-            for e in errs:
-                console.print(f"  [red]- {e}[/red]")
-            return
+        if errs := rconf.validate():
+            raise click.ClickException("Invalid resumable config:\n  - " + "\n  - ".join(errs))
 
     # Resolve auto BEFORE asking spec_from_cli which config block to read —
     # otherwise mode='auto' would silently read the slurm: block on every machine.
@@ -568,8 +551,7 @@ def _run_sweep_via_orchestrator(
         )
         gpus_override = parse_gpus_arg(gpus_arg) if gpus_arg is not None else None
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        return
+        raise click.ClickException(str(e)) from e
     # Resumable chunks are always array submissions (one chunk = one Slurm
     # array of the full param set; done tasks no-op via the sentinel).
     effective_remote_submission = "array" if rconf.enabled else remote_submission
@@ -588,8 +570,7 @@ def _run_sweep_via_orchestrator(
             resumable=rconf.enabled,
         )
     except (ValueError, RuntimeError) as e:
-        console.print(f"[red]Error building compute source: {e}[/red]")
-        return
+        raise click.ClickException(f"Error building compute source: {e}") from e
     if rconf.enabled and sub_mode != "array":
         # Native array mode resolves to sub_mode="array"; a remote slurm backend
         # may default to individual — force array for chains.
@@ -606,12 +587,11 @@ def _run_sweep_via_orchestrator(
     # submission supports that. Fail here (before any dry-run/submission)
     # with the actionable message rather than deep in submit_batch.
     if isinstance(effective_spec.gpu_type, tuple) and sub_mode != "array":
-        console.print(
-            "[red]spec.gpu_type is a list — heterogeneous GPU scheduling "
+        raise click.ClickException(
+            "spec.gpu_type is a list — heterogeneous GPU scheduling "
             "needs array mode (one Slurm array per type). "
-            "Pass `--mode array`.[/red]"
+            "Pass `--mode array`."
         )
-        return
 
     console.print(
         f"[green]Execution backend: {source.source_type} "
@@ -835,7 +815,7 @@ def _run_sweep_via_orchestrator(
         f"in {sub_mode} mode: {', '.join(result.job_ids)}[/green]"
     )
 
-    failed = 0
+    failed = cancelled = 0
     if result.final_statuses:
         completed = sum(1 for s in result.final_statuses.values() if s == "COMPLETED")
         failed = sum(1 for s in result.final_statuses.values() if s == "FAILED")
@@ -902,10 +882,10 @@ def _run_sweep_via_orchestrator(
         f"submitted {len(result.job_ids)} job(s) with {len(combinations)} combinations"
     )
 
-    # Exit non-zero when any job failed so scripts / CI don't treat a failed
+    # Exit non-zero when a job failed or was cancelled so scripts / CI don't treat a failed
     # sweep as success (pairs with the sacct-backed terminal-state detection —
     # a wholly-failed sweep used to print "COMPLETED" and exit 0).
-    if failed:
+    if failed or cancelled:
         raise SystemExit(1)
 
 
@@ -952,9 +932,7 @@ def run_sweep(
         console.print("[yellow]No hsm_config.yaml found - using default values[/yellow]")
 
     try:
-        config = _load_and_validate_config(config_path, console, logger)
-        if config is None:
-            return
+        config = _load_and_validate_config(config_path, logger)
 
         # Unknown keys are ignored, so say so (R4); a stale path stops the run first (R6).
         raw = load_yaml(config_path.read_text())
@@ -980,7 +958,7 @@ def run_sweep(
                 "[yellow]For now, use `hsm sweep status <id>` / `hsm sweep report <id>` "
                 "to inspect, then manually re-submit a filtered sweep.[/yellow]"
             )
-            return
+            raise SystemExit(1)
 
         # Resumable chains re-derive the FULL param set every chunk (and on a
         # detached `advance`); `--max-runs` would truncate the launcher's set but
@@ -989,13 +967,12 @@ def run_sweep(
             resumable_flag or chunk_walltime or (config.resumable or {}).get("enabled")
         )
         if resumable_on and max_runs is not None:
-            console.print(
-                "[red]--max-runs cannot be combined with --resumable: a chain "
+            raise click.ClickException(
+                "--max-runs cannot be combined with --resumable: a chain "
                 "re-submits the full param set each chunk (truncation would drift "
                 "across chunks / on `hsm sweep advance`). Filter the sweep grid "
-                "instead.[/red]"
+                "instead."
             )
-            return
 
         combinations = _generate_parameter_combinations(config, max_runs, count_only, console)
         if combinations is None:
@@ -1013,11 +990,9 @@ def run_sweep(
         python_path, script_path, project_dir = _detect_project_paths(hsm_config, config)
 
         if mode not in _ORCHESTRATOR_MODES:
-            console.print(
-                f"[red]Unknown --mode {mode!r}. "
-                f"Expected one of {sorted(_ORCHESTRATOR_MODES)}.[/red]"
+            raise click.ClickException(
+                f"Unknown --mode {mode!r}. Expected one of {sorted(_ORCHESTRATOR_MODES)}."
             )
-            return
 
         _run_sweep_via_orchestrator(
             config_path=config_path,
@@ -1045,8 +1020,10 @@ def run_sweep(
             force=force,
         )
 
-    except FileNotFoundError:
-        console.print(f"[red]Error: Sweep config file not found: {config_path}[/red]")
+    except click.ClickException:
+        raise  # click prints it and exits 1
+    except FileNotFoundError as e:  # e.g. `local.sweeps_root` missing on this machine
+        raise click.ClickException(str(e)) from e
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         logger.error(f"Sweep execution failed: {e}")
@@ -1150,8 +1127,7 @@ def run_cmd(
     if mode in (None, "auto"):
         mode = "remote" if remote_alias else "auto"  # with --remote, auto means remote
     elif mode == "remote" and not remote_alias:
-        ctx.obj["console"].print("[red]--mode remote requires --remote <alias>[/red]")
-        return
+        raise click.ClickException("--mode remote requires --remote <alias>")
     elif remote_alias and mode in ("array", "individual"):
         # For a remote, --mode array|individual chooses the SUBMISSION STYLE;
         # execution stays remote. Keep mode='remote' so spec_from_cli reads no
@@ -1159,11 +1135,10 @@ def run_cmd(
         remote_submission = mode
         mode = "remote"
     elif remote_alias and mode != "remote":
-        ctx.obj["console"].print(
-            f"[red]--remote can't be combined with --mode {mode!r} "
-            f"(use --mode array|individual to pick submission style, or omit it).[/red]"
+        raise click.ClickException(
+            f"--remote can't be combined with --mode {mode!r} "
+            f"(use --mode array|individual to pick submission style, or omit it)."
         )
-        return
 
     hsm_config = HSMConfig.load()
 
@@ -1642,15 +1617,13 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
     elif sweep_id:
         sweep_dir = Path("sweeps/outputs") / sweep_id
         if not sweep_dir.exists():
-            console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-            return
+            raise click.ClickException(f"Sweep directory not found: {sweep_dir}")
 
         analyzer = SweepCompletionAnalyzer(sweep_dir)
         analysis = analyzer.analyze_completion_status()
 
         if "error" in analysis:
-            console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
-            return
+            raise click.ClickException(f"Error analyzing sweep: {analysis['error']}")
 
         console.print(f"[bold blue]Sweep Status: {sweep_id}[/bold blue]")
         console.print(f"Directory: {sweep_dir}")
@@ -1712,7 +1685,7 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
             )
 
     else:
-        console.print("[red]Error: Please specify a sweep ID or use --all/--incomplete-only[/red]")
+        raise click.ClickException("Please specify a sweep ID or use --all/--incomplete-only")
 
 
 @sweep_cmd.command("report")
@@ -1735,8 +1708,7 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
 
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
-        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-        return
+        raise click.ClickException(f"Sweep directory not found: {sweep_dir}")
 
     console.print(f"[bold blue]Sweep Completion Report: {sweep_id}[/bold blue]")
     console.print(f"Directory: {sweep_dir}")
@@ -1751,8 +1723,7 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
         analysis = analyzer.analyze_completion_status()
 
     if "error" in analysis:
-        console.print(f"[red]Error analyzing sweep: {analysis['error']}[/red]")
-        return
+        raise click.ClickException(f"Error analyzing sweep: {analysis['error']}")
 
     console.print("\n[bold]Summary:[/bold]")
     table = Table()
@@ -1792,8 +1763,8 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
         console.print(f"Total tasks found: {len(analysis['task_statuses'])}")
 
         status_groups: dict = {}
-        for task_id, status in analysis["task_statuses"].items():
-            status_groups.setdefault(status, []).append(task_id)
+        for task_id, info in analysis["task_statuses"].items():  # {"status": ..., ...} per task
+            status_groups.setdefault(info["status"], []).append(task_id)
 
         for status, tasks in sorted(status_groups.items()):
             console.print(f"  {status}: {len(tasks)} tasks")
@@ -2008,8 +1979,7 @@ def watch_cmd(ctx, sweep_id, refresh, once, verbose, quiet):
     console = ctx.obj["console"]
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
-        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-        return
+        raise click.ClickException(f"Sweep directory not found: {sweep_dir}")
 
     analyzer = SweepCompletionAnalyzer(sweep_dir)
 
@@ -2266,8 +2236,7 @@ def cancel_cmd(ctx, sweep_id, yes):
     console = ctx.obj["console"]
     sweep_dir = Path("sweeps/outputs") / sweep_id
     if not sweep_dir.exists():
-        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-        return
+        raise click.ClickException(f"Sweep directory not found: {sweep_dir}")
 
     manifest_path = sweep_dir / ".hsm_manifest.json"
     try:

@@ -60,10 +60,11 @@ sweeps/
 Edit `.hsm/config.yaml` to point at your conda env + training script.
 HSM auto-detects most of this on first run.
 
-Safe to re-run: `hsm setup init` regenerates `.hsm/config.yaml` (the
-previous copy is saved to `.hsm/config.yaml.bak`), `sweeps/README.md`
-and `sweeps/example_sweep.yaml`; it never touches other files in
-`sweeps/` and never prompts unless you pass `-i`.
+Safe to re-run: `hsm setup init` leaves an initialized project as it is.
+`hsm setup init --regenerate` rewrites `.hsm/config.yaml` (the previous
+copy is saved to `.hsm/config.yaml.bak`), `sweeps/README.md` and
+`sweeps/example_sweep.yaml`; it never touches other files in `sweeps/`.
+Neither prompts unless you pass `-i`.
 
 ## Step 1 — define your sweep
 
