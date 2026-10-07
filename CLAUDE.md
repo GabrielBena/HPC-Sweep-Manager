@@ -4,35 +4,18 @@ This file orients an AI coding agent landing on this repo cold. Read it first;
 then dip into [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale and
 [docs/user_guide/](docs/user_guide/) for user-facing recipes.
 
-## Workflow rule — dual-location project (experimental)
+## Process
 
-This project is actively worked from **two machines**: the user's laptop
-and **anahita** (a lab workstation; see the `hq-topology` memory note).
-To keep memory, plans, and session transcripts coherent across both:
-
-**Run `bash scripts/sync-claude-state.sh` at session boundaries** — once
-at the start of a session (pulls the other machine's edits) and once
-before ending a session that wrote anything worth preserving (pushes
-yours). The script is bidirectional `rsync --update`; safe to re-run;
-exits non-zero (with a clear message) if the remote is unreachable.
-
-**It is laptop-initiated** (default `REMOTE=anahita`). The laptop is the
-sync hub: it always reaches anahita over the VPN, whereas anahita has no
-stable route back to the roaming laptop. So run it **from the laptop**.
-A session that runs *on anahita* can't push its own state from there — the
-laptop's next sync pulls it. The script refuses to run on anahita itself
-(prints guidance instead of failing obscurely). See the
-`dual-location-workflow` memory entry for the full rule + edge cases.
-
-If you skip this and edit memory, the next agent on the other machine
-will start from a stale snapshot and re-derive things that were
-already settled. Don't be that agent.
+PRs follow [CONTRIBUTING.md](CONTRIBUTING.md): one open PR per lane, ruff via pre-commit as the
+gate, at most 150 hand-written `src` lines per PR (`scripts/chunk_size.sh`), a CHANGELOG entry,
+and a true merge. Until v0.2.0, [the maintenance tracker](docs/dev/maintenance-2026-10.md) lists
+the open rows.
 
 ## Quick identity
 
 - **What:** HPC-Sweep-Manager (HSM) — a Python package + CLI for running
   hyperparameter sweeps over Hydra-style training scripts.
-- **Where it runs:** local machines, Slurm/PBS HPC clusters, and remote
+- **Where it runs:** local machines, Slurm HPC clusters, and remote
   Linux boxes via SSH (push-model rsync — no remote install required).
 - **Language / floor:** Python 3.11+ (`pyproject.toml`).
 - **Entry point:** `hsm` (installed via `pip install -e .`).
@@ -229,8 +212,8 @@ it's trying to reintroduce them, push back.
    module conda and silently train on CPU). Only if no real conda is found does
    it probe standard paths (`$CONDA_EXE`'s prefix, `~/miniconda3`/`~/anaconda3`/
    `~/miniforge3`/`~/mambaforge`/`/opt/conda`), sourcing the first that has
-   `envs/<conda_env>` (else the first found; templates get `conda_env`), then fall back to micromamba (`$MAMBA_EXE` + common locations, including
-   `~/code/packages/HPC-Sweep-Manager/bin/micromamba`). SSHComputeSource +
+   `envs/<conda_env>` (else the first found; templates get `conda_env`), then fall back to micromamba (`$MAMBA_EXE` + common locations; never a
+   machine-specific path). SSHComputeSource +
    SSHSlurmComputeSource pass `uses_conda` based on `bool(self.conda_env)`;
    native SlurmComputeSource uses `_python_needs_conda_init(python_path)`.
    **The historical `ln -sfn <module-prefix> ~/miniforge3` workaround is no
@@ -510,175 +493,52 @@ it's trying to reintroduce them, push back.
 
 ## Testing model
 
-- **`pytest tests/unit tests/cli tests/integration`** — full suite. There
-  is a baseline of ~6 pre-existing failures (Click 8 + `log_cli=true` +
-  Python 3.13 interaction in `tests/cli/test_sweep_command.py` plus one
-  stale `LocalJobManager.show_output` assertion in
-  `tests/unit/test_local_manager.py`). **Do not chase these as regressions.**
+- **`pytest tests/unit tests/cli tests/integration`**: the full suite passes; there are no
+  known failures.
+- **Shared fakes** in `tests/fakes.py`: `FakeConn` (an asyncssh connection with scripted
+  replies) and `run_template`, which renders one task of any template and runs it under bash
+  with a stub trainer. Reuse them rather than adding a copy.
 - **PATH-stub fixtures** under `tests/fixtures/` provide fake
-  `sbatch/squeue/scancel/sinfo` and a fake `nvidia-smi` so unit tests
-  don't need a real cluster. No docker, no integration containers.
-- **Real-hardware smoke tests** in `examples/` are runnable against a real
-  Slurm cluster ([`smoke_cli.sh`](examples/smoke_cli.sh)) and a real SSH
-  remote ([`smoke_ssh_cli.sh`](examples/smoke_ssh_cli.sh)).
+  `sbatch/squeue/scancel/sinfo` and a fake `nvidia-smi` (`fake_slurm`, `fake_gpus`), so unit
+  tests don't need a real cluster.
+- **Real-hardware smoke tests** in `examples/` run against a real Slurm cluster
+  ([`smoke_cli.sh`](examples/smoke_cli.sh)) and a real SSH remote
+  ([`smoke_ssh_cli.sh`](examples/smoke_ssh_cli.sh)).
 
 ## When you add a new feature
 
-1. Decide which tier it lives in: ComputeSource path (default) vs legacy
-   manager path (only if you're fixing a completion-path bug).
+1. New execution code lives on the `ComputeSource` path; there is no other.
 2. If GPU-related: respect the two-level semantics. `--gpus` is the
    allowlist, `spec.gpus` is per-task.
 3. If SSH-related: read the wire-level details in
    [ARCHITECTURE.md](ARCHITECTURE.md#push-ssh-lifecycle) before assuming
    asyncssh behavior.
-4. Add unit tests under `tests/unit/` (fake-conn / fake-Slurm if applicable).
+4. Add unit tests under `tests/unit/` (`tests/fakes.py`, `fake_slurm` if applicable).
 5. Run the appropriate `examples/smoke_*.sh` for live validation if you
    have hardware access.
 6. If you touch the rendered wrapper templates
-   ([`templates/`](src/hpc_sweep_manager/templates/)), the existing
-   smoke-script outputs (`sentinel.txt`, `task_info.txt`) are the contract
-   to preserve.
+   ([`templates/`](src/hpc_sweep_manager/templates/)), the contract to
+   preserve is what `tests/unit/test_templates_run.py` checks: the trainer's
+   argv and cwd, `task_info.txt`, `params.yaml` and the exit code.
 
-## Recently landed (2026-05-28) — Pieces A–D
+## Consumer contracts
 
-Four small features that together unlock the "HQ workstation drives
-sweeps across {local, SSH boxes, SSH-Slurm clusters}" workflow. Brief
-plan + decisions: `/home/gbena/.claude/plans/we-are-making-misty-moth.md`.
+What HSM asks of a consumer's training script; the CHANGELOG has what landed when.
 
-| Piece | What | Where |
-|---|---|---|
-| A | `local.sweeps_root` — redirect sweep dirs to a different filesystem with a discovery symlink in the project | `core/common/config.py` (`get_local_sweeps_root`, `resolve_sweep_dir`); `cli/sweep.py` |
-| B | `SSHSlurmComputeSource` — sbatch over SSH; reuses push_exec rsync + slurm_protocol directive rendering | `core/remote/ssh_slurm_compute_source.py`, `core/hpc/slurm_protocol.py` (new shared module) |
-| C | `workdir` / `archive_dir` / `archive_on` on SSH-Slurm — `/scratch → /shares` server-side rsync with `.archived` sentinel | same file as B (layered on collect_results) |
-| D | Mixed-backend distributed — `_build_ssh_children` dispatches on `backend:` so `--mode distributed` can fan across `ssh` + `slurm` children in one sweep | `core/distributed/distributed_compute_source.py` |
-
-Smoke driver for the new SSH-Slurm path:
-[`examples/smoke_ssh_slurm_cli.sh`](examples/smoke_ssh_slurm_cli.sh).
-User-facing docs: [docs/user_guide/MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md)
-is the canonical place; [SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md#driving-slurm-over-ssh-backend-slurm)
-has the per-feature reference.
-
-## Recently landed (2026-06-03) — S3IT first-use field-report fixes
-
-Eight issues from the first real SSH-Slurm → S3IT run
-([`docs/dev/field-reports/2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md)),
-landed in 3 commits. Plan:
-`/home/gbena/.claude/plans/we-have-been-running-silly-pine.md`.
-
-| # | Fix | Where |
-|---|---|---|
-| 4 | `sacct` terminal-state (FAILED no longer reported COMPLETED) + nonzero exit | `slurm_protocol.py` (`parse_sacct_state`), both Slurm sources, `cli/sweep.py` |
-| 7 | conda-init: modules+pre_script render before the partial; `command -v conda` guard so a module conda is never shadowed | 4 templates + `_conda_init.sh.j2` |
-| 1 | `$USER`/`$HOME`/`~` expanded in remote `workdir`/`archive_dir`/`remote_root` | `_resolve_remote_path` in both SSH sources |
-| 2 | dry-run shows the merged per-remote spec (`source.default_spec`) | `cli/sweep.py` |
-| 3 | array-over-SSH wired (`--remote <a> --mode array`); orchestrator returns the chosen submission | `cli/sweep.py`, `sweep_orchestrator.py` |
-| 5 | rsync excludes `*.pkl`/`*.pth`/`checkpoints`/`multirun`/`.hydra` (not bare `outputs`) | `push_exec.py` |
-| 6 | `detect_hpc_system` order Slurm>SGE>PBS, default `unknown` | `path_detector.py` |
-| 8 | **T0** `hsm sweep collect <id>` + `.hsm_manifest.json` re-attach · **T1** continuous `tasks/` pull in `wait_for_all` · **T2** per-task `params.yaml` · **T3** maintenance-reservation warning | `ssh_slurm_compute_source.py`, `cli/sweep.py`, templates, `scheduler_queue.py` |
-
-Deferred (clean follow-up): #8 Tier-3 `--dependency=afterany` server-side
-epilog archive (durability with no client ever returning).
-
-## Recently landed (2026-06-03 evening) — Comp-PVR consumer field-report fixes
-
-First *blind agent-driven* consumer use of HSM (from the Comp-PVR project;
-report + validated patch:
-[`docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md`](docs/dev/field-reports/2026-06-03-comp-pvr-first-run.md)),
-landed in 5 commits. Theme: **silent, success-shaped failures** — status
-must match reality. Plan:
-`/home/gbena/.claude/plans/new-feedback-just-dropped-bright-porcupine.md`.
-
-| # | Fix | Where |
-|---|---|---|
-| B3 | array params extraction by tempfile path, never `python - <<heredoc` (`conda run` swallows stdin in `$()`); empty-PARAMS fail-fast | `templates/slurm_array.sh.j2` (→ gotcha #11) |
-| B2 | dir-name rsync excludes anchored: `/wandb` `/checkpoints` `/multirun` (unanchored stripped `configs/<name>/` Hydra groups) | `push_exec.py` (→ gotcha #12) |
-| B1 | init NameError after files written → false "failed"; + exit non-zero on real failure, `.hsm/config.yaml.bak` on re-run, no non-interactive prompts | `cli/init.py` |
-| G1 | re-run/overwrite contract documented in `--help` + README + getting_started | `cli/init.py` docstring, docs |
-| doc | "Your project's own package on the remote" (editable installs / PYTHONPATH) | `SSH_EXECUTION.md` + MULTI_CLUSTER cross-link |
-| U1-U3 | top-level `hsm init` alias · soft-wrapped `hsm docs` URLs · canonical-branch note | `cli/main.py`, `cli/docs.py`, README |
-
-Deferred: G2 train-script-detection rework (loud warning + per-sweep
-`script:` remain the mitigation); conditional `wandb.group=` injection
-(see Known limitations).
-
-## Recently landed (2026-06-04) — queue audit + SSH-driven `hsm queue`
-
-Live audit on S3IT (two sweeps in flight) found every `hsm queue` view
-success-shaped-empty on a real cluster; fixed the core, then made the
-whole group drivable from the workstation. Plan:
-`/home/gbena/.claude/plans/giggly-floating-lark.md`.
-
-| What | Where |
-|---|---|
-| GRES colon-grammar parsing (`gres/gpu:A100:1`) + `tres_per_node` semantics; live census = test fixtures | `scheduler_queue.py` (→ gotcha #13) |
-| Pending-array task counting: `-r` on counting paths, `parse_array_task_count` + `×N` Tasks column on display paths | `scheduler_queue.py`, `cli/queue.py` |
-| `SSHSlurmQueue` async twin on shared pure helpers; raises `QueueCommandError`, never empty-on-failure | `scheduler_queue.py` |
-| `--remote <alias>` on all four subcommands + sole-slurm-remote auto-fallback + `--watch/--refresh` (persistent conn) | `cli/queue.py` |
-| Job→sweep linkage via `.hsm_manifest.json` fallback (SSH-Slurm sweeps have no `submission_summary.txt`) | `cli/queue.py` |
-| Grouped `mine` (follow-up PR): one row per array, `▶/⏳` from squeue + `✓/✗` + true-total progress from optional sacct (`JobGroup`, `group_jobs_by_array`, `parse_sacct_job_states`, `enrich_groups_with_accounting`); `--flat` keeps per-task rows | `scheduler_queue.py`, `cli/queue.py` |
-| `gpus` capacity view (follow-up PRs): VRAM/GPU (cluster `GPUMEM<N>GB` feature tags line-scanned; `~`-marked model-typical fallback only for unambiguous models — live S3IT H100s are 80/96G mixed, static tables lie) + Total/In use/Free per type from optional sinfo `Gres`/`GresUsed` (`parse_sinfo_gpu_capacity` — paren-aware gres split for comma-bearing `(IDX:...)`, node dedup, down/drain exclusion); `--mine` now default (`--no-mine`); `<untyped>` demand row auto-explained | `scheduler_queue.py`, `cli/queue.py` |
-
-User-facing docs: [docs/user_guide/QUEUE.md](docs/user_guide/QUEUE.md);
-monitor-from-HQ section in
-[MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md#monitoring-the-cluster-queue-from-hq).
-
-## Recently landed (2026-06-04) — heterogeneous GPU-type scheduling (issue #7 v0+v1)
-
-One sweep → K typed Slurm sub-arrays. Filed by Gabriel from production
-pain (A100-pinned sweep queuing against itself with bimodal 7h/23h task
-costs). Issue #7 stays OPEN for the deferred stages.
-
-| What | Where |
-|---|---|
-| `spec.gpu_type: [A100, H200]` + per-remote/`slurm:` `speed_factors` → LPT split, per-type walltimes, `--dry-run` plan table (same planner call as submit) | `gpu_planner.py` (new), both Slurm sources, `resource_spec.py`, `cli/sweep.py` |
-| Sweep YAML `cost_param`/`cost_map` per-task cost hints (never enter hydra args) | `config.py` SweepConfig, `cli/sweep.py`, `submit_batch(costs=...)` through the ABC |
-| Per-sub-array params files keep `global_index` → `tasks/task_<N>` (unpadded) globally numbered; `task_info.txt` gets `GPU Type:`; manifest `jobs:` entries → per-array progress in `hsm queue mine` | sources, `slurm_array.sh.j2`, `cli/queue.py` |
-| Deferred (issue #7): v1.5 queue-aware placement (score = wait + runtime×factor from capacity probes, NOT typed-pending counts), `hsm calibrate` (measure factors via probe runs), per-type partitions (V100 is lowprio-only) | — |
-
-Live-validated: dry-run plan hand-checked on the real 22-task shape
-(8/11 long arms → H200, makespan 96 vs 330 cost-units pinned); smoke
-sweep on uzh split 2×L4 + 2×A100 with scaled walltimes and per-array
-progress rows in grouped `mine`.
-
-## Recently landed (2026-06-08) — resumable chained runs (issue #12, MERGED)
-
-Finish a job that exceeds a pool's walltime cap (the driver: UZH S3IT V100
-`lowprio` — abundant but 24h-capped) as a chain of ≤`chunk_walltime`
-checkpoint-chained Slurm chunks. **Not a 7th mode** — it's a flag on the
-existing array/SSH-Slurm path: `hsm sweep run --resumable --chunk-walltime
-23:00:00 --remote <a> --mode array` (or native `--mode array`). Option B
-(HSM-driven, advance-on-poll): chunk *k+1* re-submits the **whole** array
-`--dependency=afterany:k`; done tasks no-op via a `.hsm_done` sentinel; the
-chain stops on the sentinel (NEVER exit code/epoch), bounded by `max_chunks`
-+ `max_consecutive_failures`. A crash (non-zero exit without the SIGTERM the
-batch shell caught) exits with its code and appends to the task's `.hsm_failed`;
-`max_consecutive_failures` lines in a row put the task out of retries (skipped;
-chain FAILED once the rest is done), and a FAILED chain is archived unless
-`archive_on: never`, its remote kept (S10, issues #15/#16). Composes with #7 (each typed sub-array capped at
-`chunk_walltime`). Live-validated: 2-chunk V100-`lowprio` resume on uzh.
-
-| What | Where |
-|---|---|
-| Pure state machine (`decide_next`: DONE/ADVANCE/FAILED) + typed config (`ResumableConfig`/`ResumableContext`/`ChunkProgress` + resolver) | **new** `core/common/chain.py`, `core/common/resumable.py` |
-| Driver loop (submit chunk → wait → checkpoint-excluded pull → `chunk_progress` probe → decide); backend gate (Slurm-only) | `sweep_orchestrator.run_resumable_sweep_async`, `build_compute_source` |
-| `render_sbatch_directives(dependency=, signal=)` + `format_signal`; `{% if resumable %}` template block (resume env, sentinel skip-check, resume-arg, SIGTERM-forwarding run-block) | `slurm_protocol.py`, `templates/slurm_array.sh.j2` |
-| `submit_batch(dependency=, resumable=)`, `chunk_progress`, deferred cleanup, checkpoint-excluded pulls, manifest chain state + `from_manifest` restore (SSH-Slurm + native parity) | both Slurm sources |
-| CLI `--resumable`/`--chunk-walltime` + dry-run plan; **`hsm sweep advance <id>`** (re-drive a detached chain; `collect` refuses a chain); `queue mine` `(chunk k/max)`; analyzer treats `.hsm_done` as authoritative | `cli/sweep.py`, `cli/queue.py`, `sweep_analysis.py` |
-| One driver at a time (2026-10 pass, R10): launcher and `advance` hold `.hsm_launcher.lock` for their whole run (a held lock: `advance` exits 0); a chunk already queued but unrecorded (the driver died between sbatch and manifest) is adopted via `SlurmBase._queued_chunk`, never queued twice; the manifest is written atomically and records `costs` | `cli/sweep.py`, `slurm_base.py`, both Slurm sources |
-| Deferred (candidates for new issues): eager pre-queue + scancel (`hsm sweep cancel` landed in the 2026-10 pass, S9: one `scancel` for the live chunk, then the chain is marked stopped) | — |
-
-**The contract HSM imposes on a consumer training script (the ONLY specificity
-that leaves HSM — it knows only PATHS):** consume `HSM_RESUME_FROM` (env; resume
-iff set/non-empty), save to `HSM_RESUME_TO` on SIGTERM + periodically, write
-`$HSM_DONE_SENTINEL` when the WHOLE budget is done, read the total budget from
-the (unchanged-every-chunk) config. `resume_arg` defaults to **None (env-only)** —
-HSM injects no project-specific hydra key unless a project opts in
-(`resume_arg: training.resume_from`). Runnable reference:
-[`examples/resumable_probe.py`](examples/resumable_probe.py); docs:
-[HPC_EXECUTION.md → Resumable chained runs](docs/user_guide/HPC_EXECUTION.md).
-A consumer repo that doesn't yet write `.hsm_done` / read `HSM_RESUME_TO` will
-chunk but never finish (hits `max_chunks` → FAILED) — wire the ~10-line contract
-first.
+- **Every task:** `key=value` overrides, then HSM's own (`hydra_overrides:`, default
+  `wandb.group=`, `output.dir=<task_dir>`, `hydra.run.dir=<task_dir>/.hydra_run`). Write outputs
+  to `output.dir`; it is what comes back from a remote.
+- **Resumable chains (`--resumable`; HSM knows only paths):** consume `HSM_RESUME_FROM` (env; resume
+  iff set/non-empty), save to `HSM_RESUME_TO` on SIGTERM + periodically, write
+  `$HSM_DONE_SENTINEL` when the WHOLE budget is done, read the total budget from
+  the (unchanged-every-chunk) config. `resume_arg` defaults to **None (env-only)** —
+  HSM injects no project-specific hydra key unless a project opts in
+  (`resume_arg: training.resume_from`). Runnable reference:
+  [`examples/resumable_probe.py`](examples/resumable_probe.py); docs:
+  [HPC_EXECUTION.md → Resumable chained runs](docs/user_guide/HPC_EXECUTION.md).
+  A consumer repo that doesn't yet write `.hsm_done` / read `HSM_RESUME_TO` will
+  chunk but never finish (hits `max_chunks` → FAILED) — wire the ~10-line contract
+  first.
 
 ## Cross-references
 
@@ -687,8 +547,5 @@ first.
   [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md),
   [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md),
   [docs/user_guide/MULTI_CLUSTER.md](docs/user_guide/MULTI_CLUSTER.md).
-- **API:** [docs/api_reference/](docs/api_reference/) — the
-  `compute_sources.md` doc is the live one; the others are legacy with banners.
 - **Design rationale:** [ARCHITECTURE.md](ARCHITECTURE.md).
-- **Project layout:** [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md).
 - **CLI reference:** [docs/cli/README.md](docs/cli/README.md).

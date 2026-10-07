@@ -1,7 +1,7 @@
 # HPC Sweep Manager (HSM)
 
 A Python package + CLI for running hyperparameter sweeps over Hydra-style
-training scripts. Targets local machines, Slurm/PBS HPC clusters, and
+training scripts. Targets local machines, Slurm HPC clusters, and
 remote Linux boxes over SSH — same CLI, same sweep config, four
 execution modes.
 
@@ -13,12 +13,12 @@ execution modes.
 
 ## Why HSM
 
-- One CLI runs sweeps locally, on a Slurm/PBS cluster, or on remote SSH
+- One CLI runs sweeps locally, on a Slurm cluster, or on remote SSH
   boxes — without changing your training script.
 - **Push-model SSH:** rsync your project to a remote, run with per-task
   GPU pinning, rsync results back. No HSM install needed on the remote.
-- **Typed `ResourceSpec`** for HPC resources — no more opaque PBS strings
-  in Python; templates handle the per-scheduler translation.
+- **Typed `ResourceSpec`** for HPC resources — no more opaque resource
+  strings in Python; templates render the `#SBATCH` directives.
 - **Unified async `ComputeSource` interface** — same lifecycle (setup →
   submit → wait → collect → cleanup) for every backend.
 
@@ -114,9 +114,8 @@ Full reference: [docs/cli/README.md](docs/cli/README.md).
 - **Quickstart (this README)** — install + first sweep.
 - [docs/user_guide/getting_started.md](docs/user_guide/getting_started.md) — broader tutorial with per-mode walkthroughs.
 - [docs/user_guide/SSH_EXECUTION.md](docs/user_guide/SSH_EXECUTION.md) — the push-model SSH recipe in depth.
-- [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) — Slurm / PBS recipe + the `--resources` gap workaround.
-- [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md) — `.hsm/` layout + paths HSM expects.
-- [docs/api_reference/](docs/api_reference/) — Python API for embedding HSM in your own scripts.
+- [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) — the Slurm recipe + the `--resources` gap workaround.
+- [docs/cli/README.md](docs/cli/README.md) — every command.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — design rationale + known limitations.
 - [CLAUDE.md](CLAUDE.md) — agent on-boarding (read this if you're Claude / Cursor / etc.).
 
@@ -165,7 +164,7 @@ for the `distributed:` block layout.
 ## Requirements
 
 - Python 3.11+
-- For HPC: a Slurm or PBS cluster with `sbatch`/`qsub` on PATH.
+- For HPC: a Slurm cluster with `sbatch` on PATH (or reached over SSH).
 - For remote SSH: a working `~/.ssh/config` alias to your remote (no
   HSM install needed on the remote).
 - Dependencies: see `pyproject.toml`. Install with `pip install -e ".[dev]"`

@@ -5,7 +5,7 @@ project, and running a sweep in each of the four execution modes.
 
 For deeper recipes:
 - [SSH (push-model) execution](SSH_EXECUTION.md) — the `--remote <alias>` path in depth, including `backend: slurm` to drive a remote Slurm cluster (e.g., S3IT) over SSH.
-- [HPC (Slurm / PBS) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + the typed `slurm:` block for advanced Slurm features.
+- [HPC (Slurm) execution](HPC_EXECUTION.md) — the `--mode array|individual` path + the typed `slurm:` block for advanced Slurm features.
 - [MULTI_CLUSTER.md](MULTI_CLUSTER.md) — fanning a single sweep across {local GPUs, SSH-Slurm cluster, SSH workstation} from one HQ box.
 
 If you're an AI agent landing in this repo, start with
@@ -21,7 +21,7 @@ pip install -e ".[dev]"
 
 Requirements:
 - Python 3.11+.
-- For HPC mode: a Slurm or PBS cluster with `sbatch` / `qsub` on PATH.
+- For HPC mode: a Slurm cluster with `sbatch` on PATH (or reached over SSH).
 - For SSH `--remote` mode: a working `~/.ssh/config` alias to your
   remote box. Nothing needs installing on the remote.
 
@@ -295,9 +295,9 @@ and submit it as a fresh sweep with `hsm sweep run`.
 ## Common environment + tooling notes
 
 - HSM's CLI is the only sync boundary; everything below it is async.
-  If you're using HSM from Python, see
-  [`../api_reference/compute_sources.md`](../api_reference/compute_sources.md)
-  for the `run_sweep_async()` + `ComputeSource` API.
+  If you're using HSM from Python, `run_sweep_async()` in
+  `core/common/sweep_orchestrator.py` drives any `ComputeSource`
+  (`core/common/compute_source.py`); their docstrings are the API.
 - `~/.ssh/config` is the single source of truth for SSH host resolution.
   Aliases, `ProxyJump`, port, identity files — all honored.
 - `hsm remote gpus <alias>` is a quick way to see what's free on a box
@@ -308,7 +308,6 @@ and submit it as a fresh sweep with `hsm sweep run`.
 
 - [SSH_EXECUTION.md](SSH_EXECUTION.md) — the push-model recipe + the
   `distributed:` config schema.
-- [HPC_EXECUTION.md](HPC_EXECUTION.md) — Slurm / PBS + the `--resources`
+- [HPC_EXECUTION.md](HPC_EXECUTION.md) — Slurm + the `--resources`
   gap workaround.
-- [../api_reference/compute_sources.md](../api_reference/compute_sources.md) — Python API.
 - [../../ARCHITECTURE.md](../../ARCHITECTURE.md) — design rationale.

@@ -71,13 +71,12 @@ test-simple-mlp:
 # Documentation commands
 docs:
 	@echo "Building documentation..."
-	@echo "API reference documentation is in docs/api_reference/"
 	@echo "CLI documentation is in docs/cli/"
 	@echo "User guide is in docs/user_guide/"
 
 docs-serve:
 	@echo "Documentation is available in docs/ directory"
-	@echo "Open docs/README.md or docs/api_reference/README.md to get started"
+	@echo "Open docs/README.md to get started"
 
 # Development commands
 install:

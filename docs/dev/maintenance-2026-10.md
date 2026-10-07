@@ -62,7 +62,7 @@ is deleted; the CHANGELOG keeps the record.
 |---|---|---|---|
 | R1 | *[FR#11]* A re-run needs a hand-written sweep file. | `hsm sweep rerun <id> --failed --timeout [--missing] [--walltime X]`, built on `sweep_analysis` selections and `tasks_state.json`. It writes `rerun_<ts>.yaml` with `combinations:` and then runs it. | |
 | R2 | *[FR#12]* `grid` is a full product; unnamed `paired:` groups crash and exit 0. | `exclude:` / `include:` filters and an explicit `combinations:` list in the generator. | |
-| R3 | *[FR#14]* Tasks that start in the same second share Hydra's `outputs/<date>/<time>` in a shared cwd. The next sweep's `rsync --delete` also removes the logs that running tasks write there. | Inject `hydra.run.dir=<task_dir>/.hydra_run` next to `wandb.group=` and `output.dir=`, behind **one** switch that also makes the `wandb.group=` injection conditional (a known limitation). The per-sweep snapshot (S4) removes the `--delete` effect. | |
+| R3 | *[FR#14]* Tasks that start in the same second share Hydra's `outputs/<date>/<time>` in a shared cwd. The next sweep's `rsync --delete` also removes the logs that running tasks write there. | Inject `hydra.run.dir=<task_dir>/.hydra_run` next to `wandb.group=` and `output.dir=`, behind **one** switch that also makes the `wandb.group=` injection conditional (a known limitation). The per-sweep snapshot (S4) removes the `--delete` effect. | #61 ✓ |
 | R4 | *[FR#17]* Nothing validates keys: a remote-level `pre_script` and a sweep-level `gird:` are both silently ignored. | One schema of known keys per block, with "did you mean `spec.pre_script`". It replaces the ad-hoc key sets. | #54 ✓ |
 | R5 | *[FR#18, corrected: three schemes]* Task dirs are named `task_N` (array), `task_NNN` (local/ssh) or `<id>_task_NNN` (individual). The analyzer counts individual-mode tasks as missing. | A tolerant reader (`task_index(name)`) for all three; renaming to one scheme is Gabriel's call (consumers read these paths). | #57 ✓ (reader; renaming open) |
 | R6 | *[FR#19]* A stale `project.root` or `train_script` fails late; a real run first creates a ghost tree. | `HSMConfig.check_paths()` before the dry-run output. | #54 ✓ |
@@ -78,7 +78,7 @@ is deleted; the CHANGELOG keeps the record.
 | R10 | *[NEW]* The resumable chain can double-submit: there is a crash window between sbatch and persist, and nothing locks a live launcher against a cron `advance`. The manifest write isn't atomic, and `advance` drops cost hints. | Adopt a live chunk found by `squeue -n` instead of submitting another; write the manifest via temp file and rename; persist `costs`. | #59 ✓ |
 | R11 | *[FR#15a, corrected: `~/miniforge3` is already probed]* The conda probe stops at the first install it finds, so a leftover `~/miniconda3` shadows `~/miniforge3`. It also never tries `~/mambaforge` or `$CONDA_EXE`. | Pick the first install that has `envs/<env>`; add the two missing candidates. | #45 ✓ |
 | R12 | *[NEW]* ssh task stdout is buffered in the launcher's memory and thrown away; `logs/` stays empty. | Fixed by X1: logs go to files. | #37 ✓ |
-| R13 | *[NEW, found by chore-5's template harness]* A list-valued param (`[64, 64]`, whose repr has a space) killed every task of the local, ssh and slurm_single templates with exit 127: the tokens' double quotes ended `COMMAND="…"` early. A `;` in a string value did the same in the `Parameters:` echo. | The tokens become one shell word, `PARAMS=<shquoted>`, as the array template already did with `$PARAMS_JSON`. → Every template run under bash with a list, null, and a quote-and-`;` string. | |
+| R13 | *[NEW, found by chore-5's template harness]* A list-valued param (`[64, 64]`, whose repr has a space) killed every task of the local, ssh and slurm_single templates with exit 127: the tokens' double quotes ended `COMMAND="…"` early. A `;` in a string value did the same in the `Parameters:` echo. | The tokens become one shell word, `PARAMS=<shquoted>`, as the array template already did with `$PARAMS_JSON`. → Every template run under bash with a list, null, and a quote-and-`;` string. | #63 ✓ |
 
 ## Gates, docs, hygiene (the `chore` lane)
 
@@ -187,7 +187,7 @@ project's default pool. Tell Comp-PVR its `pre_script` can use `$HSM_CODE_DIR`.
 | chore | chore-3 (#19 ✓) · the 77 leftovers fixed by hand, so ruff is clean (the modules due for deletion get a temporary per-file ignore) | G (ruff) | — |
 | chore | chore-4 (#20 ✓) · the method: pre-commit, the push guard, the chunk cap, the PR template, a CI `gates` job, CONTRIBUTING | G (gates) | — |
 | chore | ci (#25 ✓) · CI runs on label changes, so `oversize-approved` takes effect without a push | — | — |
-| chore | chore-5 · `tests/fakes.py`, a harness that runs rendered templates, one pytest config, dead fixtures | G (tests) | — |
+| chore | chore-5 (#62 ✓; #63 ✓: the template harness) · `tests/fakes.py`, a harness that runs rendered templates, one pytest config, dead fixtures | G (tests) | — |
 | slurm | S-1 (#21 ✓) · transient-safe, batched status refresh for both Slurm sources; `collect` uses it; `sbatch --parsable` | S1, S2 | P0 |
 | slurm | S-2 (#26 ✓) · array default; manifest on any partial submission (a chain keeps its own); one channel per script | S3 | P0 |
 | slurm | S-3 (#27 ✓) · per-sweep code snapshot (`--link-dest`), shared by both SSH sources | S4 | P0 |
@@ -199,7 +199,7 @@ project's default pool. Tell Comp-PVR its `pre_script` can use `$HSM_CODE_DIR`.
 | ssh | X-2 (#37 ✓ · #39 ✓) · detached ssh supervision, `hsm sweep collect` re-attaches ssh sweeps, task logs to files, keepalive + reconnect | X1, R12, S11 (ssh side) | P0 |
 | ssh | X-3 (#32 ✓) · distributed rewritten over the children (−1.5k LOC) | X3 | P0 |
 | ssh | X-4 (#43 ✓) · nvidia-smi GPU order, free-GPU default, capacity = slot count | X4 | P1 |
-| ssh | X-5 (#45 ✓: R11) · conda probe picks the install that has the env; the Hydra override switch | R11, R3 | P2 |
+| ssh | X-5 (#45 ✓: R11; #61 ✓: R3) · conda probe picks the install that has the env; the Hydra override switch | R11, R3 | P2 |
 | ssh | X-6 · one SSH base, one `build_remote_source`, local as a transport | consolidation | — |
 | cli | C-1 (#23 ✓) · `--remote` with `auto`, per-key spec filter, unknown alias, sweep-id collisions, honest exit codes | C1, C2, C6, C7, R8 | P0 |
 | cli | C-2 (#29 ✓) · `remote add/remove` edit the project file only; `remote clean` guards | C3, C8 | P0 |

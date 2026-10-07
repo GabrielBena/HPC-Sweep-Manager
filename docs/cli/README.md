@@ -1,8 +1,8 @@
 # CLI reference
 
-Every `hsm <group> <command>` documented here is verified against
-`hsm --help` output. If you spot drift, regenerate this doc by running
-each group's `--help` and comparing.
+Every `hsm <group> <command>` appears here: `tests/cli/test_cli_docs.py`
+fails when a command is missing. The descriptions follow each command's
+`--help`; if you spot drift, compare the two.
 
 For broader tutorials (sweep config, training-script contract, GPU
 pinning, etc.) see the [user guides](../user_guide/).
@@ -10,10 +10,12 @@ pinning, etc.) see the [user guides](../user_guide/).
 ## Top-level groups
 
 ```
+hsm init                                          # = hsm setup init
+hsm docs                                          # where the docs live
 hsm setup    init configure                       # bootstrap
-hsm sweep    run | status | report | watch | recent | queue | cancel | cleanup
+hsm sweep    run | status | report | watch | recent | queue | cancel | cleanup | collect | advance
 hsm remote   add | list | test | health | gpus | clean | remove
-hsm queue    mine | position | gpus | reservations
+hsm queue    mine | position | gpus | reservations | share
 ```
 
 Global options (apply to every command):
@@ -30,6 +32,8 @@ Project bootstrap. Run once per ML project.
 |---|---|
 | `hsm setup init` | Auto-detect paths, write `.hsm/config.yaml`, `sweeps/example_sweep.yaml`, etc.; migrates an old `sweeps/hsm_config.yaml` to the new `.hsm/` layout. An initialized project is left as it is: `--regenerate` rewrites the generated files (the old config goes to `.hsm/config.yaml.bak`). |
 | `hsm setup configure` | Interactive sweep-config builder. |
+| `hsm init` | The same as `hsm setup init`, with the same flags. |
+| `hsm docs` | Where the HSM documentation lives: the URLs, and the local path when present. |
 
 ## `hsm sweep`
 
@@ -82,7 +86,7 @@ ssh, `logs/*.err` for local and Slurm).
 
 Detailed completion report.
 
-### `hsm sweep watch <sweep_id>` / `recent` / `queue` / `cancel` / `cleanup`
+### `hsm sweep watch <sweep_id>` / `recent` / `queue` / `cancel` / `cleanup` / `collect` / `advance`
 
 Sweep lifecycle commands — all built on `SweepCompletionAnalyzer` so
 they're backend-agnostic (work for local / Slurm / SSH push / distributed
@@ -95,6 +99,8 @@ the same way).
 | `hsm sweep queue` | Auto-detects `squeue` or `qstat` on PATH and shows the cluster's job queue for $USER. Reports cleanly when no scheduler is installed. |
 | `hsm sweep cancel <sweep_id>` | Cancel a running sweep. A Slurm sweep (native or a `backend: slurm` remote) is found by its `.hsm_manifest.json`: one `scancel` names all its jobs (a resumable chain's running chunk and any queued after it; the chain is then marked stopped so `advance` won't resubmit it), and a failed or unanswered `scancel` exits 1. Without a manifest, reads `Backend:` from `submission_summary.txt` and dispatches: `scancel` (Slurm), `qdel` (PBS), or `pkill -f <sweep_id>` (local). An ssh sweep (`backend: ssh`) is found by its manifest too: each running task's process group gets a TERM, once its launcher has stopped. For distributed sweeps, and ssh sweeps from an older HSM (no manifest), prints how to cancel by hand. |
 | `hsm sweep cleanup [-d N] [--keep-incomplete] [--dry-run]` | Delete sweep output dirs older than N days (default 30). `--keep-incomplete` spares sweeps with failed/missing tasks. `--dry-run` lists candidates. |
+| `hsm sweep collect <sweep_id>` | Re-attach to an SSH-Slurm or ssh sweep whose launcher is gone (its `.hsm_manifest.json`), ask the remote which tasks ended, pull the task dirs back, and archive and clean up once all are done. Idempotent: re-run it as more tasks finish. Refuses a resumable chain (use `advance`). |
+| `hsm sweep advance <sweep_id> [--max-iterations N]` | Drive a detached resumable chain: if the current chunk has ended, submit the next one (default, non-blocking, cron-friendly), or drive to the end with `--max-iterations 0`. Submits new Slurm jobs, unlike `collect`. Safe beside a live launcher: one process drives a chain at a time. |
 
 ## `hsm remote`
 
@@ -129,6 +135,7 @@ column for compact views).
 | `hsm queue position [<job_id>]` | Position of your pending GPU task(s) in the cluster-wide priority-sorted GPU queue. With a `job_id` (exact task or array base), reports just that job; without, reports every pending GPU job of yours, plus a note for CPU-only pending tasks. |
 | `hsm queue gpus [--no-mine] [--watch]` | Per-GPU-type capacity + queue: VRAM per GPU (cluster-reported `GPUMEM` feature tags, `~`-marked model-typical fallback), Total / In use / Free from `sinfo` allocation accounting (excludes down/drained nodes; degrades to queue-only when sinfo is absent), Pending demand from `squeue -r`, and your contribution (Mine, on by default — `--no-mine` to hide). |
 | `hsm queue reservations` | Upcoming Slurm maintenance windows. |
+| `hsm queue share [--account A]` | How loaded the shared Slurm account is against its fair share, and how much of it is yours. Exits 3 when the account is hot (over 2× its share, or co-workers pending on priority). |
 
 `--watch [--refresh N]` (on `mine` and `gpus`) keeps the view
 refreshing; over SSH the connection is opened once and reused. With no
@@ -155,4 +162,3 @@ the underlying API.
 - [../user_guide/getting_started.md](../user_guide/getting_started.md)
 - [../user_guide/SSH_EXECUTION.md](../user_guide/SSH_EXECUTION.md)
 - [../user_guide/HPC_EXECUTION.md](../user_guide/HPC_EXECUTION.md)
-- [../api_reference/](../api_reference/)

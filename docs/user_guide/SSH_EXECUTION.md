@@ -553,8 +553,5 @@ the launcher:
   local / array / individual modes too.
 - [HPC_EXECUTION.md](HPC_EXECUTION.md) — Slurm / `--mode array` recipe
   (for when you're on the cluster directly, not driving it over SSH).
-- [../api_reference/compute_sources.md](../api_reference/compute_sources.md) —
-  Python API surface (`SSHComputeSource`, `SSHSlurmComputeSource`,
-  `build_ssh_source`, `build_ssh_slurm_source`, `parse_gpus_arg`).
 - [../../ARCHITECTURE.md](../../ARCHITECTURE.md#push-ssh-lifecycle) —
   full lifecycle internals.

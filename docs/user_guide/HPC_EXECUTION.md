@@ -1,6 +1,6 @@
-# HPC (Slurm / PBS) execution
+# HPC (Slurm) execution
 
-Submit sweeps to a Slurm or PBS cluster as either a single array job
+Submit sweeps to a Slurm cluster as either a single array job
 (`--mode array`) or one job per parameter combination
 (`--mode individual`). `--mode auto` resolves to `array` if `sbatch` is
 on PATH, else falls back to `local`.
@@ -69,12 +69,6 @@ into a typed `ResourceSpec`. Recognized tokens (Slurm flavor — pass
 --partition=gpu
 --qos=normal
 --account=my-project
-```
-
-PBS flavor (when `qsub` is on PATH):
-
-```
-select=1:ncpus=4:mem=16gb:ngpus=1
 ```
 
 Unknown tokens land in `ResourceSpec.extra_directives` and are emitted
@@ -714,6 +708,4 @@ changes. A re-attached sweep with several sub-arrays (a `gpu_type` list) or in
 
 - [SSH_EXECUTION.md](SSH_EXECUTION.md) — push-model SSH (no scheduler).
 - [getting_started.md](getting_started.md) — quickstart across all modes.
-- [../api_reference/compute_sources.md](../api_reference/compute_sources.md) —
-  `SlurmComputeSource` API.
 - [../../ARCHITECTURE.md](../../ARCHITECTURE.md#slurm-path) — internals.
