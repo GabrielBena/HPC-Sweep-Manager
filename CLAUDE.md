@@ -365,9 +365,16 @@ it's trying to reintroduce them, push back.
    non-zero when any job failed. Don't revert to per-job polling or to "gone from
    squeue → COMPLETED".
 
-8. **`params_to_hydra_args` quoting:** values with spaces/commas may render
-   with nested quotes that bash collapses gracefully, but path-as-value
-   params with spaces are fragile. Known limitation across all templates.
+8. **Params reach the eval as one shell word (R13, 2026-10).**
+   `params_to_hydra_args` double-quotes each token. The local, ssh and
+   slurm_single templates assign them as `PARAMS={{ params_hydra | shquote }}`
+   and build `COMMAND="… $PARAMS …"`; the array template does the same through
+   `$PARAMS_JSON`. Embedding `{{ params_hydra }}` straight into a double-quoted
+   string let a list value's space (or a `;`) end the string: exit 127. Never
+   do that again. Each token escapes `"` and `\`; a `$` in a value still
+   expands at the eval (a sweep may rely on it). `slurm_array.sh.j2` carries a
+   copy of the tokenizer: keep the two alike. `tests/unit/test_templates_run.py`
+   runs every template under bash.
 
 9. **Two HSM configs, not one — machine + project.** `HSMConfig.load()` reads
    `~/.hsm/config.yaml` (machine-wide) AND `<project>/.hsm/config.yaml`

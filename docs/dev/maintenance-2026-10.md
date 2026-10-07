@@ -78,6 +78,7 @@ is deleted; the CHANGELOG keeps the record.
 | R10 | *[NEW]* The resumable chain can double-submit: there is a crash window between sbatch and persist, and nothing locks a live launcher against a cron `advance`. The manifest write isn't atomic, and `advance` drops cost hints. | Adopt a live chunk found by `squeue -n` instead of submitting another; write the manifest via temp file and rename; persist `costs`. | #59 ✓ |
 | R11 | *[FR#15a, corrected: `~/miniforge3` is already probed]* The conda probe stops at the first install it finds, so a leftover `~/miniconda3` shadows `~/miniforge3`. It also never tries `~/mambaforge` or `$CONDA_EXE`. | Pick the first install that has `envs/<env>`; add the two missing candidates. | #45 ✓ |
 | R12 | *[NEW]* ssh task stdout is buffered in the launcher's memory and thrown away; `logs/` stays empty. | Fixed by X1: logs go to files. | #37 ✓ |
+| R13 | *[NEW, found by chore-5's template harness]* A list-valued param (`[64, 64]`, whose repr has a space) killed every task of the local, ssh and slurm_single templates with exit 127: the tokens' double quotes ended `COMMAND="…"` early. A `;` in a string value did the same in the `Parameters:` echo. | The tokens become one shell word, `PARAMS=<shquoted>`, as the array template already did with `$PARAMS_JSON`. → Every template run under bash with a list, null, and a quote-and-`;` string. | |
 
 ## Gates, docs, hygiene (the `chore` lane)
 

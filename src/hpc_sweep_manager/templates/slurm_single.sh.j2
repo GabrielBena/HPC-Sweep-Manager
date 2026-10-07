@@ -26,16 +26,19 @@ cd {{ project_dir }}
 echo "Working directory: $(pwd)"
 
 mkdir -p {{ task_dir }}
+# One shell word, so the tokens' own quotes reach the eval below intact (a list value has
+# a space, which would otherwise end COMMAND's string early).
+PARAMS={{ params_hydra | shquote }}
 echo "Job ID: ${SLURM_JOB_ID:-unknown}" > {{ task_dir }}/task_info.txt
 echo "Node: $(hostname)" >> {{ task_dir }}/task_info.txt
-echo "Parameters: {{ params_hydra }}" >> {{ task_dir }}/task_info.txt
+echo "Parameters: $PARAMS" >> {{ task_dir }}/task_info.txt
 echo "Started: $(date)" >> {{ task_dir }}/task_info.txt
 # Self-describing artifact: the exact overrides for this task, so a synced
 # checkpoint is never orphaned from its params (see Tier 2 of the field report).
 cat > {{ task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
 {{ params_yaml }}HSM_PARAMS_EOF
 
-COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} {{ task_overrides(hydra_overrides, wandb_group or sweep_id, task_dir) }}"
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS {{ task_overrides(hydra_overrides, wandb_group or sweep_id, task_dir) }}"
 echo "Executing: $COMMAND"
 echo "$COMMAND" > {{ task_dir }}/command.txt
 

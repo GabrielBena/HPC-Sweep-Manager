@@ -77,18 +77,16 @@ try:
     with open(os.path.join(_task_dir, "params.yaml"), "w") as _pf:
         json.dump(params, _pf, indent=2, sort_keys=True)
         _pf.write("\n")
-    tokens = []
-    for k, v in params.items():
+    # templating.params_to_hydra_args, copied (no HSM on a compute node): keep the two alike.
+    def value(v):
         if isinstance(v, (list, tuple)):
-            tokens.append(f'"{k}={list(v)}"')
-        elif v is None:
-            tokens.append(f'"{k}=null"')
-        elif isinstance(v, bool):
-            tokens.append(f'"{k}={str(v).lower()}"')
-        elif isinstance(v, str) and (' ' in v or ',' in v):
-            tokens.append(f'"{k}={v}"')
-        else:
-            tokens.append(f'"{k}={v}"')
+            return str(list(v))
+        return "null" if v is None else str(v).lower() if isinstance(v, bool) else str(v)
+
+    def token(k, v):
+        return '"' + f"{k}={value(v)}".replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    tokens = [token(k, v) for k, v in params.items()]
     print(f"{' '.join(tokens)}|{global_index}")
 except Exception as e:
     print(f"Error processing parameters: {e}", file=sys.stderr)

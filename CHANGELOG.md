@@ -433,6 +433,15 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `hydra.run.dir`, or a script that is not a Hydra app and checks its keys strictly, sets
   `hydra_overrides: [wandb.group, output.dir]` to get the old command.
 
+- **List-valued params no longer kill local, ssh and single-job Slurm tasks (R13).** A
+  param like `layers: [64, 64]` renders as `"layers=[64, 64]"`, and the space inside it
+  ended the template's `COMMAND="…"` string early, so bash tried to run `64]…` and every
+  task exited 127. A `;` in a string value broke the `Parameters:` line the same way. These
+  templates now pass the tokens as one shell word, as the array template already did. Each
+  token also escapes `"` and `\`, so a value holding a double quote or ending in a
+  backslash reaches the script too (on every backend; a `$` still expands, as before).
+  Every template is now run under bash in the tests, not only string-matched.
+
 ### Removed (2026-10 maintenance pass)
 
 - **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,
