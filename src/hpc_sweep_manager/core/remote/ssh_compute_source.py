@@ -377,6 +377,7 @@ class SSHComputeSource(ComputeSource):
             params_hydra=params_to_hydra_args(params),
             params_yaml=params_to_yaml(params),
             wandb_group=wandb_group or sweep_id,
+            hydra_overrides=self.hydra_overrides,
             cuda_visible_devices=cuda_visible,
             modules=list(effective_spec.modules),
             pre_script=list(effective_spec.pre_script),

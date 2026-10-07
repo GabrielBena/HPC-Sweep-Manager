@@ -48,13 +48,29 @@ def params_to_hydra_args(params: dict[str, Any]) -> str:
     return " ".join(tokens)
 
 
+# The overrides HSM appends to every task command, in this order (R3). The project config's
+# `hydra_overrides:` picks a subset; `hydra.run.dir` gives each task its own Hydra run dir, so
+# tasks that start in the same second no longer share `outputs/<date>/<time>`.
+HYDRA_OVERRIDES = {
+    "wandb.group": "{group}",
+    "output.dir": "{dir}",
+    "hydra.run.dir": "{dir}/.hydra_run",
+}
+LEGACY_HYDRA_OVERRIDES = ("wandb.group", "output.dir")  # before R3: for chains launched without it
+
+
+def task_overrides(keys, group: str, task_dir: str) -> str:
+    """The ``key=value`` override of each of ``keys`` for one task, space-joined."""
+    return " ".join(f"{k}={HYDRA_OVERRIDES[k].format(group=group, dir=task_dir)}" for k in keys)
+
+
 def params_to_yaml(params: dict[str, Any]) -> str:
     """Serialize a task's parameter dict to YAML for a self-describing
     ``params.yaml`` dropped into each task dir.
 
     After a ``tasks/``-only pull, a synced checkpoint would otherwise be
     orphaned from the overrides that produced it (Hydra's ``.hydra/config.yaml``
-    lands in the job cwd, outside ``tasks/``). Writing the exact per-task
+    lands outside ``tasks/`` unless ``hydra.run.dir`` is passed). Writing the exact per-task
     overrides next to the checkpoint makes it self-describing — pair it with the
     project code to rebuild the model. Always ends with a trailing newline so it
     drops cleanly into a heredoc.
@@ -104,6 +120,8 @@ def render_template(template_name: str, **kwargs) -> str:
 
     # Add custom filters
     env.filters["strftime"] = strftime_filter
+    env.globals["task_overrides"] = task_overrides
+    kwargs.setdefault("hydra_overrides", tuple(HYDRA_OVERRIDES))  # never an empty Undefined
 
     try:
         template = env.get_template(template_name)

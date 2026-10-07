@@ -171,9 +171,17 @@ class TestOneDriverAtATime:
             calls.append(kwargs)
             return SweepResult(sweep_id="sw1", sweep_dir=tmp_path, chain_decision="advance")
 
-        monkeypatch.setattr(SSHSlurmComputeSource, "from_manifest", lambda m: Reattached())
+        src = Reattached()
+        monkeypatch.setattr(SSHSlurmComputeSource, "from_manifest", lambda m: src)
         monkeypatch.setattr(sweep_orchestrator, "run_resumable_sweep_async", run)
         (tmp_path / "sweep_config.yaml").write_text("sweep:\n  grid:\n    lr: [1, 2]\n")
         out = Console(file=io.StringIO(), force_terminal=False, width=200)
         await _advance_via_manifest(tmp_path, _chain_manifest(costs=[1.0, 3.0]), out, block=False)
         assert calls[0]["costs"] == [1.0, 3.0]
+        assert src.hydra_overrides == ("wandb.group", "output.dir")  # launched before R3
+        saved = _chain_manifest(hydra_overrides=["output.dir"])
+        await _advance_via_manifest(tmp_path, saved, out, block=False)
+        assert src.hydra_overrides == ("output.dir",)  # the chain keeps the project's pick
+        odd = _chain_manifest(hydra_overrides=["output.dir", "from.a.newer.hsm"])
+        await _advance_via_manifest(tmp_path, odd, out, block=False)
+        assert src.hydra_overrides == ("output.dir",)  # an unknown name can't break rendering

@@ -567,6 +567,8 @@ class TestArrayParamsExtractionFunctional:
         assert "lr=0.01" in argv
         assert "seed=7" in argv
         assert "note=a|b" in argv  # pipe in a VALUE survives the index split
+        task = tasks_dir / "task_1"  # HSM's overrides, expanded by bash (R3)
+        assert argv[-2:] == [f"output.dir={task}", f"hydra.run.dir={task}/.hydra_run"]
         # The tempfile snippet also dropped the self-describing params.yaml.
         assert (tasks_dir / "task_1" / "params.yaml").is_file()
 
@@ -710,6 +712,26 @@ class TestResumableCrashFunctional:
 class TestMultiGpuTypeLocal:
     """Review finding: the local source's multi-type wiring was untested —
     only the SSH twin was. Same invariants, local transport."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["individual", "array"])
+    async def test_the_project_picks_the_overrides(self, tmp_path, monkeypatch, mode):  # R3
+        import hpc_sweep_manager.core.hpc.slurm_compute_source as mod
+
+        class Submitted:
+            returncode, stdout, stderr = 0, "Submitted batch job 7\n", ""
+
+        sbatch = lambda cmd, **kw: Submitted() if cmd[0] == "sbatch" else OTHER_COMMAND  # noqa: E731
+        monkeypatch.setattr(mod.subprocess, "run", sbatch)
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+        src.sweep_dir, src.sweep_id = tmp_path, "sweep_1"
+        src.hydra_overrides = ("output.dir",)
+        await src.submit_batch([{"seed": 0}], "sweep_1", mode=mode, job_name_prefix="sweep_1")
+        [script] = (tmp_path / "scripts").glob("*.slurm")
+        command = next(
+            line for line in script.read_text().splitlines() if line.startswith("COMMAND=")
+        )
+        assert "output.dir=" in command and "wandb.group" not in command
 
     @pytest.mark.asyncio
     async def test_submit_array_multi_type_splits_locally(self, tmp_path, monkeypatch):

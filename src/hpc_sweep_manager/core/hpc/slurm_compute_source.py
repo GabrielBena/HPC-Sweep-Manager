@@ -177,6 +177,7 @@ class SlurmComputeSource(SlurmBase):
             params_hydra=params_to_hydra_args(params),
             params_yaml=params_to_yaml(params),
             wandb_group=wandb_group,
+            hydra_overrides=self.hydra_overrides,
             uses_conda=_python_needs_conda_init(self.python_path),
             conda_env=self.conda_env,
         )
@@ -365,6 +366,7 @@ class SlurmComputeSource(SlurmBase):
             python_path=self.python_path,
             script_path=self.script_path,
             wandb_group=wandb_group,
+            hydra_overrides=self.hydra_overrides,
             uses_conda=_python_needs_conda_init(self.python_path),
             conda_env=self.conda_env,
             gpu_type=sub.gpu_type,

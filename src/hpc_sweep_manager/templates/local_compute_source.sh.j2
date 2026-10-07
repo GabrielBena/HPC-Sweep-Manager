@@ -35,7 +35,7 @@ mkdir -p {{ task_dir }}
 cat > {{ task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
 {{ params_yaml }}HSM_PARAMS_EOF
 
-COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} wandb.group={{ wandb_group }} output.dir={{ task_dir }}"
+COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} {{ task_overrides(hydra_overrides, wandb_group, task_dir) }}"
 echo "$COMMAND" > {{ task_dir }}/command.txt
 echo "Executing: $COMMAND"
 

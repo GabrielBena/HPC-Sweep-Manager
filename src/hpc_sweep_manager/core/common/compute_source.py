@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from .resource_spec import ResourceSpec
+from .templating import HYDRA_OVERRIDES
 
 if TYPE_CHECKING:
     from .resumable import ChunkProgress
@@ -62,6 +63,7 @@ class ComputeSource(ABC):
     """Abstract base class for compute sources."""
 
     poll_interval: float = 10.0  # seconds between the status polls of a launcher's wait
+    hydra_overrides: tuple[str, ...] = tuple(HYDRA_OVERRIDES)  # appended to each task (R3)
 
     def __init__(self, name: str, source_type: str, max_parallel_jobs: int):
         self.name = name

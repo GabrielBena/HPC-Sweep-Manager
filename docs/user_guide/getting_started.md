@@ -103,12 +103,25 @@ otherwise ignored), and stop if `project.root`, `paths.train_script` or the swee
 
 ## Step 2 — your training script's contract
 
-HSM passes parameters as Hydra-style `key=value` tokens, plus two
+HSM passes parameters as Hydra-style `key=value` tokens, plus three
 HSM-injected args:
 
 - `wandb.group=<sweep_id>` — pass to wandb if you use it.
 - `output.dir=<path>` — your script must `mkdir -p` it and write any
   outputs there. HSM rsyncs this dir back for `--remote` mode.
+- `hydra.run.dir=<path>/.hydra_run` — Hydra's run dir, inside the task dir, so
+  tasks that start in the same second never share `outputs/<date>/<time>`.
+
+`hydra_overrides:` in `.hsm/config.yaml` lists which of the three each task gets,
+in order (`[]` for none; an unknown name stops the run). A project without a `wandb`
+config drops `wandb.group`:
+
+```yaml
+hydra_overrides: [output.dir, hydra.run.dir]
+```
+
+Anything your app writes to Hydra's output dir now lands in the task dir and is
+pulled back with it. A project that sets its own `hydra.run.dir` drops it from the list.
 
 Minimum viable Python:
 

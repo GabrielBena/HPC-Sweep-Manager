@@ -495,13 +495,11 @@ it's trying to reintroduce them, push back.
   `.hsm/config.yaml` for those. See
   [`HPC_EXECUTION.md`](docs/user_guide/HPC_EXECUTION.md#the-typed-slurm-block--reach-fields---resources-cant).
 
-- **`wandb.group=` is injected unconditionally** into every rendered task
-  command, which forces every consumer project to have a `wandb` config
-  key Hydra can override (the 2026-06-03 field report flagged this as the
-  reason the B2 exclude bug was load-bearing). Making the injection
-  conditional (config flag, or detect a `configs/wandb/` group) is a
-  design follow-up — projects without wandb currently can't run under HSM
-  without adding a stub key.
+- **HSM's task overrides are one list** (R3, 2026-10): `hydra_overrides:`
+  in the project config (default `[wandb.group, output.dir, hydra.run.dir]`,
+  rendered by `templating.task_overrides` in all four templates). A project
+  without wandb drops `wandb.group` from it; every source carries the list as
+  `ComputeSource.hydra_overrides`, and a resumable chain stores it.
 
 ## Testing model
 

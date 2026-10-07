@@ -550,6 +550,7 @@ async def run_resumable_sweep_async(
                     "last_done_count": obs_done,
                     "last_checkpoint_mtime": obs_mtime,
                     "wandb_group": wandb_group,
+                    "hydra_overrides": list(source.hydra_overrides),
                     "costs": costs,  # the same GPU-type split (issue #7) for every chunk
                 },
                 job_ids=last_job_ids,

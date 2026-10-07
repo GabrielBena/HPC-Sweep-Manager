@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from .resource_spec import ResourceSpec
 from .resumable import ResumableConfig
+from .templating import HYDRA_OVERRIDES
 from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,8 @@ _SHARED = {"remote_root", "rsync_excludes", "keep_remote_on_success", "conda_env
 
 # The keys each block knows (R4); config_warnings reports any other one, since it is ignored.
 KNOWN_KEYS = dict(
-    config={"local", "slurm", "distributed", "paths", "project", "wandb", "metadata"},
+    config={"local", "slurm", "distributed", "paths", "project", "wandb", "metadata"}
+    | {"hydra_overrides"},
     local={"walltime", "cpus_per_task", "mem", "gpus", "pre_script", "visible_gpus", "sweeps_root"},
     slurm=_SPEC_KEYS | {"qos_whitelist", "max_array_size", "speed_factors"},
     distributed={"enabled", "remotes", "local_max_jobs", *_SHARED},
@@ -430,6 +432,21 @@ class HSMConfig:
         if script and not (here(root or ".") / here(script)).is_file():
             missing.append((key, script))
         return [f"{k} = {v!r} does not exist on this machine" for k, v in missing]
+
+    def get_hydra_overrides(self) -> tuple[str, ...] | None:
+        """Which of HSM's overrides each task gets (``hydra_overrides:``, R3), or ``None`` when
+        unset: every source then appends all of them. An unknown name raises ValueError rather
+        than being dropped: a typo of ``output.dir`` would silently cost every task its dir."""
+        keys = self.config_data.get("hydra_overrides")
+        if keys is None:
+            return None
+        keys = keys if isinstance(keys, list) else [keys]
+        if bad := [str(k) for k in keys if str(k) not in HYDRA_OVERRIDES]:
+            near = difflib.get_close_matches(bad[0], list(HYDRA_OVERRIDES), n=1)
+            hint = f"; did you mean `{near[0]}`?" if near else ""
+            names = ", ".join(HYDRA_OVERRIDES)
+            raise ValueError(f"hydra_overrides: `{bad[0]}` is not one of {names}{hint}")
+        return tuple(keys)
 
     def get_wandb_config(self) -> dict[str, Any]:
         """Get wandb configuration from config."""

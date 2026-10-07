@@ -140,6 +140,37 @@ class TestConfigWarnings:
         (warning,) = config_warnings({"hpc": {}})
         assert warning == "HSM config: `hpc` is not a known key, so it is ignored"
 
+    @pytest.mark.parametrize(
+        ("value", "keys"),
+        [
+            (None, None),  # unset: every source appends all of HSM's overrides
+            ([], ()),
+            (["hydra.run.dir", "output.dir"], ("hydra.run.dir", "output.dir")),
+            ("output.dir", ("output.dir",)),
+        ],
+    )
+    def test_hydra_overrides_getter(self, value, keys):
+        cfg = {} if value is None else {"hydra_overrides": value}
+        assert HSMConfig(cfg).get_hydra_overrides() == keys
+
+    @pytest.mark.parametrize(
+        ("value", "message"),
+        [
+            (
+                ["hydra.run.dir", "output_dir"],
+                "`output_dir` is not one of wandb.group, output.dir,",
+            ),
+            (["output_dir"], "; did you mean `output.dir`?"),
+            ([{"x": 1}], "`{'x': 1}` is not one of"),
+            (True, "`True` is not one of"),
+        ],
+    )
+    def test_an_unknown_hydra_override_stops_the_run(self, value, message):
+        # Dropping it would be silent: a typo of `output.dir` costs every task its dir.
+        with pytest.raises(ValueError, match="hydra_overrides: ") as e:
+            HSMConfig({"hydra_overrides": value}).get_hydra_overrides()
+        assert message in str(e.value)
+
     def test_non_mapping_blocks_do_not_crash(self):
         bad = {"local": "x", "distributed": {"remotes": ["uzh"]}}
         assert config_warnings(bad, {"sweep": None}) == []
