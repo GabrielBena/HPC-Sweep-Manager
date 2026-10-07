@@ -22,11 +22,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ..hpc.slurm_protocol import FAILED_STATES, TASK_STATES_FILE
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
 from .yaml_loader import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
+
+
+def load_task_states(sweep_dir: Path) -> dict[str, dict]:
+    """How Slurm ended each task (``tasks_state.json``, written at collect); {} when absent."""
+    try:
+        states = json.loads((Path(sweep_dir) / TASK_STATES_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    return states if isinstance(states, dict) else {}
 
 
 class SweepCompletionAnalyzer:
@@ -40,6 +50,7 @@ class SweepCompletionAnalyzer:
         # manifest's resumable block (a chain may use a custom one); falls back
         # to the default for ordinary sweeps / older manifests.
         self._done_sentinel = self._read_done_sentinel()
+        self._task_states = load_task_states(self.sweep_dir)
 
         # Load data
         self.sweep_config = None
@@ -62,6 +73,13 @@ class SweepCompletionAnalyzer:
             except (OSError, ValueError):
                 pass
         return ".hsm_done"
+
+    def _slurm_ended(self, task_id: str) -> str | None:
+        """The state Slurm ended a task in badly (TIMEOUT, OUT_OF_MEMORY, ..., CANCELLED), from
+        ``tasks_state.json``: the verdict for a task whose wrapper a kill stopped before it wrote
+        a ``Status:`` line, which would otherwise read as RUNNING forever."""
+        state = self._task_states.get(task_id, {}).get("state")
+        return state if state in FAILED_STATES | {"CANCELLED"} else None
 
     def load_sweep_data(self) -> bool:
         """Load sweep configuration and execution data."""
@@ -123,6 +141,7 @@ class SweepCompletionAnalyzer:
 
         completed_tasks = []
         failed_tasks = []
+        cancelled_tasks = []  # by `hsm sweep cancel`, from tasks_state.json
         running_tasks = []
         task_statuses = {}
 
@@ -150,15 +169,9 @@ class SweepCompletionAnalyzer:
                 task_statuses[task_id]["status"] = "COMPLETED"
                 continue
 
-            if not task_info_file.exists():
-                # Task directory exists but no info file - treat as running/incomplete
-                running_tasks.append(task_id)
-                task_statuses[task_id]["status"] = "RUNNING"
-                continue
-
             try:
-                with open(task_info_file) as f:
-                    content = f.read()
+                # No info file (killed before it wrote one) reads as no Status: line.
+                content = task_info_file.read_text() if task_info_file.exists() else ""
 
                 # Check for status lines (last occurrence wins)
                 status_lines = [line for line in content.split("\n") if line.startswith("Status: ")]
@@ -177,10 +190,13 @@ class SweepCompletionAnalyzer:
                     else:
                         running_tasks.append(task_id)
                         task_statuses[task_id]["status"] = "UNKNOWN"
+                elif ended := self._slurm_ended(task_id):
+                    (cancelled_tasks if ended == "CANCELLED" else failed_tasks).append(task_id)
+                    task_statuses[task_id]["status"] = ended
                 else:
                     # No status line found - task might be running
                     running_tasks.append(task_id)
-                    task_statuses[task_id] = "RUNNING"
+                    task_statuses[task_id]["status"] = "RUNNING"
 
             except Exception as e:
                 logger.warning(f"Error reading task info for {task_id}: {e}")
@@ -220,7 +236,7 @@ class SweepCompletionAnalyzer:
             "total_expected": total_expected,
             "total_completed": total_completed,
             "total_failed": total_failed,
-            "total_cancelled": 0,  # PBS array jobs don't have cancelled status, only SUCCESS/FAILED
+            "total_cancelled": len(cancelled_tasks),
             "total_missing": total_missing,
             "total_running": total_running,
             "completion_rate": (total_completed / total_expected * 100)
@@ -228,12 +244,12 @@ class SweepCompletionAnalyzer:
             else 0,
             "completed_tasks": completed_tasks,
             "failed_tasks": failed_tasks,
-            "cancelled_tasks": [],  # PBS array jobs don't have cancelled status
+            "cancelled_tasks": cancelled_tasks,
             "running_tasks": running_tasks,
             "missing_task_numbers": missing_task_numbers,
             "missing_combinations": self.missing_combinations,
             "failed_combinations": self.failed_combinations,
-            "cancelled_combinations": [],  # PBS array jobs don't have cancelled status
+            "cancelled_combinations": self._get_combinations_for_tasks(cancelled_tasks),
             "needs_completion": total_missing > 0 or total_failed > 0,
             "task_statuses": task_statuses,
             "scan_method": "task_directories",
@@ -319,7 +335,7 @@ class SweepCompletionAnalyzer:
 
             if status == "COMPLETED":
                 completed_tasks.append(task_id)
-            elif status == "FAILED":
+            elif status in FAILED_STATES:
                 failed_tasks.append(task_id)
             elif status == "CANCELLED":
                 cancelled_tasks.append(task_id)
@@ -586,7 +602,7 @@ class SweepCompletionAnalyzer:
                                 )
                                 return "FAILED"
 
-            return None
+            return self._slurm_ended(task_id)
         except Exception as e:
             logger.warning(f"Error reading task status for {task_id}: {e}")
             return None

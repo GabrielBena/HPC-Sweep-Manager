@@ -236,6 +236,7 @@ Each sweep lands at `sweeps/outputs/<sweep_id>/`:
 sweeps/outputs/sweep_20260601_143022/
 ├── sweep_config.yaml            # snapshot of what you ran
 ├── submission_summary.txt       # job IDs + final statuses
+├── tasks_state.json             # Slurm: how each task ended (state, exit code, node, elapsed)
 ├── tasks/
 │   ├── task_001/
 │   │   ├── task_info.txt        # node, params, started/finished, status

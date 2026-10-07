@@ -457,6 +457,40 @@ def _fmt_num(x: float) -> str:
     return f"{x:g}"
 
 
+def _report_slurm_ends(sweep_dir: Path, console: Console) -> list[str]:
+    """Print how Slurm ended the tasks that did not complete (``tasks_state.json``), TIMEOUT and
+    OUT_OF_MEMORY counted apart, and return them; a task with ``.hsm_done`` is done whatever Slurm
+    says. A few FAILED/NODE_FAIL tasks within a minute, while others ran longer, are flagged
+    "infra suspect" with an ``--exclude`` of their nodes; a sweep-wide fast failure is a bug."""
+    from collections import Counter
+
+    from ..core.common.sweep_analysis import load_task_states
+
+    states = load_task_states(sweep_dir)
+    ended = {
+        t: s
+        for t, s in states.items()
+        if s.get("state") != "COMPLETED" and not (sweep_dir / "tasks" / t / ".hsm_done").exists()
+    }
+    if ended:
+        counts = Counter(s.get("state") for s in ended.values()).most_common()
+        console.print("Slurm ended: " + ", ".join(f"{n} {st}" for st, n in counts), style="red")
+    quick = sorted(
+        t
+        for t, s in ended.items()
+        if s.get("state") in ("FAILED", "NODE_FAIL") and s.get("elapsed_s") in range(60)
+    )
+    ran = any(s.get("elapsed_s", 0) >= 60 for s in states.values())
+    if quick and ran and len(quick) * 2 < len(states):
+        nodes = ",".join(sorted({ended[t].get("node", "") for t in quick} - {"", "None assigned"}))
+        hint = f"; if a node is at fault, resubmit with --exclude={nodes} (spec extra_directives)"
+        more = f" (+{len(quick) - 10} more)" if len(quick) > 10 else ""
+        listed = ", ".join(quick[:10]) + more
+        msg = f"Infra suspect (failed in < 60 s): {listed}{hint if nodes else ''}"
+        console.print(msg, style="yellow", markup=False)
+    return list(ended)
+
+
 def _run_sweep_via_orchestrator(
     *,
     config_path: Path,
@@ -812,7 +846,8 @@ def _run_sweep_via_orchestrator(
         if failed or cancelled:
             # Point the user at the failing task dirs + logs. tasks/ is local
             # after collect_results(), so the wrapper-written task_info.txt
-            # (Status: FAILED) is on disk for every backend.
+            # (Status: FAILED) is on disk for every backend; a task a walltime
+            # or node kill stopped before that line is in tasks_state.json.
             tasks_dir = sweep_dir / "tasks"
             failing = []
             if tasks_dir.exists():
@@ -825,6 +860,8 @@ def _run_sweep_via_orchestrator(
                         continue
                     if status_lines and "FAILED" in status_lines[-1]:
                         failing.append(ti.parent)
+            ended = _report_slurm_ends(sweep_dir, console)
+            failing = sorted({*failing, *(tasks_dir / t for t in ended)})
             console.print("[red]Some jobs did not complete. Inspect:[/red]")
             for d in failing[:10]:
                 console.print(f"  [yellow]{d}[/yellow]")
@@ -1185,7 +1222,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
         # squeue first, then one sacct, through the same outage-safe refresh a live launcher
         # uses: a task still queued (held behind a reservation, say) stays running and only gets
         # pulled; the archive + `rm -rf` below needs every job named terminal.
-        statuses = await source.adopt(job_ids)
+        statuses = await source.adopt(job_ids, jobs=manifest.get("jobs") or ())
         terminal = {j: s for j, s in statuses.items() if s in TERMINAL_STATES}
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
         if running:
@@ -1210,6 +1247,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
                 + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
                 + f".[/{colour}]"
             )
+            _report_slurm_ends(sweep_dir, console)
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "
@@ -1408,7 +1446,7 @@ async def _advance_via_manifest(
         source._remote_code_dir = manifest.get("remote_code_dir")
         source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
 
-        statuses = await source.adopt(last_job_ids)
+        statuses = await source.adopt(last_job_ids, jobs=manifest.get("jobs") or ())
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]
         if running:
             console.print(

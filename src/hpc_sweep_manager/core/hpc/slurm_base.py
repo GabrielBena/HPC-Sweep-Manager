@@ -5,7 +5,8 @@ jobs still queued, one ``sacct`` for the ones that left. A failed call is never 
 squeue or sacct fails (slurmctld or slurmdbd down, a maintenance) no job changes state that cycle.
 A job that left the queue waits for sacct to name its terminal state; it is assumed COMPLETED only
 when accounting has no answer for it (no rows, or accounting absent) on ``SACCT_GRACE`` polls in a
-row. Subclasses provide :meth:`_sh`, the one transport seam, and may set :attr:`slurm_user`.
+row. At collect, :meth:`SlurmBase.record_task_states` writes how Slurm ended each task (one more
+sacct). Subclasses provide :meth:`_sh`, the one transport seam, and may set :attr:`slurm_user`.
 Both write ``.hsm_manifest.json`` as they submit, naming the jobs (``hsm sweep cancel``).
 """
 
@@ -16,7 +17,7 @@ import getpass
 import json
 import logging
 from abc import abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -33,12 +34,14 @@ from .scheduler_queue import (
     sacct_args,
     strip_array_suffix,
 )
-from .slurm_protocol import SLURM_STATE_MAP, directive_flag
+from .slurm_protocol import SLURM_STATE_MAP, TASK_STATES_FILE, directive_flag
 
 logger = logging.getLogger(__name__)
 
 # Polls in a row a job may be out of squeue with no accounting record before it counts as done.
 SACCT_GRACE = 3
+# One sacct row per array task (``-X``), with what TASK_STATES_FILE keeps of it.
+TASK_STATE_FIELDS = "JobID,State,ExitCode,NodeList,ElapsedRaw"
 
 
 def accounting_absent(rc: int, err: str) -> bool:
@@ -83,12 +86,28 @@ def sacct_verdicts(gone: Iterable[str], sacct_out: str) -> dict[str, str]:
     return verdicts
 
 
+def task_states(sacct_out: str, task_of: Callable[[str], str | None]) -> dict[str, dict]:
+    """``{task dir: {state, exit_code, node, elapsed_s}}`` from ``sacct -P -n -X -o``
+    :data:`TASK_STATE_FIELDS`, for the ended rows that ``task_of`` maps to a task dir."""
+    states = {}
+    for row in sacct_out.splitlines():
+        cols = [c.strip() for c in row.split("|")]
+        if len(cols) != 5 or not cols[1]:
+            continue
+        job, state, code, node, elapsed = cols
+        state = state.split()[0].rstrip("+")  # "CANCELLED by 123" -> CANCELLED
+        if SLURM_STATE_MAP.get(state) in TERMINAL_STATES and (task := task_of(job)):
+            secs = int(elapsed) if elapsed.isdigit() else None
+            states[task] = {"state": state, "exit_code": code, "node": node, "elapsed_s": secs}
+    return states
+
+
 class SlurmBase(ComputeSource):
     """A :class:`ComputeSource` whose jobs live in a Slurm scheduler."""
 
     slurm_user: str | None = None  # whose queue to read; defaults to the local user
     poll_interval = 60.0  # Slurm jobs run for hours: a poll a minute is soon enough
-    sweep_dir: Path | None = None  # set by setup(); the manifest is written there
+    sweep_dir: Path | None = None  # the local sweep dir, set by setup(): manifest, task states
     sweep_id: str | None = None
 
     def __init__(self, *args, **kwargs):
@@ -139,15 +158,20 @@ class SlurmBase(ComputeSource):
         info = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
         return info.status if info else "UNKNOWN"
 
-    async def adopt(self, job_ids: Sequence[str], pause: float = 20.0) -> dict[str, str]:
+    async def adopt(
+        self, job_ids: Sequence[str], pause: float = 20.0, jobs: Sequence[dict] = ()
+    ) -> dict[str, str]:
         """Track already-submitted jobs (a re-attach) and return their settled statuses.
 
         Polls up to ``SACCT_GRACE`` times, ``pause`` apart, until every job is either queued or
         named by sacct, so a fresh process reaches the verdict a live launcher would. A job Slurm
-        couldn't be asked about stays ``UNKNOWN``.
+        couldn't be asked about stays ``UNKNOWN``. ``jobs`` (the manifest's entries) gives each
+        array its task-dir map back.
         """
+        order = {e["job_id"]: e["global_indices"] for e in jobs if e.get("global_indices")}
         for job in job_ids:
-            self.active_jobs.setdefault(job, JobInfo(job, job, {}, self.name, status="UNKNOWN"))
+            params = {"_global_indices": order[job]} if job in order else {}
+            self.active_jobs.setdefault(job, JobInfo(job, job, params, self.name, status="UNKNOWN"))
         for poll in range(SACCT_GRACE):
             await self.update_all_job_statuses()
             if not self._sacct_misses.keys() & self.active_jobs.keys():
@@ -199,6 +223,47 @@ class SlurmBase(ComputeSource):
         await self._write_manifest(
             job_ids, "array", num_tasks, resumable_manifest=resumable, chain=chain
         )
+
+    async def record_task_states(self) -> None:
+        """Write :data:`TASK_STATES_FILE` into the local sweep dir: how Slurm ended each task.
+
+        One sacct for every tracked job, best effort and never a guess: a failed or absent sacct,
+        or one without rows, writes nothing; rows update the file's entries. An array row maps
+        to ``task_<global index>`` through its job's ``_global_indices`` (a re-attached array
+        has none: 1..N, when it is the only job); an individual job's row to its own task dir.
+        """
+        jobs = {**self.completed_jobs, **self.active_jobs}
+        if not jobs or self.sweep_dir is None:
+            return
+
+        def task_of(row: str) -> str | None:
+            base, _, index = row.partition("_")
+            if (info := jobs.get(base)) is None:
+                return None
+            if not index:  # an individual job (an array only has <id>_<i> rows)
+                own = info.task_dir and "_array_size" not in info.params
+                return Path(info.task_dir).name if own else None
+            if not index.isdigit():  # a collapsed range (123_[4-9]) never ran
+                return None
+            i, order = int(index), info.params.get("_global_indices")
+            if order is None:
+                return f"task_{i}" if len(jobs) == 1 else None
+            return f"task_{order[i - 1]}" if 0 < i <= len(order) else None
+
+        try:
+            argv = ["sacct", "-j", ",".join(jobs), "-P", "-n", "-X", "-o", TASK_STATE_FIELDS]
+            rc, out, err = await self._sh(argv)
+            states = task_states(out, task_of) if rc == 0 else {}
+            if states:  # merged: a distributed sweep's Slurm children share the sweep dir
+                path = self.sweep_dir / TASK_STATES_FILE
+                from ..common.sweep_analysis import load_task_states
+
+                old = load_task_states(self.sweep_dir)  # {} when absent or unreadable
+                path.write_text(json.dumps({**old, **states}, indent=2, sort_keys=True))
+            elif rc != 0:
+                logger.info(f"sacct failed (rc={rc}): {err.strip()}; no {TASK_STATES_FILE}")
+        except Exception as e:  # noqa: BLE001 — best effort: the collect goes on without it
+            logger.warning(f"{TASK_STATES_FILE} not written: {e}")
 
     async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
         """A CPU-only job (:func:`cpu_only`) excludes its partition's GPU nodes, unless that is

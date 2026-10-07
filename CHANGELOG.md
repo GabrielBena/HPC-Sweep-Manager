@@ -312,6 +312,18 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   of an ssh task now checks the pid is still the task's: a live process younger than the
   task's `.hsm_pid` (a pid reused after a hard kill or a reboot) gets no signal. A
   cancelled task counts as not COMPLETED: `collect` keeps the remote dir and says so.
+- **How Slurm ended each task is recorded; a walltime kill no longer reads as RUNNING
+  (S8, FR#11, #13).** TIMEOUT, OUT_OF_MEMORY, NODE_FAIL and PREEMPTED all became FAILED, and
+  a task killed at its walltime wrote no `Status:` line, so `hsm sweep status`/`report`
+  showed it RUNNING forever and the run's failing-task list skipped it. At collect, both
+  Slurm sources now ask `sacct` once for every job and write `tasks_state.json` (state, exit
+  code, node, elapsed seconds per task dir) into the local sweep dir, never the remote one.
+  The analyzer reads it for a task without a `Status:` line (the `.hsm_done` sentinel and a
+  written `Status:` line still win). The run summary, and `hsm sweep collect`, count the
+  tasks per state, TIMEOUT and OUT_OF_MEMORY apart, and list those that failed within 60 s
+  as "infra suspect" with an `--exclude=<nodes>` hint. A failed, absent or empty `sacct`
+  writes nothing, and the old behaviour stays. **For consumers:** a walltime-killed task
+  now counts as failed (TIMEOUT) in `status`/`report`, and the run names it.
 
 ### Removed (2026-10 maintenance pass)
 

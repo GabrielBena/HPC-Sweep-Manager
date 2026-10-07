@@ -336,7 +336,7 @@ class SlurmComputeSource(SlurmBase):
 
         # "index" is array-local (matched against $SLURM_ARRAY_TASK_ID);
         # "global_index" keeps the task's original 1..N position so
-        # tasks/task_%04d stays globally numbered across sub-arrays.
+        # tasks/task_<n> (unpadded) stays globally numbered across sub-arrays.
         params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
         params_file.write_text(json.dumps(list(sub.entries), indent=2))
 
@@ -380,6 +380,7 @@ class SlurmComputeSource(SlurmBase):
         job_id = parse_sbatch_job_id(result.stdout)
 
         params: dict[str, Any] = {"_array_size": len(sub.entries)}
+        params["_global_indices"] = [e["global_index"] for e in sub.entries]  # row -> task dir
         if sub.gpu_type:
             params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
@@ -421,6 +422,7 @@ class SlurmComputeSource(SlurmBase):
         # Slurm outputs land directly in the shared filesystem under tasks_dir.
         # (defer_cleanup is a resumable-chain no-op: nothing to pull or tear down
         # on the shared FS — checkpoints already persist in place across chunks.)
+        await self.record_task_states()
         return True
 
     async def chunk_progress(

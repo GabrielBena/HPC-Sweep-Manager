@@ -36,6 +36,11 @@ SLURM_STATE_MAP: dict[str, str] = {
     "BOOT_FAIL": "FAILED",
     "DEADLINE": "FAILED",
 }
+# The raw states a task fails in: FAILED, TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, ...
+FAILED_STATES = frozenset(s for s, c in SLURM_STATE_MAP.items() if c == "FAILED")
+# How Slurm ended each task, recorded in the local sweep dir at collect: a walltime kill leaves
+# no ``Status:`` line in task_info.txt, so this is the only record of a TIMEOUT (tracker S8).
+TASK_STATES_FILE = "tasks_state.json"
 
 
 def directive_flag(key: str) -> str:
