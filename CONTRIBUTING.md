@@ -26,8 +26,8 @@ Fully hermetic — PATH-stub fakes stand in for `sbatch`/`squeue`/`sacct`/
 `nvidia-smi` and an SSH connection, so no real cluster is needed. This is the
 same suite CI runs.
 
-> **On anahita:** the repo dir auto-activates the `hsm` conda env, which has no
-> pytest. Use the base interpreter: `/home/gbena/miniconda3/bin/python -m pytest …`.
+> Use an interpreter that has the `dev` extra (`pip install -e '.[dev]'`); an env
+> that only runs sweeps may not have pytest.
 
 Live, real-hardware smoke tests live in `examples/smoke_*.sh` (run manually
 against a real Slurm/SSH target; not part of CI).

@@ -181,11 +181,10 @@ class TestCondaInitPartialRenders:
         assert "MAMBA_EXE" in rendered
         assert "$HOME/miniconda3" in rendered and "/etc/profile.d/conda.sh" in rendered
 
-    def test_micromamba_probe_includes_hsm_clone_path(self):
-        # The user's S3IT layout has micromamba INSIDE the HSM clone's bin/,
-        # not in any standard location. The probe must include this path.
+    def test_the_probe_names_no_machine_path(self):
+        # A shipped template probes standard locations only, never one person's clone layout.
         rendered = render_template("slurm_array.sh.j2", uses_conda=True, **self._BASE_KWARGS)
-        assert "HPC-Sweep-Manager/bin/micromamba" in rendered
+        assert "/usr/local/bin/micromamba" in rendered and "HPC-Sweep-Manager" not in rendered
 
     def test_local_template_emits_init_block_when_uses_conda(self):
         # LocalComputeSource template must also support the partial so

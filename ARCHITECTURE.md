@@ -73,7 +73,7 @@ the typed resource description: `walltime`, `cpus_per_task`, `mem`,
 `gpus`, `gpu_type`, `partition`, `qos`, `account`, `modules`,
 `pre_script`, `extra_directives`. Frozen dataclass — reused across jobs
 in a batch. Backends translate to their native syntax (Slurm
-`#SBATCH ...`, PBS `select=...`, local subprocess env, etc.).
+`#SBATCH ...`, local subprocess env, etc.). There is no PBS backend.
 
 ## Push-SSH lifecycle
 
@@ -293,5 +293,5 @@ The config is read by `HSMConfig.load()` in
   push-model recipe.
 - [docs/user_guide/HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) —
   Slurm recipe + the `--resources` gap workaround.
-- [docs/api_reference/compute_sources.md](docs/api_reference/compute_sources.md) —
-  per-class API surface.
+- [`core/common/compute_source.py`](src/hpc_sweep_manager/core/common/compute_source.py) —
+  the `ComputeSource` ABC every backend implements (its docstrings are the API).

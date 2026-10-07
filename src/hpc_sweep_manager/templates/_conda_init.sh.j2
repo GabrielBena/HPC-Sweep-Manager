@@ -57,8 +57,7 @@ if [ "$_hsm_conda_loaded" -eq 0 ]; then
              "$HOME/bin/micromamba" \
              "$HOME/micromamba/bin/micromamba" \
              "$HOME/mambaforge/bin/micromamba" \
-             "/usr/local/bin/micromamba" \
-             "$HOME/code/packages/HPC-Sweep-Manager/bin/micromamba"; do
+             "/usr/local/bin/micromamba"; do
         if [ -n "$_m" ] && [ -x "$_m" ]; then
             export MAMBA_EXE="$_m"
             export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"

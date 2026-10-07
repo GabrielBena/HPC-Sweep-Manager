@@ -44,5 +44,4 @@ bash examples/smoke_cli.sh                    # real 4-task array submission
 - [Getting started](../docs/user_guide/getting_started.md)
 - [SSH execution recipe](../docs/user_guide/SSH_EXECUTION.md)
 - [HPC execution recipe](../docs/user_guide/HPC_EXECUTION.md)
-- [Compute sources API](../docs/api_reference/compute_sources.md)
 - [Architecture](../ARCHITECTURE.md)
