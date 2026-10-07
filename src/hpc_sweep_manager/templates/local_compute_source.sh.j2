@@ -23,11 +23,14 @@ module load {{ mod }} 2>/dev/null || echo "warning: module load {{ mod }} failed
 cd {{ project_dir }}
 
 mkdir -p {{ task_dir }}
+# One shell word, so the tokens' own quotes reach the eval below intact (a list value has
+# a space, which would otherwise end COMMAND's string early).
+PARAMS={{ params_hydra | shquote }}
 {
     echo "Job ID: {{ job_id }}"
     echo "Task: {{ job_name }}"
     echo "Node: $(hostname)"
-    echo "Parameters: {{ params_hydra }}"
+    echo "Parameters: $PARAMS"
     echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES-<unset>}"
     echo "Started: $(date)"
 } > {{ task_dir }}/task_info.txt
@@ -35,7 +38,7 @@ mkdir -p {{ task_dir }}
 cat > {{ task_dir }}/params.yaml <<'HSM_PARAMS_EOF'
 {{ params_yaml }}HSM_PARAMS_EOF
 
-COMMAND="{{ python_path }} {{ script_path }} {{ params_hydra }} {{ task_overrides(hydra_overrides, wandb_group, task_dir) }}"
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS {{ task_overrides(hydra_overrides, wandb_group, task_dir) }}"
 echo "$COMMAND" > {{ task_dir }}/command.txt
 echo "Executing: $COMMAND"
 

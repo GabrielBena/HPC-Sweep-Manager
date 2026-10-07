@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shlex
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,7 @@ def render_template(template_name: str, **kwargs) -> str:
     # Add custom filters
     env.filters["strftime"] = strftime_filter
     env.globals["task_overrides"] = task_overrides
+    env.filters["shquote"] = shlex.quote
     kwargs.setdefault("hydra_overrides", tuple(HYDRA_OVERRIDES))  # never an empty Undefined
 
     try:
