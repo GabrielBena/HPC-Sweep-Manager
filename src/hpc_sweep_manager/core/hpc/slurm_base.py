@@ -181,26 +181,42 @@ class SlurmBase(ComputeSource):
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
 
-    async def _queued_id(self, job_name: str, script: str) -> str | None:
-        """The one live job named ``job_name`` that runs ``script`` (a path unique to the
-        sweep; a chain's finished chunks share both, hence live only), or None."""
+    async def _live_ids(self, job_name: str, script: str) -> set[str] | None:
+        """The live jobs named ``job_name`` that run ``script`` (a path unique to the sweep; a
+        chain's finished chunks share both, hence live only), or None when squeue gave no answer."""
         user = self.slurm_user or getpass.getuser()
         argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
         rc, out, _ = await self._sh(argv)
-        rows = [line.split() for line in out.splitlines()] if rc == 0 else []
-        ids = {
+        if rc != 0:
+            return None
+        rows = [line.split() for line in out.splitlines()]
+        return {
             strip_array_suffix(row[0])
             for row in rows
             if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
         }
-        return ids.pop() if len(ids) == 1 else None
+
+    async def _queued_id(self, job_name: str, script: str) -> str | None:
+        """The one live job named ``job_name`` that runs ``script``, or None."""
+        ids = await self._live_ids(job_name, script)
+        return ids.pop() if ids and len(ids) == 1 else None
 
     async def _queued_chunk(self, job_name: str, script: str) -> str | None:
         """A chain's chunk already queued, by a driver that stopped between its sbatch and its
-        manifest: the next driver adopts it rather than queueing the chunk twice."""
-        if job_id := await self._queued_id(job_name, script):
+        manifest: the next driver adopts it rather than queueing the chunk twice. When squeue
+        can't say, or names several, nothing is submitted: a guess could double the chunk."""
+        ids = await self._live_ids(job_name, script)
+        if ids is None or len(ids) > 1:
+            why = "squeue gave no answer" if ids is None else f"live jobs {sorted(ids)}"
+            raise RuntimeError(
+                f"{job_name}: can't tell whether this chunk is already queued ({why}); nothing "
+                f"submitted. Check `squeue -n {job_name}`, then run `hsm sweep advance`."
+            )
+        if ids:
+            job_id = ids.pop()
             logger.warning(f"{job_name}: adopting job {job_id}, queued by a driver that stopped")
-        return job_id
+            return job_id
+        return None
 
     async def _write_manifest(
         self,

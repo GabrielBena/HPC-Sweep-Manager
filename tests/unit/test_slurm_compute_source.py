@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import getpass
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -946,6 +947,8 @@ class TestNativeMultiTypeResumable:
         ids = iter(["700", "701"])
 
         def fake_run(cmd, capture_output=True, text=True):
+            if cmd[0] == "squeue":  # no chunk of this chain queued yet (R10's adoption check)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             if cmd[0] != "sbatch":  # e.g. the pre-submit reservation check
                 return OTHER_COMMAND
 
@@ -1007,6 +1010,21 @@ class TestChainDriverCrash:
         assert await self._chunk(tmp_path) == ids  # the next driver adopts it
         assert len(fake_slurm.jobs()) == 1
         assert params.read_text() == "read by the queued tasks"  # never rewritten under them
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply", [(1, "", "slurmctld down"), (0, "5 PENDING /s.sh\n6 RUNNING /s.sh\n", "")]
+    )
+    async def test_nothing_is_submitted_when_squeue_cannot_tell(self, tmp_path, reply):
+        # Review of R10: a failed squeue, or two live chunks, must not lead to a third sbatch.
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+
+        async def sh(argv):
+            return reply
+
+        src._sh = sh
+        with pytest.raises(RuntimeError, match="nothing submitted"):
+            await src._queued_chunk("sw_array", "/s.sh")
 
     @pytest.mark.asyncio
     async def test_a_finished_chunk_is_not_adopted(self, tmp_path, fake_slurm):
