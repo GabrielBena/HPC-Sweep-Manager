@@ -21,32 +21,24 @@ logger = logging.getLogger(__name__)
 
 
 def params_to_hydra_args(params: dict[str, Any]) -> str:
-    """Convert a parameter dict into a Hydra-style command-line argument string.
+    """Render params as Hydra ``"key=value"`` tokens, space-joined, for a shell to eval::
 
-    Each key/value becomes a quoted ``"key=value"`` token. Lists and tuples are
-    rendered in Hydra's bracket form (``[a, b, c]``), bools are lowercased, and
-    ``None`` becomes ``null``. The returned tokens are space-joined and intended
-    to be appended verbatim to a Python invocation::
+        python train.py "model.hidden_size=128" "layers=[64, 64]" "seed=null"
 
-        python train.py "model.hidden_size=128" "seed=null"
-
-    This is the canonical implementation. Older copies live in each manager
-    class and will be removed as the unified ComputeSource architecture lands.
+    Lists take Hydra's bracket form, bools are lowercased and ``None`` is ``null``. Each
+    token escapes ``\\`` and ``"``, so any value survives its double quotes; ``$`` still
+    expands, as a sweep may rely on it. ``slurm_array.sh.j2`` has a copy: keep the two alike.
     """
-    tokens: list[str] = []
-    for key, value in params.items():
-        if isinstance(value, (list, tuple)):
-            value_str = str(list(value))
-            tokens.append(f'"{key}={value_str}"')
-        elif value is None:
-            tokens.append(f'"{key}=null"')
-        elif isinstance(value, bool):
-            tokens.append(f'"{key}={str(value).lower()}"')
-        elif isinstance(value, str) and (" " in value or "," in value):
-            tokens.append(f'"{key}={value}"')
-        else:
-            tokens.append(f'"{key}={value}"')
-    return " ".join(tokens)
+
+    def value(v: Any) -> str:
+        if isinstance(v, (list, tuple)):
+            return str(list(v))
+        return "null" if v is None else str(v).lower() if isinstance(v, bool) else str(v)
+
+    def token(k: str, v: Any) -> str:
+        return '"' + f"{k}={value(v)}".replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    return " ".join(token(k, v) for k, v in params.items())
 
 
 # The overrides HSM appends to every task command, in this order (R3). The project config's

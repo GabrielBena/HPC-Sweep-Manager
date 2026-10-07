@@ -13,9 +13,9 @@ TEMPLATES = [
     "slurm_single.sh.j2",
     "slurm_array.sh.j2",
 ]
-# A list (its repr has a space), null, and a string with a quote and a `;`: each once broke
-# a template's COMMAND string, or would have.
-PARAMS = {"lr": 0.01, "layers": [64, 64], "seed": None, "note": "it's; fine"}
+# A list (its repr has a space), null, and a string with both quotes, a `;` and a trailing
+# backslash: each once broke a template's COMMAND string, or would have (R13).
+PARAMS = {"lr": 0.01, "layers": [64, 64], "seed": None, "note": 'it\'s; "fine" \\'}
 
 
 @pytest.mark.parametrize("name", TEMPLATES)
@@ -24,7 +24,7 @@ def test_a_task_runs_with_its_params_and_overrides(tmp_path, name):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     task = tmp_path / "tasks" / "task_1"
     assert seen == {
-        "argv": ["lr=0.01", "layers=[64, 64]", "seed=null", "note=it's; fine"]
+        "argv": ["lr=0.01", "layers=[64, 64]", "seed=null", f"note={PARAMS['note']}"]
         + ["wandb.group=g", f"output.dir={task}", f"hydra.run.dir={task}/.hydra_run"],
         "cwd": str(tmp_path / "proj"),
     }
