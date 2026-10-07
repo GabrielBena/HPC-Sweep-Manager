@@ -632,8 +632,8 @@ async def run_resumable_sweep_async(
                 if obs_mtime is None
                 else max(obs_mtime, progress.checkpoint_mtime)
             )
-        # Tasks out of retries: crashed in max_consecutive_failures chunks in a row.
-        cap = chain_cfg.max_consecutive_failures
+        # Tasks out of retries: crashed in max_task_crashes chunks in a row.
+        cap = resumable.max_task_crashes
         crashed_out = {i for i, n in progress.crashes.items() if n >= cap}
         outcome = ChunkOutcome(
             chunk_index=state.chunk_index,

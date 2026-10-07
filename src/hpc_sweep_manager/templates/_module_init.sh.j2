@@ -11,7 +11,8 @@
 if ! command -v module >/dev/null 2>&1; then
     for _hsm_mi in "${LMOD_PKG:+$LMOD_PKG/init/bash}" /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
                    /usr/share/lmod/lmod/init/bash /etc/profile.d/modules.sh; do
-        if [ -n "$_hsm_mi" ] && [ -f "$_hsm_mi" ]; then . "$_hsm_mi" || true; break; fi
+        [ -n "$_hsm_mi" ] && [ -f "$_hsm_mi" ] && { . "$_hsm_mi" || true; }
+        command -v module >/dev/null 2>&1 && break
     done
     command -v module >/dev/null 2>&1 || echo "warning: no module system found; \`module load\` will fail" >&2
 fi

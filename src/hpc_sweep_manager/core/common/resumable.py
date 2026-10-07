@@ -35,6 +35,7 @@ _KNOWN_KEYS = frozenset(
         "checkpoint_subdir",
         "max_chunks",
         "max_consecutive_failures",
+        "max_task_crashes",
     }
 )
 
@@ -71,7 +72,8 @@ class ResumableConfig:
     done_sentinel: str = ".hsm_done"  # script writes this under HSM_WORKDIR when complete
     checkpoint_subdir: str = "resume"  # per-task persistent ckpt dir under the workdir
     max_chunks: int = 10  # runaway guard: chain length cap
-    max_consecutive_failures: int = 2  # no-progress chunks (chain) / crashes in a row (task)
+    max_consecutive_failures: int = 2  # chunks in a row without progress -> chain FAILED
+    max_task_crashes: int = 3  # a task's crashes in a row before it is out of retries
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ResumableConfig:
@@ -87,7 +89,12 @@ class ResumableConfig:
                 continue
             clean[k] = v
         # light coercion for the int knobs (YAML may hand us strings)
-        for int_key in ("signal_grace", "max_chunks", "max_consecutive_failures"):
+        for int_key in (
+            "signal_grace",
+            "max_chunks",
+            "max_consecutive_failures",
+            "max_task_crashes",
+        ):
             if int_key in clean:
                 try:
                     clean[int_key] = int(clean[int_key])
@@ -129,6 +136,8 @@ class ResumableConfig:
             errors.append("resumable.max_chunks must be >= 1")
         if self.max_consecutive_failures < 1:
             errors.append("resumable.max_consecutive_failures must be >= 1")
+        if self.max_task_crashes < 1:
+            errors.append("resumable.max_task_crashes must be >= 1")
         return errors
 
     def chain_config(self) -> ChainConfig:
@@ -149,6 +158,7 @@ class ResumableConfig:
             "checkpoint_subdir": self.checkpoint_subdir,
             "max_chunks": self.max_chunks,
             "max_consecutive_failures": self.max_consecutive_failures,
+            "max_task_crashes": self.max_task_crashes,
         }
 
     @classmethod

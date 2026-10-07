@@ -92,7 +92,7 @@ class TestFailed:
 
 
 class TestOutOfRetries:
-    """Issues #15/#16: tasks whose crash record reached max_consecutive_failures are settled."""
+    """Issues #15/#16: tasks whose crash record reached max_task_crashes are settled."""
 
     def test_the_rest_out_of_retries_fails_at_once(self):
         outcome = ChunkOutcome(

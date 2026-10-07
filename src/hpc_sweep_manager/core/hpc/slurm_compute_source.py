@@ -365,7 +365,7 @@ class SlurmComputeSource(SlurmBase):
             resume_arg=(rcfg.resume_arg if rcfg else None),
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
-            max_failures=(rcfg.max_consecutive_failures if rcfg else None),
+            max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
         script_path = scripts_dir / f"{sub.job_name}.slurm"
         script_path.write_text(script_content)

@@ -51,7 +51,7 @@ class ChunkOutcome:
     done_count: int  # tasks with a .hsm_done sentinel (0..num_tasks)
     num_tasks: int
     progressed: bool  # done_count rose OR a checkpoint mtime advanced this chunk
-    failed: tuple[int, ...] = ()  # tasks that crashed in max_consecutive_failures chunks in a row
+    failed: tuple[int, ...] = ()  # tasks that crashed in max_task_crashes chunks in a row
     terminal_states: tuple[str, ...] = ()  # chunk's job terminal states (messaging only)
 
 

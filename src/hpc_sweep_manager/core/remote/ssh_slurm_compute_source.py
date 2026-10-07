@@ -775,7 +775,7 @@ class SSHSlurmComputeSource(SlurmBase):
             resume_arg=(rcfg.resume_arg if rcfg else None),
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
-            max_failures=(rcfg.max_consecutive_failures if rcfg else None),
+            max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
         job_id = await self._sbatch(sub.job_name, script_content)
 
@@ -1017,8 +1017,9 @@ class SSHSlurmComputeSource(SlurmBase):
             stderr = (result.stderr or "").strip() or "no stderr"
             logger.warning(
                 f"Server-side archive on {self.host} failed (rc="
-                f"{result.returncode}): {stderr}. The /scratch copy is kept; "
-                f"`hsm sweep collect {self.sweep_id}` archives it again."
+                f"{result.returncode}): {stderr}. The /scratch copy is kept; `hsm sweep collect "
+                f"{self.sweep_id}` archives it again (a sweep with failed jobs: only under "
+                f"`archive_on: always`)."
             )
             return False
 

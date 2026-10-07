@@ -236,7 +236,8 @@ if [[ -f "$HSM_DONE_SENTINEL" ]]; then
     echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
     exit 0
 fi
-if [[ $exit_code -ne 0 && -z "$_hsm_termed" ]]; then
+# 143: the run itself died of a TERM (a scancel or preemption that reached it first) - a seam.
+if [[ $exit_code -ne 0 && $exit_code -ne 143 && -z "$_hsm_termed" ]]; then
     echo "exit=$exit_code job=${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID} $(date)" >> "$HSM_FAILED"
     echo "Failed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
     echo "Status: FAILED" >> "$TASK_OUTPUT_DIR/task_info.txt"

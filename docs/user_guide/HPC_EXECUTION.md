@@ -283,9 +283,13 @@ the run exited 0 or its batch shell caught a SIGTERM (the pre-walltime
 signal, a preemption). Any other non-zero exit is a **crash**: the chunk exits with
 that code (Slurm shows FAILED) and appends `exit=<code> job=<id> <date>` to
 `tasks/task_<i>/.hsm_failed`; a chunk that ends any other way removes it. A
-task with `max_consecutive_failures` crashes in a row is out of retries: later
-chunks skip it, and the chain ends FAILED once the other tasks are done.
-Deleting its `.hsm_failed` while the chain runs gives it its retries back. A
+task with `max_task_crashes` (default 3) crashes in a row is out of retries: later
+chunks skip it, and the chain ends FAILED once the other tasks are done. A run that
+dies of a TERM itself (exit 143: a scancel or preemption that reached it first) is
+a seam, not a crash. Deleting its `.hsm_failed` while the chain runs gives it its
+retries back; to retry a chain that already ended FAILED, delete the tasks'
+`.hsm_failed`, set `chain.state.failed` to `false` in `.hsm_manifest.json`, and run
+`hsm sweep advance <sweep_id>`. A
 FAILED chain is archived to `archive_dir` like a DONE one (unless
 `archive_on: never`) and its remote dir is kept for inspection. The launcher drives the
 chain while alive — run it under `tmux`/`nohup` (an always-on workstation is
@@ -333,7 +337,8 @@ resumable:
   done_sentinel: ".hsm_done"     # script writes this under $HSM_WORKDIR when complete
   checkpoint_subdir: "resume"    # per-task persistent ckpt dir; HSM passes HSM_RESUME_{FROM,TO}
   max_chunks: 10                 # runaway guard (chain length cap)
-  max_consecutive_failures: 2    # no-progress chunks (chain) / crashes in a row (task) -> FAILED
+  max_consecutive_failures: 2    # chunks in a row without progress -> FAILED
+  max_task_crashes: 3            # a task's crashes in a row before it is out of retries
 ```
 
 `hsm queue mine` annotates the chain's array row `(chunk k/max)`. `--dry-run`

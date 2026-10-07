@@ -239,7 +239,7 @@ class TestDrive:
                 ChunkProgress(frozenset({1}), 200.0, {2: 2}),
             ]
         )
-        res = await _run(src, _cfg(max_consecutive_failures=2), params=2)
+        res = await _run(src, _cfg(max_task_crashes=2), params=2)
         assert res.chain_decision == "failed" and res.chunks_run == 2
         assert src.collect_calls == [True]  # the remote is kept
 
@@ -345,3 +345,11 @@ class TestReviewFixes:
         src = FakeSource([])
         with pytest.raises(ValueError, match="0 tasks"):
             await _run(src, _cfg(), params=0)
+
+
+def test_task_crashes_have_their_own_cap():
+    # Review of #51: two transient crashes must not end a multi-day task by default.
+    cfg = ResumableConfig.from_dict({"enabled": True, "chunk_walltime": "23:00:00"})
+    assert (cfg.max_consecutive_failures, cfg.max_task_crashes) == (2, 3)
+    assert ResumableConfig.from_manifest(cfg.to_manifest()).max_task_crashes == 3
+    assert "max_task_crashes" in " ".join(ResumableConfig(max_task_crashes=0).validate())

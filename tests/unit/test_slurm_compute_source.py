@@ -648,6 +648,22 @@ class TestResumableCrashFunctional:
         assert third.returncode == 1 and b"Not re-run" in third.stdout
         assert runs.read_text() == "xx"
 
+    @pytest.mark.parametrize(
+        "train",
+        [
+            "import os, sys\nopen(os.environ['HSM_DONE_SENTINEL'], 'w').close()\nsys.exit(1)\n",
+            "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n",  # a TERM reached it first
+        ],
+    )
+    def test_done_then_a_bad_exit_and_a_run_killed_by_term_are_no_crash(self, tmp_path, train):
+        # Review of #51: .hsm_done wins over the exit code; 143 is a seam (scancel, preemption).
+        import subprocess
+
+        script, task = self._script(tmp_path, train)
+        res = subprocess.run(["bash", str(script)], env=self._env(), capture_output=True)
+        assert res.returncode == 0, res.stderr
+        assert not (task / ".hsm_failed").exists()
+
     def test_a_sigterm_at_the_seam_is_resumable_not_a_crash(self, tmp_path):
         import os
         import signal
