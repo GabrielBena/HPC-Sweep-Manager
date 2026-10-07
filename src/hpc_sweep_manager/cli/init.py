@@ -461,7 +461,7 @@ hsm sweep run -c sweeps/example_sweep.yaml --remote uzh   # push to an SSH remot
 
 hsm sweep status <sweep_id>        # completion summary
 hsm sweep report <sweep_id> --scan-tasks
-hsm sweep errors <sweep_id>        # collect failures' messages
+hsm sweep status <sweep_id> --errors  # why each failed task ended
 ```
 
 **Failure handling:** terminal state comes from `sacct` (a job leaving the queue
@@ -1024,7 +1024,7 @@ def _display_next_steps(console: Console):
 6. **Inspect**: `hsm sweep status <sweep-id>` and `hsm sweep report <sweep-id>`
 
 [bold]Useful Commands:[/bold]
-- `hsm sweep --help` - Sweep lifecycle (run/status/report/errors/watch/...)
+- `hsm sweep --help` - Sweep lifecycle (run/status/report/watch/...)
 - `hsm remote --help` - Manage SSH remotes (add/list/test/health/gpus/clean)
 - `hsm sweep watch <sweep-id>` - Live progress for an active sweep
 - `hsm setup configure` - Interactive sweep configuration builder

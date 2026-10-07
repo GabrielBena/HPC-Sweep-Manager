@@ -55,3 +55,27 @@ def test_a_missing_sweep_exits_1(tmp_path, monkeypatch, args, message):
     res, _ = _invoke(*args)
     assert res.exit_code == 1
     assert message in res.output
+
+
+def test_status_errors_shows_why_each_failed_task_ended(tmp_path, monkeypatch):
+    # `hsm sweep errors` read an errors/ dir nothing writes; `status --errors` reads where
+    # each backend leaves them: local and Slurm logs/*.err, ssh hsm.log, tasks_state.json.
+    monkeypatch.chdir(tmp_path)
+    d = _local_sweep("COMPLETED", "FAILED", "FAILED", "RUNNING")
+    (d / "logs").mkdir()
+    (d / "logs" / "sw_task_002.err").write_text(
+        "Traceback (most recent call last):\nValueError: [lr]\n"
+    )
+    (d / "tasks" / "task_003" / "hsm.log").write_text("RuntimeError: CUDA out of memory\n")
+    (d / "tasks" / "task_004" / "task_info.txt").write_text("Slurm Array Index: 4\n")
+    (d / "logs" / "sw_99_4.err").write_text("slurmstepd: CANCELLED DUE TO TIME LIMIT\n")
+    (d / "tasks_state.json").write_text(
+        '{"task_004": {"state": "TIMEOUT", "exit_code": 0, "node": "n7", "elapsed_s": 9}}'
+    )
+    res, out = _invoke("status", "sw", "--errors")
+    assert res.exit_code == 0, out
+    assert "ValueError: [lr]" in out and "logs/sw_task_002.err" in out
+    assert "CUDA out of memory" in out and "tasks/task_003/hsm.log" in out
+    assert "Slurm: TIMEOUT (exit 0, n7)" in out and "DUE TO TIME LIMIT" in out
+    assert "task_001" not in out  # completed
+    assert "ValueError" not in _invoke("status", "sw")[1]

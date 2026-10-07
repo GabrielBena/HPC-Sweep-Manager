@@ -405,6 +405,13 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   (`ProgressTracker`, `format_duration`, …), `PathDetector.suggest_setup`, two
   `ParameterGenerator` helpers, `get_sweep_completion_summary`, and the unused
   `templates/sweep.yaml.j2`.
+- **`hsm sweep errors` (R8).** It read `errors/*_error.txt`, which nothing writes, so it
+  always said "No error directory found". `hsm sweep status <id> --errors` replaces it: for
+  each failed task (the first 10) it prints the `Status:`/`Exit Code:` lines of
+  `task_info.txt`, how Slurm ended it (`tasks_state.json`), and the last lines of its
+  newest log: an ssh task's `tasks/<task>/hsm.log`, a local or Slurm task's `logs/*.err`.
+  The end-of-run hint points at it. **For consumers:** `hsm sweep errors` is gone; use
+  `hsm sweep status <id> --errors`.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
