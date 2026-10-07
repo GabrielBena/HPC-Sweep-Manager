@@ -96,6 +96,10 @@ hsm sweep run --config sweeps/example_sweep.yaml --count-only
 hsm sweep run --config sweeps/example_sweep.yaml --dry-run
 ```
 
+Both first warn about any config key HSM doesn't know (a typo such as `gird:` is
+otherwise ignored), and stop if `project.root`, `paths.train_script` or the sweep's
+`script:` doesn't exist on this machine.
+
 ## Step 2 — your training script's contract
 
 HSM passes parameters as Hydra-style `key=value` tokens, plus two

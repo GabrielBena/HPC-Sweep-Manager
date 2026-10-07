@@ -359,6 +359,22 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   batch shell waits for the group to exit after a TERM (Slurm's walltime bounds that wait).
   **For consumers:** a training script's SIGTERM handler now runs at the chunk seam; one
   that does slow work there must finish within `signal_grace`.
+- **Unknown config keys warn, with the key they probably meant (R4, FR#17).** A
+  remote-level `pre_script` (it belongs in the remote's `spec:`) or a sweep's `gird:` was
+  silently ignored. `hsm sweep run` (and `--dry-run`) now prints a yellow warning for every
+  key HSM doesn't read, in `.hsm/config.yaml` and in the sweep file, with a suggestion: the
+  same key one level up or down (`did you mean distributed.remotes.uzh.spec.pre_script?`)
+  or a near spelling (`did you mean sweep.grid?`). The known keys of each block are one
+  table (`config.KNOWN_KEYS`, derived from `ResourceSpec` and `ResumableConfig`), which
+  replaces the ad-hoc key sets of the `local:`/`slurm:` accessors and the resumable block.
+  **For consumers:** warnings only; nothing stops a run. The old dispatcher's
+  `distributed.strategy` / `sync_method` / … now warn on every run, not only in
+  `--mode distributed`: they have changed nothing since X3, so delete them.
+- **A stale path stops `hsm sweep run` before it creates anything (R6, FR#19).** After a repo
+  move, a `project.root` or `paths.train_script` (or the sweep's `script:`) that no longer
+  exists failed only once the run started, after a sweep dir had been created.
+  `HSMConfig.check_paths()` now runs first, ahead of the dry-run output, and the run exits
+  2 with an error naming each missing path and its config key.
 
 ### Removed (2026-10 maintenance pass)
 

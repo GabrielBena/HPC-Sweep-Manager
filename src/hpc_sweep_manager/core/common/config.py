@@ -1,11 +1,14 @@
 """HSM configuration loading utilities."""
 
+import difflib
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
 
+from .resource_spec import ResourceSpec
+from .resumable import ResumableConfig
 from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -26,6 +29,70 @@ concerns).
 # putting `distributed:` here would mean "every project on this machine
 # silently sees the same remotes," which is surprising.
 _MACHINE_CONFIG_ALLOWED_TOP_LEVEL = {"local"}
+
+
+_SPEC_KEYS = frozenset(f.name for f in fields(ResourceSpec))
+# Read from a remote entry, or from `distributed:` as every remote's fallback.
+_SHARED = {"remote_root", "rsync_excludes", "keep_remote_on_success", "conda_env", "python_path"}
+
+# The keys each block knows (R4); config_warnings reports any other one, since it is ignored.
+KNOWN_KEYS = dict(
+    config={"local", "slurm", "distributed", "paths", "project", "wandb", "metadata"},
+    local={"walltime", "cpus_per_task", "mem", "gpus", "pre_script", "visible_gpus", "sweeps_root"},
+    slurm=_SPEC_KEYS | {"qos_whitelist", "max_array_size", "speed_factors"},
+    distributed={"enabled", "remotes", "local_max_jobs", *_SHARED},
+    remote={"enabled", "backend", "host", "ssh_key", "ssh_port", "max_parallel_jobs", *_SHARED}
+    | {"gpus", "spec", "resumable", "workdir", "archive_dir", "archive_on", "qos_whitelist"}
+    | {"speed_factors"},
+    spec=_SPEC_KEYS,
+    resumable=frozenset(f.name for f in fields(ResumableConfig)),
+    paths={"conda_env", "train_script", "config_dir", "output_dir", "python_interpreter"},
+    project={"name", "root"},
+    wandb={"project", "entity"},
+    sweep_file={"sweep", "defaults", "metadata", "script", "complete", "resumable"},
+    sweep={"grid", "paired", "cost_param", "cost_map", "resumable"},
+)
+
+
+def _sub(block: Any, key: str) -> Any:
+    return block.get(key) if isinstance(block, dict) else None
+
+
+def _unknown(block: Any, known: set, path: str = "", near: dict | None = None) -> list[str]:
+    """One message per key of ``block`` outside ``known``, with the key it probably meant:
+    the same key in a ``near`` block (``{path prefix: its known keys}``), else a near spelling."""
+    out = []
+    for key in block if isinstance(block, dict) else ():
+        if key not in known:
+            moved = [f"{p}{key}" for p, keys in (near or {}).items() if key in keys]
+            close = [f"{path}{c}" for c in difflib.get_close_matches(str(key), sorted(known), n=1)]
+            did_you_mean = "".join(f"; did you mean `{h}`?" for h in (moved + close)[:1])
+            out.append(f"`{path}{key}` is not a known key, so it is ignored{did_you_mean}")
+    return out
+
+
+def config_warnings(config: dict | None, sweep: dict | None = None) -> list[str]:
+    """Unknown keys in a loaded HSM config and in a sweep YAML (R4), each with a "did you mean"."""
+    K, cfg = KNOWN_KEYS, config if isinstance(config, dict) else {}
+    blocks = ("paths", "project", "local", "slurm", "wandb", "distributed")
+    msgs = _unknown(cfg, K["config"], near={f"{b}.": K[b] for b in blocks})
+    for b in blocks:
+        other = {"local": "slurm", "slurm": "local"}.get(b)
+        msgs += _unknown(cfg.get(b), K[b], f"{b}.", other and {f"{other}.": K[other]})
+    remotes = _sub(cfg.get("distributed"), "remotes")
+    for alias, remote in remotes.items() if isinstance(remotes, dict) else ():
+        p = f"distributed.remotes.{alias}."  # `gpus` is known at both levels: allowlist, count
+        msgs += _unknown(remote, K["remote"], p, {f"{p}spec.": K["spec"]})
+        msgs += _unknown(_sub(remote, "spec"), K["spec"], f"{p}spec.", {p: K["remote"]})
+        msgs += _unknown(_sub(remote, "resumable"), K["resumable"], f"{p}resumable.")
+    # A sweep file without `sweep:` is its own sweep block, as in SweepConfig.from_dict.
+    sw = sweep if isinstance(sweep, dict) else {}
+    top, inner, nested = K["sweep_file"], K["sweep"], _sub(sweep, "sweep")
+    found = _unknown(sw, top if "sweep" in sw else top | inner, near={"sweep.": inner})
+    found += _unknown(nested, inner, "sweep.", {"": top})
+    for p, block in (("", sw), ("sweep.", nested)):
+        found += _unknown(_sub(block, "resumable"), K["resumable"], f"{p}resumable.")
+    return [f"HSM config: {m}" for m in msgs] + [f"sweep file: {m}" for m in found]
 
 
 def _load_yaml_dict(path: Path) -> dict[str, Any] | None:
@@ -348,6 +415,18 @@ class HSMConfig:
         """Get project root directory from config."""
         return self.config_data.get("project", {}).get("root")
 
+    def check_paths(self, sweep_script: str | None = None) -> list[str]:
+        """The configured paths missing on this machine, each named with its key (R6):
+        ``project.root`` and the script the run uses (the sweep file's ``script``, else
+        ``paths.train_script``), relative to the project root as the runs resolve it."""
+        root = self.get_project_root()
+        script = sweep_script or self.get_default_script_path()
+        key = "the sweep file's `script`" if sweep_script else "`paths.train_script`"
+        missing = [("`project.root`", root)] if root and not Path(root).is_dir() else []
+        if script and not (Path(root or ".") / script).is_file():
+            missing.append((key, script))
+        return [f"{k} = {v!r} does not exist on this machine" for k, v in missing]
+
     def get_wandb_config(self) -> dict[str, Any]:
         """Get wandb configuration from config."""
         return self.config_data.get("wandb", {})
@@ -387,14 +466,11 @@ class HSMConfig:
                 mail-user: me@example.com
               qos_whitelist: [normal, medium, long]  # consumed separately
         """
-        from .resource_spec import ResourceSpec
-
         block = self.config_data.get("slurm")
         if not isinstance(block, dict) or not block:
             return None
         # Strip orchestrator-/scheduler-only keys before handing to ResourceSpec.
-        _NON_SPEC_KEYS = {"qos_whitelist", "max_array_size", "speed_factors"}
-        filtered = {k: v for k, v in block.items() if k not in _NON_SPEC_KEYS}
+        filtered = {k: v for k, v in block.items() if k not in KNOWN_KEYS["slurm"] - _SPEC_KEYS}
         return ResourceSpec.from_dict(filtered, where="`slurm:` block")
 
     def get_local_spec(self):
@@ -422,23 +498,17 @@ class HSMConfig:
               pre_script:
                 - "conda activate my-env"
         """
-        from .resource_spec import ResourceSpec
-
         block = self.config_data.get("local")
         if not isinstance(block, dict) or not block:
             return None
-        _LOCAL_SPEC_FIELDS = {"walltime", "cpus_per_task", "mem", "gpus", "pre_script"}
-        # Consumed by sibling accessors, not ResourceSpec:
-        #   visible_gpus  → get_local_visible_gpus
-        #   sweeps_root   → get_local_sweeps_root
-        _NON_SPEC_LOCAL_KEYS = {"visible_gpus", "sweeps_root"}
-        rejected = set(block) - _LOCAL_SPEC_FIELDS - _NON_SPEC_LOCAL_KEYS
+        # visible_gpus and sweeps_root are read by sibling accessors, not ResourceSpec.
+        rejected = set(block) - KNOWN_KEYS["local"]
         if rejected:
             logger.warning(
                 f"`local:` block has Slurm-only or unknown fields {sorted(rejected)!r}; "
                 f"move them to the `slurm:` block. Ignoring."
             )
-        filtered = {k: v for k, v in block.items() if k in _LOCAL_SPEC_FIELDS}
+        filtered = {k: v for k, v in block.items() if k in KNOWN_KEYS["local"] & _SPEC_KEYS}
         return ResourceSpec.from_dict(filtered, where="`local:` block")
 
     def get_local_visible_gpus(self):
