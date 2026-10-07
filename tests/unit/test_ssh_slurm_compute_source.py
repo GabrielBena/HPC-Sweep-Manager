@@ -15,10 +15,10 @@ import json
 import logging
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
 
 import asyncssh
 import pytest
+from fakes import FakeConn, Result
 
 from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
@@ -30,85 +30,6 @@ from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import (
 )
 
 # ---------------------------------------------------------------------- fakes
-
-
-class _Result:
-    def __init__(
-        self,
-        returncode: int = 0,
-        stdout: str = "",
-        stderr: str = "",
-        exit_status: int | None = None,
-    ):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-        self.exit_status = exit_status if exit_status is not None else returncode
-
-
-class FakeConn:
-    """asyncssh.SSHClientConnection stand-in.
-
-    Each entry in ``responder`` is a (substring, _Result) pair. On each
-    ``.run()`` call we scan in order, pick the first entry whose substring
-    appears in the command text, and **pop it** — so appending another
-    entry with the same substring lets a test script multiple distinct
-    responses to repeated commands (e.g. two sbatch submissions). An
-    exception entry is raised (a dropped link). Falls back to
-    ``_Result(returncode=0, stdout="")`` when no entry matches.
-    """
-
-    def __init__(
-        self,
-        responder: list[tuple[str, _Result]] | None = None,
-        home: str = "/u/home/gbena",
-        user: str | None = None,
-    ):
-        self.run_calls: list[dict[str, Any]] = []
-        self.closed = False
-        self._responder = responder or []
-        # Used to simulate remote-shell expansion of `echo <path>` (the seam
-        # _resolve_remote_path uses for ~ / $USER / $HOME). Unexplicit `echo`
-        # commands get expanded the way a real shell would.
-        self._home = home.rstrip("/")
-        self._user = user or (self._home.split("/")[-1] or "gbena")
-
-    def add(self, substring: str, result: _Result) -> None:
-        self._responder.append((substring, result))
-
-    def _expand_echo(self, cmd: str) -> str:
-        arg = cmd[len("echo ") :].strip().strip('"').strip("'")
-        if arg.startswith("~"):
-            arg = self._home + arg[1:]
-        arg = arg.replace("${HOME}", self._home).replace("$HOME", self._home)
-        arg = arg.replace("${USER}", self._user).replace("$USER", self._user)
-        return arg
-
-    async def run(
-        self,
-        cmd: str,
-        *,
-        input: str | None = None,
-        check: bool = False,
-        timeout: float | None = None,
-    ) -> _Result:
-        self.run_calls.append({"cmd": cmd, "input": input, "check": check, "timeout": timeout})
-        for i, (sub, res) in enumerate(self._responder):
-            if sub in cmd:
-                del self._responder[i]
-                if isinstance(res, Exception):
-                    raise res
-                return res
-        # Simulate the remote shell expanding `echo <path>` (~, $USER, $HOME).
-        if cmd.startswith("echo "):
-            return _Result(returncode=0, stdout=self._expand_echo(cmd) + "\n")
-        return _Result(returncode=0, stdout="")
-
-    def close(self) -> None:
-        self.closed = True
-
-    async def wait_closed(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 class _StubSrc(SSHSlurmComputeSource):
@@ -134,7 +55,7 @@ class _StubSrc(SSHSlurmComputeSource):
         return self._rsync_rc
 
 
-def _setup_ok_responder(home: str = "/u/home/gbena") -> list[tuple[str, _Result]]:
+def _setup_ok_responder(home: str = "/u/home/gbena") -> list[tuple[str, Result]]:
     """Default responder for a successful setup() lifecycle.
 
     Path expansion (`echo <path>`) is handled generically by FakeConn now —
@@ -142,8 +63,8 @@ def _setup_ok_responder(home: str = "/u/home/gbena") -> list[tuple[str, _Result]
     but no longer drives an explicit ``echo $HOME`` response.
     """
     return [
-        ("command -v sbatch", _Result(0, stdout="/usr/bin/sbatch\n")),
-        ("mkdir -p", _Result(0)),
+        ("command -v sbatch", Result(0, stdout="/usr/bin/sbatch\n")),
+        ("mkdir -p", Result(0)),
     ]
 
 
@@ -185,7 +106,7 @@ class TestSetup:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rc", [127, None])  # None: unknown, never a success
     async def test_fails_when_sbatch_not_on_remote(self, tmp_path, rc):
-        conn = FakeConn(responder=[("command -v sbatch", _Result(rc, stderr="not found"))])
+        conn = FakeConn(responder=[("command -v sbatch", Result(rc, stderr="not found"))])
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -223,7 +144,7 @@ class TestSubmit:
     async def test_submit_job_parses_id(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         # Append the sbatch response after setup is set up.
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 12345\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 12345\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -255,7 +176,7 @@ class TestSubmit:
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add(
             "sbatch",
-            _Result(1, stdout="", stderr="error: invalid partition\n"),
+            Result(1, stdout="", stderr="error: invalid partition\n"),
         )
         src = _StubSrc(
             name="uzh",
@@ -272,7 +193,7 @@ class TestSubmit:
     @pytest.mark.parametrize("mode", ["individual", "array"])
     async def test_the_project_picks_the_overrides(self, tmp_path, mode):  # R3
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -291,7 +212,7 @@ class TestSubmit:
     @pytest.mark.asyncio
     async def test_submit_array_writes_params_and_returns_id(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 999\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 999\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -326,8 +247,8 @@ class TestSubmit:
         params files (array-local index, original global_index), per-type
         walltimes, and a manifest with per-job detail."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 222\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 222\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -395,8 +316,8 @@ class TestSubmit:
         used to leave NO manifest → `hsm sweep collect` impossible, orphaned
         jobs invisible. The error path must persist what DID submit."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
-        conn.add("sbatch", _Result(1, "", "sbatch: error: budget exceeded"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", Result(1, "", "sbatch: error: budget exceeded"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -426,8 +347,8 @@ class TestSubmit:
         """Tracker S3: a loop of individual sbatch calls that fails, or is Ctrl-C'd, partway
         used to leave its live jobs untracked (the manifest came only after the loop)."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
-        conn.add("sbatch", _Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
         src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
         sweep_dir = tmp_path / "sweeps" / "outputs" / "sweep_1"
         await src.setup(sweep_dir, "sweep_1")
@@ -451,8 +372,8 @@ class TestSubmit:
         driver's chain manifest (advance would stop recognising the chain; collect would then
         archive and clean it)."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
-        conn.add("sbatch", _Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", Result(1, "", "sbatch: error: QOSMaxSubmitJobPerUserLimit"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -477,7 +398,7 @@ class TestSubmit:
     @pytest.mark.asyncio
     async def test_an_array_rejection_suggests_individual_mode(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(1, "", "sbatch: error: Invalid job array specification"))
+        conn.add("sbatch", Result(1, "", "sbatch: error: Invalid job array specification"))
         src = _StubSrc(name="uzh", host="uzh", project_dir=str(tmp_path), fake_conn=conn)
         await src.setup(tmp_path / "sw", "sw")
         with pytest.raises(RuntimeError, match="try --mode individual"):
@@ -586,8 +507,8 @@ class TestStatus:
     async def test_one_squeue_and_one_sacct_on_the_wire(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         replies = [
-            ("squeue -u", _Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n")),
-            ("sacct", _Result(0, stdout="101|FAILED\n102|COMPLETED\n")),
+            ("squeue -u", Result(0, stdout="100_[3-9] PENDING\n100_2 RUNNING\n")),
+            ("sacct", Result(0, stdout="101|FAILED\n102|COMPLETED\n")),
         ]
         src = await self._tracking(tmp_path, conn, "100", "101", "102", replies=replies)
         await src.update_all_job_statuses()
@@ -603,7 +524,7 @@ class TestStatus:
         # Tracker S1: squeue (slurmctld) or sacct (slurmdbd) failing read as COMPLETED, so the
         # launcher went on to collect, archive and rm -rf a live sweep dir.
         conn = FakeConn(responder=_setup_ok_responder())
-        outage = _Result(1, stderr="Unable to contact slurm controller/database")
+        outage = Result(1, stderr="Unable to contact slurm controller/database")
         src = await self._tracking(tmp_path, conn, "777", replies=[(failing, outage)] * 200)
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(src.wait_for_all(poll_interval=0.001), timeout=0.2)
@@ -612,7 +533,7 @@ class TestStatus:
     @pytest.mark.asyncio
     async def test_a_signal_killed_command_is_a_failure(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        src = await self._tracking(tmp_path, conn, replies=[("squeue -u", _Result(None))])
+        src = await self._tracking(tmp_path, conn, replies=[("squeue -u", Result(None))])
         assert (await src._sh(["squeue", "-u", "gbena"]))[0] == 255
 
     def test_slurm_sources_poll_every_minute_the_others_every_10_s(self):
@@ -626,7 +547,7 @@ class TestStatus:
 
 
 class _DeadConn(FakeConn):
-    async def run(self, cmd: str, **kw) -> _Result:
+    async def run(self, cmd: str, **kw) -> Result:
         raise asyncssh.ConnectionLost("link down")
 
 
@@ -639,7 +560,7 @@ class TestReconnect:
         blip = ("squeue -u", asyncssh.ConnectionLost("blip"))
         src = await TestStatus._tracking(tmp_path, conn, "777", replies=[blip])
         src.active_jobs["777"].status = "RUNNING"
-        src._fake_conn = fresh = FakeConn(responder=[("squeue -u", _Result(0, "777 RUNNING\n"))])
+        src._fake_conn = fresh = FakeConn(responder=[("squeue -u", Result(0, "777 RUNNING\n"))])
         with caplog.at_level(logging.WARNING):
             await src.update_all_job_statuses()
         assert src._conn is fresh and conn.closed and src.active_jobs["777"].status == "RUNNING"
@@ -683,7 +604,7 @@ class TestReconnect:
     async def test_a_reply_without_exit_status_is_unknown(self, tmp_path):
         # asyncssh reports a link that died mid-command as returncode None, not as an error.
         conn = FakeConn(responder=_setup_ok_responder())
-        src = await TestStatus._tracking(tmp_path, conn, replies=[("squeue", _Result(None))])
+        src = await TestStatus._tracking(tmp_path, conn, replies=[("squeue", Result(None))])
         src._down_since = 1.0
         assert (await src._sh(["squeue"]))[0] == 255 and src._down_since == 1.0
         assert (await src._sh(["squeue"]))[0] == 0 and src._down_since is None
@@ -695,7 +616,7 @@ class TestReconnect:
         [
             asyncssh.ConnectionLost("blip"),
             asyncssh.ChannelOpenError(asyncssh.OPEN_REQUEST_SESSION_FAILED, "exec reply lost"),
-            _Result(None),
+            Result(None),
         ],
         ids=["lost", "exec-unanswered", "no-exit-status"],
     )
@@ -722,7 +643,7 @@ class TestReconnect:
         src = await TestStatus._tracking(tmp_path, conn, replies=[("sbatch /", reply)])
         script = f"{src._remote_scripts_dir}/sweep_1_array.slurm"
         lookup = "squeue -h -u gbena -n sweep_1_array -o '%i %T %o'"
-        conn.add(lookup, _Result(rc, queued.format(s=script)))
+        conn.add(lookup, Result(rc, queued.format(s=script)))
         with nullcontext() if found else pytest.raises(RuntimeError, match="scancel -n sweep_1"):
             assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == [found]
         assert sum(c["cmd"].startswith("sbatch") for c in conn.run_calls) == 1
@@ -732,7 +653,7 @@ class TestReconnect:
     async def test_an_sbatch_that_never_started_is_sent_again(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         unsent = asyncssh.ChannelOpenError(asyncssh.OPEN_CONNECT_FAILED, "SSH connection closed")
-        ok = _Result(0, stdout="Submitted batch job 7\n")
+        ok = Result(0, stdout="Submitted batch job 7\n")
         replies = [("sbatch /", unsent), ("sbatch /", ok)]
         src = await TestStatus._tracking(tmp_path, conn, replies=replies)
         assert await src.submit_batch([{"s": 0}], "sweep_1", mode="array") == ["7"]
@@ -741,21 +662,21 @@ class TestReconnect:
     @pytest.mark.asyncio
     async def test_no_exit_status_is_never_a_success(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        replies = [("scancel", _Result(None)), ("echo $USER", _Result(None))]
+        replies = [("scancel", Result(None)), ("echo $USER", Result(None))]
         src = await TestStatus._tracking(tmp_path, conn, "777", replies=replies)
         assert await src.cancel_job("777") is False and "777" in src.active_jobs
         with pytest.raises(RuntimeError, match="could not expand"):  # a literal $USER: no squeue
             await src._resolve_remote_path("$USER")
-        conn.add("find", _Result(None))  # an empty probe would count as a chunk without progress
+        conn.add("find", Result(None))  # an empty probe would count as a chunk without progress
         assert await src.chunk_progress(1, done_sentinel=".d", checkpoint_subdir="r") is None
-        conn.add("sinfo -h", _Result(None))
+        conn.add("sinfo -h", Result(None))
         assert (await src.health_check())["connection"] == "ok_but_no_sinfo"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rc", [1, None])
     async def test_a_failed_write_raises_naming_the_path(self, tmp_path, rc):
         conn = FakeConn(responder=_setup_ok_responder())
-        full = ("cat > /x/f.json", _Result(rc, stderr="No space left on device"))
+        full = ("cat > /x/f.json", Result(rc, stderr="No space left on device"))
         src = await TestStatus._tracking(tmp_path, conn, replies=[full])
         with pytest.raises(RuntimeError, match="writing /x/f.json on uzh failed: No space"):
             await src._write_remote_file("/x/f.json", "{}")
@@ -782,8 +703,8 @@ class TestReservationWarning:
             default_spec=ResourceSpec(walltime=walltime),
         )
         await src.setup(tmp_path / "sweep", "sw1")
-        conn.add("scontrol show reservations", _Result(0, stdout=f"{now}\n{self.MAINT}"))
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("scontrol show reservations", Result(0, stdout=f"{now}\n{self.MAINT}"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         with caplog.at_level(logging.WARNING):
             await src.submit_batch([{"s": 0}], "sw1", mode="array")
         return [r.message for r in caplog.records if "Reservation" in r.message]
@@ -804,7 +725,7 @@ class TestManifest:
     @pytest.mark.asyncio
     async def test_submit_batch_writes_local_and_remote_manifest(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena")
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 5\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 5\n"))
         sweep_dir = tmp_path / "sweeps" / "outputs" / "sw1"
         src = _StubSrc(
             name="uzh",
@@ -902,16 +823,16 @@ class TestPeriodicPull:
             ssh_slurm_compute_source, "time", SimpleNamespace(monotonic=lambda: clock[0])
         )
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py", fake_conn=conn
         )
         await src.setup(tmp_path / "sweep", "sweep_1")
         await src.submit_job({"s": 0}, "task_0", "sweep_1")
         for _ in range(25):  # the array runs 25 polls, then is gone and done
-            conn.add("squeue -u", _Result(0, stdout="1_[3-9] PENDING\n1_2 RUNNING\n"))
-        conn.add("squeue -u", _Result(0, stdout=""))
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
+            conn.add("squeue -u", Result(0, stdout="1_[3-9] PENDING\n1_2 RUNNING\n"))
+        conn.add("squeue -u", Result(0, stdout=""))
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n"))
         pulls = []
 
         async def refresh():
@@ -941,8 +862,8 @@ class TestCancel:
     @pytest.mark.asyncio
     async def test_cancel_marks_cancelled(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 42\n"))
-        conn.add("scancel", _Result(0))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 42\n"))
+        conn.add("scancel", Result(0))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -966,8 +887,8 @@ class TestCollectResults:
 
         monkeypatch.setattr(discovery, "_AGENT_STALLED", {"uzh"})
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
-        conn.add("rm -rf", _Result(0))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("rm -rf", Result(0))
         src = _StubSrc(
             name="uzh", host="uzh", project_dir=str(tmp_path), script_path="t.py", fake_conn=conn
         )
@@ -980,8 +901,8 @@ class TestCollectResults:
     @pytest.mark.asyncio
     async def test_pull_then_cleanup_on_success(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
-        conn.add("rm -rf", _Result(0))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("rm -rf", Result(0))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1011,9 +932,9 @@ class TestCollectResults:
         """S8: one sacct at collect writes tasks_state.json into the LOCAL sweep dir, never the
         remote one the cleanup deletes, and before the archive -> pull -> rm -rf sequence."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
         rows = "7_1|COMPLETED|0:0|n1|50\n7_2|TIMEOUT|0:15|n2|86400\n"
-        conn.add("sacct -j 7 -P", _Result(0, stdout=rows))
+        conn.add("sacct -j 7 -P", Result(0, stdout=rows))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1041,7 +962,7 @@ class TestCollectResults:
     @pytest.mark.parametrize("status", ["FAILED", "CANCELLED"])  # `hsm sweep cancel`, then collect
     async def test_no_cleanup_on_failure(self, tmp_path, status):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1060,7 +981,7 @@ class TestCollectResults:
     @pytest.mark.asyncio
     async def test_keep_remote_overrides_cleanup(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 7\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1136,7 +1057,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_archive_dir_user_var_expanded(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder(), home="/u/home/gbena", user="gbena")
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1181,7 +1102,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_archive_on_completed_runs_when_clean(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         # The archive cmd issues "mkdir -p <archive>/<id> && rsync ..." —
         # match the leading "mkdir -p" + the "rsync" parts of it.
         src = _StubSrc(
@@ -1218,7 +1139,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_archive_on_completed_skips_when_failed(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1241,7 +1162,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_archive_on_always_runs_even_on_failure(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1269,7 +1190,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_archive_on_never_disables_archive(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1292,7 +1213,7 @@ class TestStorageTier:
     @pytest.mark.asyncio
     async def test_no_archive_dir_means_no_archive(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1316,7 +1237,7 @@ class TestStorageTier:
         # Tracker S11 review: rc None (the link died during the rsync) read as success, so the
         # launcher pulled and rm -rf'd the scratch copy behind a partial archive.
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1328,7 +1249,7 @@ class TestStorageTier:
         )
         await src.setup(tmp_path / "sweep", "sw1")
         src.update_job_status(await src.submit_job({"s": 0}, "task_0", "sw1"), "COMPLETED")
-        conn.add("rsync -a", _Result(None))
+        conn.add("rsync -a", Result(None))
         assert await src.collect_results() is False
         assert len(src._rsync_calls) == 1  # the setup push only: no pull
         assert not any(
@@ -1340,7 +1261,7 @@ class TestStorageTier:
     async def test_archive_runs_before_pull(self, tmp_path):
         """Archive happens server-side first; THEN we pull tasks/ back."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1410,7 +1331,7 @@ class TestQosWhitelist:
     @pytest.mark.asyncio
     async def test_allowed_qos_succeeds(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 1\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 1\n"))
         src = _StubSrc(
             name="uzh",
             host="uzh",
@@ -1615,7 +1536,7 @@ class TestResumableSubmit:
     @pytest.mark.asyncio
     async def test_chunk0_render(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 100\n"))
         src = await self._make_src(tmp_path, conn)
         ids = await src.submit_batch(
             params_list=[{"seed": 0}, {"seed": 1}],
@@ -1645,7 +1566,7 @@ class TestResumableSubmit:
     @pytest.mark.asyncio
     async def test_chunk1_render_has_dependency_and_resume(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 101\n"))
         src = await self._make_src(tmp_path, conn)
         await src.submit_batch(
             params_list=[{"seed": 0}, {"seed": 1}],
@@ -1665,7 +1586,7 @@ class TestResumableSubmit:
         """Same hydra overrides + output.dir/wandb.group every chunk; only the
         resume pointer differs (faithful-budget contract)."""
         conn0 = FakeConn(responder=_setup_ok_responder())
-        conn0.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        conn0.add("sbatch", Result(0, stdout="Submitted batch job 100\n"))
         s0 = await self._make_src(tmp_path / "a", conn0)
         await s0.submit_batch(
             params_list=[{"seed": 0}],
@@ -1675,7 +1596,7 @@ class TestResumableSubmit:
             resumable=self._ctx(0),
         )
         conn1 = FakeConn(responder=_setup_ok_responder())
-        conn1.add("sbatch", _Result(0, stdout="Submitted batch job 101\n"))
+        conn1.add("sbatch", Result(0, stdout="Submitted batch job 101\n"))
         s1 = await self._make_src(tmp_path / "b", conn1)
         await s1.submit_batch(
             params_list=[{"seed": 0}],
@@ -1699,8 +1620,8 @@ class TestResumableSubmit:
     @pytest.mark.asyncio
     async def test_multi_type_resumable_caps_every_subarray(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 111\n"))
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 222\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 111\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 222\n"))
         src = await self._make_src(tmp_path, conn, gpus=1, gpu_type=("A100", "H200"))
         src.speed_factors = {"a100": 1.0, "h200": 0.5}
         ids = await src.submit_batch(
@@ -1739,7 +1660,7 @@ class TestResumableSubmit:
         """In resumable mode the chain driver owns the manifest, so submit_batch
         does NOT write one itself."""
         conn = FakeConn(responder=_setup_ok_responder())
-        conn.add("sbatch", _Result(0, stdout="Submitted batch job 100\n"))
+        conn.add("sbatch", Result(0, stdout="Submitted batch job 100\n"))
         src = await self._make_src(tmp_path, conn)
         await src.submit_batch(
             params_list=[{"seed": 0}],
@@ -1778,7 +1699,7 @@ class TestChunkProgress:
             fake_conn=conn,
         )
         await src.setup(tmp_path / "sw", "sw")
-        conn.add("find", _Result(0, stdout=stdout))  # after setup: its snapshot GC runs a find
+        conn.add("find", Result(0, stdout=stdout))  # after setup: its snapshot GC runs a find
         return src
 
     @pytest.mark.asyncio
@@ -1895,8 +1816,8 @@ class TestChainDriverCrash:
         src = await TestStatus._tracking(tmp_path, conn)
         script = f"{src._remote_scripts_dir}/sweep_1_array.slurm"
         lookup = "squeue -h -u gbena -n sweep_1_array -o '%i %T %o'"
-        conn.add(lookup, _Result(0, f"555 {state} {script}\n"))
-        conn.add("sbatch /", _Result(0, "Submitted batch job 556\n"))
+        conn.add(lookup, Result(0, f"555 {state} {script}\n"))
+        conn.add("sbatch /", Result(0, "Submitted batch job 556\n"))
         ctx = ResumableContext(1, ResumableConfig(enabled=True, chunk_walltime="23:00:00"))
         ids = await src.submit_batch([{"s": 0}], "sweep_1", "array", resumable=ctx)
         assert ids == (["555"] if adopted else ["556"])

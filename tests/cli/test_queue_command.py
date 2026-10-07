@@ -12,6 +12,7 @@ import io
 
 import click
 import pytest
+from fakes import FakeConn, Result
 from rich.console import Console
 
 from hpc_sweep_manager.cli import queue as queue_cli
@@ -137,37 +138,6 @@ class TestResolveQueueTarget:
 # ----------------------------------------------------------------- SSH driver
 
 
-class _Result:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class FakeConn:
-    def __init__(self):
-        self.run_calls: list[str] = []
-        self.closed = False
-        self._responder: list[tuple] = []
-
-    def add(self, sub: str, res: _Result) -> None:
-        self._responder.append((sub, res))
-
-    async def run(self, cmd: str, *, input: str | None = None, check: bool = False):
-        self.run_calls.append(cmd)
-        for i, (sub, res) in enumerate(self._responder):
-            if sub in cmd:
-                del self._responder[i]
-                return res
-        return _Result(0, "")
-
-    def close(self) -> None:
-        self.closed = True
-
-    async def wait_closed(self) -> None:
-        pass
-
-
 _ROW = "\t".join(
     [
         "3703585_14",
@@ -202,8 +172,8 @@ def _patch_connection(monkeypatch, conn: FakeConn) -> dict:
 class TestRunQueueCommandRemote:
     def test_remote_fetch_renders_and_closes(self, monkeypatch):
         conn = FakeConn()
-        conn.add("whoami", _Result(0, "gbena\n"))
-        conn.add("squeue", _Result(0, _ROW + "\n"))
+        conn.add("whoami", Result(0, "gbena\n"))
+        conn.add("squeue", Result(0, _ROW + "\n"))
         calls = _patch_connection(monkeypatch, conn)
         console, buf = _console_buf()
 
@@ -227,7 +197,7 @@ class TestRunQueueCommandRemote:
         """A broken remote must exit non-zero with a message — silent empty
         tables are the failure mode this whole feature exists to kill."""
         conn = FakeConn()
-        conn.add("squeue", _Result(127, "", "bash: squeue: command not found"))
+        conn.add("squeue", Result(127, "", "bash: squeue: command not found"))
         _patch_connection(monkeypatch, conn)
         console, _ = _console_buf()
 
@@ -557,11 +527,11 @@ class TestRenderMineGrouped:
         """Full pipeline over FakeConn: squeue rows → groups → sacct → render."""
         monkeypatch.chdir(tmp_path)
         conn = FakeConn()
-        conn.add("whoami", _Result(0, "gbena\n"))
-        conn.add("squeue", _Result(0, _ROW + "\n"))  # one RUNNING A100 task
+        conn.add("whoami", Result(0, "gbena\n"))
+        conn.add("squeue", Result(0, _ROW + "\n"))  # one RUNNING A100 task
         conn.add(
             "sacct",
-            _Result(0, "3703585_1|COMPLETED\n3703585_11|FAILED\n3703585_14|RUNNING\n"),
+            Result(0, "3703585_1|COMPLETED\n3703585_11|FAILED\n3703585_14|RUNNING\n"),
         )
         _patch_connection(monkeypatch, conn)
         console, buf = _console_buf()

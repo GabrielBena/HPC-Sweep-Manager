@@ -10,40 +10,11 @@ import io
 from functools import partialmethod
 
 import pytest
+from fakes import FakeConn, Result
 from rich.console import Console
 
 from hpc_sweep_manager.cli.sweep import _collect_via_manifest
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
-
-
-class _Result:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class FakeConn:
-    def __init__(self):
-        self.run_calls: list[str] = []
-        self._responder: list[tuple] = []
-
-    def add(self, sub, res):
-        self._responder.append((sub, res))
-
-    async def run(self, cmd, *, input: str | None = None, check: bool = False, timeout=None):
-        self.run_calls.append(cmd)
-        for i, (sub, res) in enumerate(self._responder):
-            if sub in cmd:
-                del self._responder[i]
-                return res
-        return _Result(0, "")
-
-    def close(self):
-        pass
-
-    async def wait_closed(self):
-        pass
 
 
 def _manifest(tmp_path, *, job_ids, archive_dir=None):
@@ -93,8 +64,8 @@ class TestCollectViaManifest:
     @pytest.mark.asyncio
     async def test_all_completed_pulls_and_cleans(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|COMPLETED\n"))
-        conn.add("rm -rf", _Result(0))
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n2|COMPLETED\n"))
+        conn.add("rm -rf", Result(0))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -105,12 +76,12 @@ class TestCollectViaManifest:
         assert "terminal: 2 COMPLETED." in out
         assert rsync_calls, "expected a tasks/ pull"
         # All succeeded → remote cleaned.
-        assert any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     async def test_one_failed_reported_no_clean(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|FAILED\n"))
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n2|FAILED\n"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -121,7 +92,7 @@ class TestCollectViaManifest:
         assert "1 COMPLETED, 1 FAILED" in out
         assert rsync_calls
         # A failure present → remote kept for inspection.
-        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     async def test_pending_in_squeue_is_not_deleted(self, tmp_path, patched):
@@ -129,8 +100,8 @@ class TestCollectViaManifest:
         # maintenance reservation, not yet in sacct) must be treated as running —
         # NEVER classified COMPLETED via the sacct fallback and then deleted.
         conn, rsync_calls = patched
-        conn.add("squeue -u", _Result(0, stdout="2 PENDING\n"))  # job 2 queued, 1 gone
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))  # job 1 done
+        conn.add("squeue -u", Result(0, stdout="2 PENDING\n"))  # job 2 queued, 1 gone
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n"))  # job 1 done
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -142,14 +113,14 @@ class TestCollectViaManifest:
         assert "1/2" in out
         assert rsync_calls  # pulled the finished task
         # The remote must NOT be deleted while a task is still queued.
-        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     async def test_already_cleaned_remote_is_noop(self, tmp_path, patched):
         # Re-running after a successful collect (remote dir gone) is a clean no-op,
         # not a "pull reported an error".
         conn, rsync_calls = patched
-        conn.add("test -d", _Result(1, stdout=""))  # remote sweep dir gone
+        conn.add("test -d", Result(1, stdout=""))  # remote sweep dir gone
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -159,12 +130,12 @@ class TestCollectViaManifest:
         out = buf.getvalue()
         assert "already cleaned" in out.lower() or "nothing left" in out.lower()
         assert rsync_calls == []  # nothing pulled
-        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     async def test_partial_running_pulls_only(self, tmp_path, patched):
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n2|RUNNING\n"))
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n2|RUNNING\n"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -176,7 +147,7 @@ class TestCollectViaManifest:
         assert "1/2" in out
         assert rsync_calls  # pulled what's done
         # Not all terminal → no cleanup.
-        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("failing", ["squeue -u", "sacct"])
@@ -185,7 +156,7 @@ class TestCollectViaManifest:
         # read "every job finished" and archive + rm -rf the live sweep dir.
         conn, rsync_calls = patched
         for _ in range(3):
-            conn.add(failing, _Result(1, stderr="Unable to contact slurm controller/database"))
+            conn.add(failing, Result(1, stderr="Unable to contact slurm controller/database"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -193,15 +164,15 @@ class TestCollectViaManifest:
             Console(file=buf, width=200),
         )
         assert "still running" in buf.getvalue()
-        assert not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert not any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rc", [None, 255])
     async def test_an_unknown_test_d_goes_on(self, tmp_path, patched, rc):
         # Only `test -d` saying 1 means "already cleaned"; anything else is no answer.
         conn, rsync_calls = patched
-        conn.add("test -d", _Result(rc))
-        conn.add("sacct", _Result(0, stdout="1|COMPLETED\n"))
+        conn.add("test -d", Result(rc))
+        conn.add("sacct", Result(0, stdout="1|COMPLETED\n"))
         buf = io.StringIO()
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1",
@@ -216,27 +187,27 @@ class TestCollectViaManifest:
     ):
         # Review of #38: a chain whose final archive was cut short had no way back.
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="101|COMPLETED\n"))
+        conn.add("sacct", Result(0, stdout="101|COMPLETED\n"))
         manifest = _manifest(tmp_path, job_ids=["101"], archive_dir="/shares/lab/hsm-archive")
         manifest["resumable"] = {"enabled": True, "chunk_walltime": "23:00:00"}
         manifest["chain"] = {"state": {"chunk_index": 2, "done": True}}
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1", manifest, Console(file=io.StringIO())
         )
-        assert any("/shares/lab/hsm-archive/sw1" in c for c in conn.run_calls)  # archived
+        assert any("/shares/lab/hsm-archive/sw1" in c for c in conn.cmds)  # archived
         assert "--exclude=*/resume/" in rsync_calls[-1]  # the checkpoints ride the archive
-        assert any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert any(c.startswith("rm -rf") for c in conn.cmds)
 
     @pytest.mark.asyncio
     async def test_a_stopped_chain_is_pulled_and_kept(self, tmp_path, patched):
         # Review of #47: `hsm sweep cancel` marks a chain failed; collect brings its results home
         # and keeps the remote dir (its checkpoints), even if every job ended COMPLETED.
         conn, rsync_calls = patched
-        conn.add("sacct", _Result(0, stdout="101|COMPLETED\n"))
+        conn.add("sacct", Result(0, stdout="101|COMPLETED\n"))
         manifest = _manifest(tmp_path, job_ids=["101"])
         manifest["resumable"] = {"enabled": True, "chunk_walltime": "23:00:00"}
         manifest["chain"] = {"state": {"chunk_index": 1, "failed": True}}
         await _collect_via_manifest(
             tmp_path / "sweeps" / "outputs" / "sw1", manifest, Console(file=io.StringIO())
         )
-        assert rsync_calls and not any(c.startswith("rm -rf") for c in conn.run_calls)
+        assert rsync_calls and not any(c.startswith("rm -rf") for c in conn.cmds)

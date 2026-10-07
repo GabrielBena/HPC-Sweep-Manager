@@ -38,7 +38,6 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.21.0",
-    "anyio>=3.6.0",
     # ruff is exact-pinned: it is the style SSOT, so CI, pre-commit and the editor name the same version.
     "ruff==0.15.13",
     "mypy>=1.0.0",

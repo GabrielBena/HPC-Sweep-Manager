@@ -7,12 +7,12 @@ parsed dataclasses come out right.
 
 from __future__ import annotations
 
-import asyncio
 import shlex
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fakes import FakeConn, Result
 
 from hpc_sweep_manager.core.hpc.scheduler_queue import (
     SQUEUE_FORMAT,
@@ -706,35 +706,6 @@ class TestSacctTransports:
 # --------------------------------------------------------------- SSHSlurmQueue
 
 
-class _Result:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class FakeConn:
-    """asyncssh stand-in: substring responder, records every command."""
-
-    def __init__(self):
-        self.run_calls: list[str] = []
-        self._responder: list[tuple] = []
-        self.run_delay_s: float = 0.0
-
-    def add(self, sub: str, res: _Result) -> None:
-        self._responder.append((sub, res))
-
-    async def run(self, cmd: str, *, input: str | None = None, check: bool = False):
-        self.run_calls.append(cmd)
-        if self.run_delay_s:
-            await asyncio.sleep(self.run_delay_s)
-        for i, (sub, res) in enumerate(self._responder):
-            if sub in cmd:
-                del self._responder[i]
-                return res
-        return _Result(0, "")
-
-
 # A live-grammar row (colon-count GRES) as the remote would emit it.
 _REMOTE_ROW_A100 = "\t".join(
     [
@@ -763,7 +734,7 @@ class TestSSHSlurmQueue:
         """
         conn = FakeConn()
         await SSHSlurmQueue(conn).list_user_jobs("gbena")
-        cmd = conn.run_calls[0]
+        cmd = conn.cmds[0]
         # Re-split the way the remote shell would: format must be one token.
         tokens = shlex.split(cmd)
         fmt_tokens = [t for t in tokens if t.startswith("--format=")]
@@ -773,7 +744,7 @@ class TestSSHSlurmQueue:
     @pytest.mark.asyncio
     async def test_parses_live_grammar_rows(self):
         conn = FakeConn()
-        conn.add("squeue", _Result(0, _REMOTE_ROW_A100 + "\n"))
+        conn.add("squeue", Result(0, _REMOTE_ROW_A100 + "\n"))
         jobs = await SSHSlurmQueue(conn).list_user_jobs("gbena")
         assert len(jobs) == 1
         assert jobs[0].gpu_count == 1
@@ -783,13 +754,13 @@ class TestSSHSlurmQueue:
     async def test_pending_path_passes_r_flag(self):
         conn = FakeConn()
         await SSHSlurmQueue(conn).pending_gpu_jobs_sorted()
-        assert "-r" in shlex.split(conn.run_calls[0])
+        assert "-r" in shlex.split(conn.cmds[0])
 
     @pytest.mark.asyncio
     async def test_nonzero_rc_raises_not_empty(self):
         """Over SSH an empty table must mean 'no jobs', never 'squeue broke'."""
         conn = FakeConn()
-        conn.add("squeue", _Result(127, "", "bash: squeue: command not found"))
+        conn.add("squeue", Result(127, "", "bash: squeue: command not found"))
         with pytest.raises(QueueCommandError, match="rc=127"):
             await SSHSlurmQueue(conn).list_user_jobs("gbena")
 
@@ -804,13 +775,13 @@ class TestSSHSlurmQueue:
     @pytest.mark.asyncio
     async def test_whoami(self):
         conn = FakeConn()
-        conn.add("whoami", _Result(0, "gbena\n"))
+        conn.add("whoami", Result(0, "gbena\n"))
         assert await SSHSlurmQueue(conn).whoami() == "gbena"
 
     @pytest.mark.asyncio
     async def test_whoami_empty_raises(self):
         conn = FakeConn()
-        conn.add("whoami", _Result(0, "\n"))
+        conn.add("whoami", Result(0, "\n"))
         with pytest.raises(QueueCommandError):
             await SSHSlurmQueue(conn).whoami()
 
@@ -819,9 +790,7 @@ class TestSSHSlurmQueue:
         conn = FakeConn()
         conn.add(
             "scontrol",
-            _Result(
-                0, "ReservationName=maint StartTime=s EndTime=e Duration=d Nodes=n NodeCnt=3\n"
-            ),
+            Result(0, "ReservationName=maint StartTime=s EndTime=e Duration=d Nodes=n NodeCnt=3\n"),
         )
         res = await SSHSlurmQueue(conn).reservations()
         assert len(res) == 1 and res[0].node_count == 3
@@ -831,13 +800,13 @@ class TestSSHSlurmQueue:
         """Deliberate asymmetry: sacct is optional enrichment — a cluster
         without accounting must degrade, not error (unlike squeue)."""
         conn = FakeConn()
-        conn.add("sacct", _Result(1, "", "Slurm accounting storage is disabled"))
+        conn.add("sacct", Result(1, "", "Slurm accounting storage is disabled"))
         assert await SSHSlurmQueue(conn).sacct_job_states(["1"]) is None
 
     @pytest.mark.asyncio
     async def test_sacct_happy_path(self):
         conn = FakeConn()
-        conn.add("sacct", _Result(0, "1_1|COMPLETED\n1_2|FAILED\n"))
+        conn.add("sacct", Result(0, "1_1|COMPLETED\n1_2|FAILED\n"))
         states = await SSHSlurmQueue(conn).sacct_job_states(["1"])
         assert states == {"1": {"COMPLETED": 1, "FAILED": 1}}
 
@@ -845,18 +814,18 @@ class TestSSHSlurmQueue:
     async def test_sacct_empty_ids_short_circuits(self):
         conn = FakeConn()
         assert await SSHSlurmQueue(conn).sacct_job_states([]) == {}
-        assert conn.run_calls == []  # "nothing to ask" ≠ a remote round-trip
+        assert conn.cmds == []  # "nothing to ask" ≠ a remote round-trip
 
     @pytest.mark.asyncio
     async def test_sinfo_failure_returns_none_not_raise(self):
         conn = FakeConn()
-        conn.add("sinfo", _Result(127, "", "bash: sinfo: command not found"))
+        conn.add("sinfo", Result(127, "", "bash: sinfo: command not found"))
         assert await SSHSlurmQueue(conn).gpu_capacity() is None
 
     @pytest.mark.asyncio
     async def test_sinfo_happy_path(self):
         conn = FakeConn()
-        conn.add("sinfo", _Result(0, "n1 mix gpu:A100:8 gpu:A100:4(IDX:0-3)\n"))
+        conn.add("sinfo", Result(0, "n1 mix gpu:A100:8 gpu:A100:4(IDX:0-3)\n"))
         capacity = await SSHSlurmQueue(conn).gpu_capacity()
         assert capacity == ({"A100": {"total": 8, "used": 4}}, 0)
 
@@ -879,7 +848,7 @@ class TestSSHSlurmQueue:
         await getattr(SSHSlurmQueue(conn), method)(*args)
         with patch("subprocess.run", return_value=_fake_completed("")) as mock_run:
             getattr(SlurmQueue(), method)(*args)
-        assert shlex.split(conn.run_calls[0]) == mock_run.call_args[0][0]
+        assert shlex.split(conn.cmds[0]) == mock_run.call_args[0][0]
 
     def test_bare_trailing_colon_type_is_none_not_empty(self):
         # "gres/gpu:" must not yield gpu_type="" (falsy-but-not-None trap).

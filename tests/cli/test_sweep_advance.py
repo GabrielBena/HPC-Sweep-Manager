@@ -42,37 +42,28 @@ class TestAdvanceCommandGuards:
     def test_no_manifest(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
 
-        runner = CliRunner()
-        with runner.isolated_filesystem():
-            res = runner.invoke(sweep_cmd, ["advance", "nope"], obj=_obj())
+        monkeypatch.chdir(tmp_path)
+        res = CliRunner().invoke(sweep_cmd, ["advance", "nope"], obj=_obj())
         assert "No manifest" in res.output
 
-    def test_not_a_resumable_chain(self, tmp_path):
-        from pathlib import Path
-
+    def test_not_a_resumable_chain(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
 
-        runner = CliRunner()
-        with runner.isolated_filesystem():
-            d = Path("sweeps/outputs/sw1")
-            d.mkdir(parents=True)
-            (d / ".hsm_manifest.json").write_text(
-                json.dumps({"sweep_id": "sw1", "backend": "slurm"})
-            )
-            res = runner.invoke(sweep_cmd, ["advance", "sw1"], obj=_obj())
+        monkeypatch.chdir(tmp_path)
+        d = tmp_path / "sweeps/outputs/sw1"
+        d.mkdir(parents=True)
+        (d / ".hsm_manifest.json").write_text(json.dumps({"sweep_id": "sw1", "backend": "slurm"}))
+        res = CliRunner().invoke(sweep_cmd, ["advance", "sw1"], obj=_obj())
         assert "not a resumable chain" in res.output
 
-    def test_collect_refuses_resumable_chain(self, tmp_path):
-        from pathlib import Path
-
+    def test_collect_refuses_resumable_chain(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
 
-        runner = CliRunner()
-        with runner.isolated_filesystem():
-            d = Path("sweeps/outputs/sw1")
-            d.mkdir(parents=True)
-            (d / ".hsm_manifest.json").write_text(json.dumps(_chain_manifest()))
-            res = runner.invoke(sweep_cmd, ["collect", "sw1"], obj=_obj())
+        monkeypatch.chdir(tmp_path)
+        d = tmp_path / "sweeps/outputs/sw1"
+        d.mkdir(parents=True)
+        (d / ".hsm_manifest.json").write_text(json.dumps(_chain_manifest()))
+        res = CliRunner().invoke(sweep_cmd, ["collect", "sw1"], obj=_obj())
         # collect must redirect to advance, never run the destructive pull/clean.
         assert "resumable chain" in res.output
         assert "advance" in res.output
