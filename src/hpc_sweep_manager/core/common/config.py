@@ -419,11 +419,15 @@ class HSMConfig:
         """The configured paths missing on this machine, each named with its key (R6):
         ``project.root`` and the script the run uses (the sweep file's ``script``, else
         ``paths.train_script``), relative to the project root as the runs resolve it."""
+
+        def here(path: str) -> Path:  # ~ and $HOME as the shell would read them
+            return Path(os.path.expandvars(os.path.expanduser(path)))
+
         root = self.get_project_root()
         script = sweep_script or self.get_default_script_path()
         key = "the sweep file's `script`" if sweep_script else "`paths.train_script`"
-        missing = [("`project.root`", root)] if root and not Path(root).is_dir() else []
-        if script and not (Path(root or ".") / script).is_file():
+        missing = [("`project.root`", root)] if root and not here(root).is_dir() else []
+        if script and not (here(root or ".") / here(script)).is_file():
             missing.append((key, script))
         return [f"{k} = {v!r} does not exist on this machine" for k, v in missing]
 

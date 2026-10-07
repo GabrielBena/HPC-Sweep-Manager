@@ -151,6 +151,13 @@ class TestCheckPaths:
         cfg = {"project": {"root": str(tmp_path)}, "paths": {"train_script": "train.py"}}
         assert HSMConfig(cfg).check_paths() == []  # relative to the project root
 
+    def test_home_in_a_path_is_expanded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "proj").mkdir()
+        (tmp_path / "proj" / "train.py").write_text("")
+        cfg = {"project": {"root": "~/proj"}, "paths": {"train_script": "$HOME/proj/train.py"}}
+        assert HSMConfig(cfg).check_paths() == []
+
     def test_stale_root_and_script_are_named_with_their_keys(self, tmp_path):
         old = tmp_path / "moved"
         cfg = {"project": {"root": str(old)}, "paths": {"train_script": str(old / "t.py")}}
