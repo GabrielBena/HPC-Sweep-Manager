@@ -75,7 +75,7 @@ is deleted; the CHANGELOG keeps the record.
 | | - `hsm sweep errors` reads files nothing writes | delete it (it becomes `status --errors`) | |
 | | - `init` re-run drops `distributed:` | never rewrite an existing config without `--regenerate` | |
 | R9 | *[NEW]* The 10 s poll is hard-coded for jobs that run 47 h. | 60 s for Slurm sources. | #38 ✓ |
-| R10 | *[NEW]* The resumable chain can double-submit: there is a crash window between sbatch and persist, and nothing locks a live launcher against a cron `advance`. The manifest write isn't atomic, and `advance` drops cost hints. | Adopt a live chunk found by `squeue -n` instead of submitting another; write the manifest via temp file and rename; persist `costs`. | |
+| R10 | *[NEW]* The resumable chain can double-submit: there is a crash window between sbatch and persist, and nothing locks a live launcher against a cron `advance`. The manifest write isn't atomic, and `advance` drops cost hints. | Adopt a live chunk found by `squeue -n` instead of submitting another; write the manifest via temp file and rename; persist `costs`. | #59 ✓ |
 | R11 | *[FR#15a, corrected: `~/miniforge3` is already probed]* The conda probe stops at the first install it finds, so a leftover `~/miniconda3` shadows `~/miniforge3`. It also never tries `~/mambaforge` or `$CONDA_EXE`. | Pick the first install that has `envs/<env>`; add the two missing candidates. | #45 ✓ |
 | R12 | *[NEW]* ssh task stdout is buffered in the launcher's memory and thrown away; `logs/` stays empty. | Fixed by X1: logs go to files. | #37 ✓ |
 
@@ -192,7 +192,7 @@ project's default pool. Tell Comp-PVR its `pre_script` can use `$HSM_CODE_DIR`.
 | slurm | S-3 (#27 ✓) · per-sweep code snapshot (`--link-dest`), shared by both SSH sources | S4 | P0 |
 | slurm | S-4 (#31 ✓ · #33 ✓ · #35 ✓) · aware launches: `hsm queue share`; a pre-submit fair-share check (hot account → prompt: throttle-and-go by default, `--force`, wait, cancel); `array_throttle`; GPU nodes excluded for CPU-only jobs; reservation-vs-walltime check; key normalisation for `extra_directives` | S5–S7, FR#10 | P1 |
 | slurm | S-5 (#46 ✓: R7; #47 ✓ · #49 ✓: S9; #50 ✓: S8; #38 ✓: R9) · `tasks_state.json` (TIMEOUT/OOM/infra), periodic pull, rsync retry, 60 s poll; manifest at submit for native Slurm and a manifest-backed `cancel` | S8, S9, R7, R9 | P1 |
-| slurm | S-6 (#38 ✓: S11, R9; #51 ✓: S10; #52 ✓: S12) · resumable fixes (#15, #16), archive on FAILED, Lmod init, chain double-submit, keepalive and reconnect | S10, S11, R10 | P1 |
+| slurm | S-6 (#38 ✓: S11, R9; #51 ✓: S10; #52 ✓: S12; #59 ✓: R10) · resumable fixes (#15, #16), archive on FAILED, Lmod init, chain double-submit, keepalive and reconnect | S10, S11, R10 | P1 |
 | slurm | S-7 · one Slurm base for native and SSH-Slurm; one queue class | consolidation | — |
 | ssh | X-1 (#24 ✓) · `login_timeout` with an agent-less retry remembered per host, a bounded connect, rsync over ssh with `BatchMode`/`ConnectTimeout`/`ServerAliveInterval` (keepalive moved to X-2, with the reconnect) | X2 | P0 |
 | ssh | X-2 (#37 ✓ · #39 ✓) · detached ssh supervision, `hsm sweep collect` re-attaches ssh sweeps, task logs to files, keepalive + reconnect | X1, R12, S11 (ssh side) | P0 |
