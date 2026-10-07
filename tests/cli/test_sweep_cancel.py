@@ -11,33 +11,11 @@ import logging
 
 import pytest
 from click.testing import CliRunner
+from fakes import FakeConn, Result
 from rich.console import Console
 
 from hpc_sweep_manager.cli.sweep import sweep_cmd
 from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
-
-
-class _Result:
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
-class FakeConn:
-    """Answers ``scancel`` with ``scancel_result``; anything else succeeds silently."""
-
-    def __init__(self, scancel_result):
-        self.run_calls: list[str] = []
-        self.scancel_result = scancel_result
-
-    async def run(self, cmd, *, input=None, check=False, timeout=None):
-        self.run_calls.append(cmd)
-        return self.scancel_result if cmd.startswith("scancel") else _Result(0)
-
-    def close(self):
-        pass
-
-    async def wait_closed(self):
-        pass
 
 
 def _cancel(tmp_path, monkeypatch, manifest, *args, input=None):
@@ -63,7 +41,7 @@ def _ssh_manifest(**extra):
 
 @pytest.fixture
 def conn(monkeypatch):
-    conn = FakeConn(_Result(0))
+    conn = FakeConn()
 
     async def _open(self):
         return conn
@@ -73,20 +51,20 @@ def conn(monkeypatch):
 
 
 def _scancels(conn):
-    return [c for c in conn.run_calls if c.startswith("scancel")]
+    return [c for c in conn.cmds if c.startswith("scancel")]
 
 
 class TestSSHSlurm:
     def test_one_scancel_names_every_job(self, tmp_path, monkeypatch, conn):
         res = _cancel(tmp_path, monkeypatch, _ssh_manifest(), "--yes")
         assert res.exit_code == 0, res.output
-        assert conn.run_calls[1:] == ["scancel 101 102"]  # after `echo $USER`: no rsync, no rm
-        assert len(conn.run_calls) == 2 and conn.run_calls[0].startswith("echo ")
+        assert conn.cmds[1:] == ["scancel 101 102"]  # after `echo $USER`: no rsync, no rm
+        assert len(conn.cmds) == 2 and conn.cmds[0].startswith("echo ")
         assert "Cancelled job(s) 101 102 on uzh" in res.output
 
     @pytest.mark.parametrize("rc", [1, None])
     def test_a_failed_or_unanswered_scancel_exits_non_zero(self, tmp_path, monkeypatch, conn, rc):
-        conn.scancel_result = _Result(rc, stderr="slurm_load_jobs error")
+        conn.add("scancel", Result(rc, stderr="slurm_load_jobs error"))
         res = _cancel(tmp_path, monkeypatch, _ssh_manifest(), "--yes")
         assert res.exit_code == 1
         assert "scancel failed" in res.output

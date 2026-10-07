@@ -452,6 +452,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   newest log: an ssh task's `tasks/<task>/hsm.log`, a local or Slurm task's `logs/*.err`.
   The end-of-run hint points at it. **For consumers:** `hsm sweep errors` is gone; use
   `hsm sweep status <id> --errors`.
+- **Test scaffolding (chore-5).** The `anyio` dev dependency and nine conftest fixtures no
+  test used. Five copies of the asyncssh stand-in are now one, `tests/fakes.py`.
 
 Two field reports drove this cycle: SSH-Slurm → S3IT first use
 ([`2026-06-02-s3it-first-use.md`](docs/dev/field-reports/2026-06-02-s3it-first-use.md))
