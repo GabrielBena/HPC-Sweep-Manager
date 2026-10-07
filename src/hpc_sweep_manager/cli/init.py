@@ -552,7 +552,11 @@ def _offer_agent_pointer(
 
 
 def init_project(
-    project_path: Path, interactive: bool, console: Console, logger: logging.Logger
+    project_path: Path,
+    interactive: bool,
+    console: Console,
+    logger: logging.Logger,
+    regenerate: bool = False,
 ) -> bool:
     """Initialize sweep infrastructure in a project. Returns True on success."""
     console.print(
@@ -564,6 +568,15 @@ def init_project(
 
     project_path = project_path.resolve()
     console.print(f"[green]Initializing project at: {project_path}[/green]")
+    if (project_path / ".hsm" / "config.yaml").exists() and not regenerate:
+        # Never rewrite a hand-edited config unasked: a re-run used to drop `distributed:` (R8).
+        console.print(
+            "[green]Already initialized: .hsm/config.yaml is left as it is.[/green] "
+            "`--regenerate` rewrites it (the old copy goes to .hsm/config.yaml.bak), "
+            "sweeps/README.md and sweeps/example_sweep.yaml."
+        )
+        _ensure_machine_config(console)
+        return True
 
     # Check for existing old-style config (migration)
     old_config_path = project_path / "sweeps" / "hsm_config.yaml"
@@ -1003,8 +1016,8 @@ def _display_next_steps(console: Console):
    set `backend: slurm` + `workdir` + `archive_dir` per-remote (`hsm docs`
    → SSH_EXECUTION / MULTI_CLUSTER).
 3. **Create sweep config**: Run `hsm setup configure`, or copy
-   `sweeps/example_sweep.yaml` to your own file and edit that (re-running
-   `hsm setup init` regenerates the example; your own files are never touched).
+   `sweeps/example_sweep.yaml` to your own file and edit that (`hsm setup init
+   --regenerate` rewrites the example; your own files are never touched).
 4. **Dry-run**: `hsm sweep run --config sweeps/example_sweep.yaml --dry-run`
 5. **Submit**: `hsm sweep run --config sweeps/example_sweep.yaml --mode array`
    (or `--mode local`, `--remote <alias>`, `--mode distributed`)
@@ -1031,18 +1044,20 @@ def setup():
 @setup.command("init")
 @click.option("--interactive", "-i", is_flag=True, help="Interactive setup mode")
 @click.option("--project-root", type=click.Path(exists=True), help="Project root directory")
+@click.option("--regenerate", is_flag=True, help="Rewrite an existing .hsm/config.yaml")
 @common_options
 @click.pass_context
-def init_cmd(ctx, interactive: bool, project_root: str, verbose: bool, quiet: bool):
+def init_cmd(ctx, interactive, project_root, regenerate, verbose, quiet):
     """Initialize sweep infrastructure in a project.
 
-    Safe to re-run: regenerates .hsm/config.yaml (the previous copy is
+    Safe to re-run: an initialized project is left as it is; --regenerate
+    regenerates .hsm/config.yaml (the previous copy is
     saved to .hsm/config.yaml.bak), sweeps/README.md and
     sweeps/example_sweep.yaml; never touches other files in sweeps/.
     Non-interactive runs (the default) never prompt.
     """
     project_path = Path(project_root) if project_root else Path.cwd()
-    ok = init_project(project_path, interactive, ctx.obj["console"], ctx.obj["logger"])
+    ok = init_project(project_path, interactive, ctx.obj["console"], ctx.obj["logger"], regenerate)
     if not ok:
         ctx.exit(1)
 

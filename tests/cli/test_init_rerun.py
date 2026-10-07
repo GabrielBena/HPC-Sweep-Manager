@@ -48,11 +48,11 @@ def _null_logger():
     return lg
 
 
-def _invoke_cli(proj):
+def _invoke_cli(proj, *args):
     buf = io.StringIO()
     obj = {"console": Console(file=buf, width=200), "logger": _null_logger()}
     res = CliRunner().invoke(
-        init_cmd, ["--project-root", str(proj)], obj=obj, catch_exceptions=False
+        init_cmd, ["--project-root", str(proj), *args], obj=obj, catch_exceptions=False
     )
     return res, buf.getvalue()
 
@@ -85,10 +85,29 @@ class TestNonInteractiveInitSucceeds:
 
 
 class TestRerunContract:
-    """G1: re-running init regenerates the three generated files, backs up
-    the previous config.yaml, and leaves other sweep configs alone."""
+    """G1 + R8: a re-run leaves an initialized project as it is; --regenerate
+    regenerates the three generated files, backs up the previous config.yaml,
+    and leaves other sweep configs alone."""
 
-    def test_rerun_backs_up_config_and_spares_other_sweeps(self, project):
+    def test_rerun_keeps_a_hand_edited_config(self, project):
+        # R8: a re-run rewrote the config and dropped the `distributed:` block.
+        assert _invoke_cli(project)[0].exit_code == 0
+        config_path = project / ".hsm" / "config.yaml"
+        edited = config_path.read_text() + "distributed:\n  remotes:\n    uzh: {backend: slurm}\n"
+        config_path.write_text(edited)
+
+        res, out = _invoke_cli(project)
+        assert res.exit_code == 0, out
+        assert config_path.read_text() == edited
+        assert not (project / ".hsm" / "config.yaml.bak").exists()
+        assert "--regenerate" in out
+
+        res, out = _invoke_cli(project, "--regenerate")
+        assert res.exit_code == 0, out
+        assert (project / ".hsm" / "config.yaml.bak").read_text() == edited
+        assert "uzh: {backend: slurm}" not in config_path.read_text()  # regenerated
+
+    def test_regenerate_backs_up_config_and_spares_other_sweeps(self, project):
         console, _ = _console()
         assert init_project(project, False, console, logging.getLogger("t")) is True
 
@@ -100,7 +119,7 @@ class TestRerunContract:
         my_sweep.write_text("sweep:\n  grid:\n    seed: [1]\n")
 
         console, out_buf = _console()
-        assert init_project(project, False, console, logging.getLogger("t")) is True
+        assert init_project(project, False, console, logging.getLogger("t"), regenerate=True)
 
         backup = project / ".hsm" / "config.yaml.bak"
         assert backup.is_file()

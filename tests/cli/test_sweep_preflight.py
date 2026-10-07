@@ -1,4 +1,5 @@
-"""`hsm sweep run` pre-flight: unknown keys warn (R4), stale paths stop the run first (R6).
+"""`hsm sweep run` pre-flight: unknown keys warn (R4), stale paths stop the run first (R6),
+a failed pre-flight or a cancelled sweep exits non-zero (R8).
 
 Drives ``run_sweep`` directly, as test_sweep_remote_dryrun.py does (CliRunner and HSM's stdout
 log handler don't mix under pytest's capture).
@@ -10,12 +11,15 @@ import io
 import logging
 from pathlib import Path
 
+import click
 import pytest
 import yaml
 from rich.console import Console
 
+from hpc_sweep_manager.cli import sweep as sweep_cli
 from hpc_sweep_manager.cli.sweep import run_sweep
 from hpc_sweep_manager.core.common.config import HSMConfig
+from hpc_sweep_manager.core.common.sweep_orchestrator import SweepResult
 
 
 def _project(tmp_path, monkeypatch, *, train_script, sweep=None):
@@ -81,3 +85,35 @@ class TestPreflight:
         assert "did you mean `sweep.grid`?" in out
         assert "did you mean `distributed.remotes.uzh.spec.pre_script`?" in out
         assert "DRY RUN" in out
+
+
+class TestHonestExits:
+    """R8: these runs used to print an error (or a CANCELLED tally) and exit 0."""
+
+    def test_an_invalid_sweep_config_exits_1(self, tmp_path, monkeypatch):
+        cfg = _project(
+            tmp_path, monkeypatch, train_script="train.py", sweep={"sweep": {"grid": {"lr": []}}}
+        )
+        with pytest.raises(click.ClickException, match="cannot be empty") as exc:
+            _run(cfg, dry_run=True)
+        assert exc.value.exit_code == 1
+
+    def test_a_missing_sweeps_root_is_named_not_masked(self, tmp_path, monkeypatch):
+        cfg = _project(tmp_path, monkeypatch, train_script="train.py")
+        (tmp_path / "_sweeps_root").rmdir()
+        with pytest.raises(click.ClickException, match="`local.sweeps_root` is set to") as exc:
+            _run(cfg, dry_run=False)
+        assert "config file not found" not in exc.value.message
+
+    def test_a_cancelled_sweep_exits_1(self, tmp_path, monkeypatch):
+        cfg = _project(tmp_path, monkeypatch, train_script="train.py")
+
+        async def cancelled(**kw):
+            return SweepResult(kw["sweep_id"], kw["sweep_dir"], ["j1"], {"j1": "CANCELLED"})
+
+        monkeypatch.setattr(sweep_cli, "run_sweep_async", cancelled)
+        out = io.StringIO()
+        with pytest.raises(SystemExit) as exc:
+            _run(cfg, dry_run=False, out=out)
+        assert exc.value.code == 1
+        assert "0 FAILED, 1 CANCELLED" in out.getvalue()
