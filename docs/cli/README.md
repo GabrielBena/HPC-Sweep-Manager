@@ -11,7 +11,7 @@ pinning, etc.) see the [user guides](../user_guide/).
 
 ```
 hsm setup    init configure                       # bootstrap
-hsm sweep    run | status | report | errors | watch | recent | queue | cancel | cleanup
+hsm sweep    run | status | report | watch | recent | queue | cancel | cleanup
 hsm remote   add | list | test | health | gpus | clean | remove
 hsm queue    mine | position | gpus | reservations
 ```
@@ -72,12 +72,15 @@ hsm sweep run --mode distributed     # uses .hsm/config.yaml's distributed: bloc
 
 ### `hsm sweep status [sweep_id]`
 
-Show completion status. With no argument, summarizes every sweep under
-`sweeps/outputs/`. With a sweep ID, shows per-task state.
+Show completion status. With `--all`, summarizes every sweep under
+`sweeps/outputs/`. With a sweep ID, shows per-task state; `--errors` adds, for each
+failed task (the first 10), its `Status:`/`Exit Code:` lines, how Slurm ended it
+(`tasks_state.json`), and the last lines of its newest log (`tasks/<task>/hsm.log` for
+ssh, `logs/*.err` for local and Slurm).
 
-### `hsm sweep report <sweep_id>` / `errors <sweep_id>`
+### `hsm sweep report <sweep_id>`
 
-Detailed completion report; error summaries for FAILED tasks.
+Detailed completion report.
 
 ### `hsm sweep watch <sweep_id>` / `recent` / `queue` / `cancel` / `cleanup`
 

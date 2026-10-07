@@ -259,7 +259,7 @@ Quick status:
 hsm sweep status                          # all sweeps
 hsm sweep status <sweep_id>               # one sweep, detail
 hsm sweep report <sweep_id>               # completion report
-hsm sweep errors <sweep_id>               # error summaries for failed tasks
+hsm sweep status <sweep_id> --errors      # why each failed task ended
 ```
 
 ## Step 5 — partial sweeps + retries
@@ -272,7 +272,7 @@ clean rebuild the better path. A small replacement built on top of
 ```bash
 hsm sweep status <sweep_id>     # see which tasks failed or are missing
 hsm sweep report <sweep_id>     # detailed per-task breakdown
-hsm sweep errors <sweep_id>     # tail the error logs
+hsm sweep status <sweep_id> --errors  # tail each failed task's log
 ```
 
 To re-run failed tasks: write a smaller `sweep.yaml` containing only the

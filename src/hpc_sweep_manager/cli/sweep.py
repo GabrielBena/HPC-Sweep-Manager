@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -852,7 +853,7 @@ def _run_sweep_via_orchestrator(
             console.print(f"  logs: [yellow]{sweep_dir / 'logs'}[/yellow]")
             console.print(
                 f"  [dim]hsm sweep report {sweep_id} --scan-tasks · "
-                f"hsm sweep errors {sweep_id}[/dim]"
+                f"hsm sweep status {sweep_id} --errors[/dim]"
             )
 
     summary_file = sweep_dir / "submission_summary.txt"
@@ -1539,13 +1540,43 @@ def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
         raise
 
 
+def _print_task_errors(sweep_dir: Path, tasks: list[str], console: Console) -> None:
+    """Why each failed task ended: its ``Status:``/``Exit Code:`` lines, how Slurm ended it
+    (``tasks_state.json``), and the tail of its newest non-empty log: an ssh task's
+    ``tasks/<task>/hsm.log``, a local or Slurm task's ``logs/*.err``."""
+    from ..core.common.sweep_analysis import load_task_states
+
+    states = load_task_states(sweep_dir)
+    for task in tasks[:10]:
+        info = sweep_dir / "tasks" / task / "task_info.txt"
+        text = info.read_text(errors="replace") if info.is_file() else ""
+        lines = [ln for ln in text.splitlines() if ln.startswith(("Status:", "Exit Code:"))]
+        if st := states.get(task):
+            lines.append(f"Slurm: {st.get('state')} (exit {st.get('exit_code')}, {st.get('node')})")
+        logs = [sweep_dir / "tasks" / task / "hsm.log", *sweep_dir.glob(f"logs/*{task}.err")]
+        if idx := re.search(r"^Slurm Array Index: (\d+)$", text, re.M):  # <name>_<job>_<idx>.err
+            logs += sweep_dir.glob(f"logs/*_{idx[1]}.err")
+        if logs := [p for p in logs if p.is_file() and p.stat().st_size]:
+            log = max(logs, key=lambda p: p.stat().st_mtime)
+            with log.open("rb") as f:  # the end only: a training log can be large
+                f.seek(max(0, log.stat().st_size - 4096))
+                tail = f.read().decode(errors="replace").splitlines()[-8:]
+            lines += [f"{log.relative_to(sweep_dir)}, last lines:", *(f"  {ln}" for ln in tail)]
+        console.print(f"\n{task}", style="bold red")
+        for ln in lines or ["no status line or log yet"]:
+            console.print(f"  {ln}", markup=False, highlight=False)
+    if len(tasks) > 10:
+        console.print(f"\n… and {len(tasks) - 10} more failed task(s)")
+
+
 @sweep_cmd.command("status")
 @click.argument("sweep_id", required=False)
 @click.option("--all", "-a", is_flag=True, help="Show status of all sweeps")
 @click.option("--incomplete-only", is_flag=True, help="Show only incomplete sweeps")
+@click.option("--errors", is_flag=True, help="Show why each failed task ended")
 @common_options
 @click.pass_context
-def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
+def status_cmd(ctx, sweep_id, all, incomplete_only, errors, verbose, quiet):
     """Show completion status of sweep(s)."""
     from rich.table import Table
 
@@ -1683,6 +1714,8 @@ def status_cmd(ctx, sweep_id, all, incomplete_only, verbose, quiet):
                 "Manual re-submission with a filtered sweep config is the current path "
                 "(an `hsm sweep complete` rebuild is planned).[/yellow]"
             )
+        if errors:
+            _print_task_errors(sweep_dir, analysis["failed_tasks"], console)
 
     else:
         raise click.ClickException("Please specify a sweep ID or use --all/--incomplete-only")
@@ -1823,81 +1856,6 @@ def report_cmd(ctx, sweep_id, scan_tasks, save_json, verbose, quiet):
     source_mapping = sweep_dir / "source_mapping.yaml"
     if source_mapping.exists():
         console.print(f"\n[dim]Task tracking: {source_mapping}[/dim]")
-
-
-@sweep_cmd.command("errors")
-@click.argument("sweep_id")
-@click.option("--all", "-a", is_flag=True, help="Show all error details")
-@click.option("--pattern", help="Filter errors by pattern (e.g., 'ImportError')")
-@common_options
-@click.pass_context
-def errors_cmd(ctx, sweep_id, all, pattern, verbose, quiet):
-    """Show error summaries for a specific sweep."""
-    console = ctx.obj["console"]
-
-    sweep_dir = Path("sweeps/outputs") / sweep_id
-    if not sweep_dir.exists():
-        console.print(f"[red]Error: Sweep directory not found: {sweep_dir}[/red]")
-        return
-
-    error_dir = sweep_dir / "errors"
-    if not error_dir.exists():
-        console.print(f"[yellow]No error directory found for sweep {sweep_id}[/yellow]")
-        console.print("This means either:")
-        console.print("• No jobs have failed yet")
-        console.print("• Error collection is not yet implemented for this execution mode")
-        return
-
-    error_files = list(error_dir.glob("*_error.txt"))
-    if not error_files:
-        console.print("[green]No error files found - all jobs may have succeeded![/green]")
-        return
-
-    console.print(f"[bold blue]Error Summary for Sweep: {sweep_id}[/bold blue]")
-    console.print(f"Found {len(error_files)} error files in: {error_dir}")
-
-    if pattern:
-        filtered_files = []
-        for error_file in error_files:
-            try:
-                with open(error_file) as f:
-                    content = f.read()
-                    if pattern.lower() in content.lower():
-                        filtered_files.append(error_file)
-            except Exception:
-                pass
-        error_files = filtered_files
-        console.print(f"Filtered to {len(error_files)} files containing '{pattern}'")
-
-    if not error_files:
-        console.print(f"[yellow]No error files match the pattern '{pattern}'[/yellow]")
-        return
-
-    for i, error_file in enumerate(error_files):
-        console.print(f"\n[bold red]Error {i + 1}: {error_file.stem}[/bold red]")
-        try:
-            with open(error_file) as f:
-                content = f.read()
-                if all:
-                    console.print(content)
-                else:
-                    preview = content[:400]
-                    if len(content) > 400:
-                        preview += "\n... (use --all to see full content)"
-                    console.print(preview)
-        except Exception as e:
-            console.print(f"[red]Could not read error file: {e}[/red]")
-
-        if not all and i >= 4:
-            remaining = len(error_files) - i - 1
-            if remaining > 0:
-                console.print(
-                    f"\n[yellow]... and {remaining} more errors (use --all to see all)[/yellow]"
-                )
-            break
-
-    console.print("\n[cyan]💡 Use --all to see full error details[/cyan]")
-    console.print("[cyan]💡 Use --pattern to filter by specific error types[/cyan]")
 
 
 # --------------------------------------------------------------------------

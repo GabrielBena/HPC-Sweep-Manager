@@ -9,7 +9,7 @@ from .docs import docs  # `hsm docs`: where the documentation lives
 from .init import init_cmd, setup  # Project setup: init, configure
 from .queue import queue  # Cluster queue inspection
 from .remote import remote  # Remote management
-from .sweep import sweep_cmd  # Sweep: run/status/report/errors/watch/recent/queue/cancel/cleanup
+from .sweep import sweep_cmd  # Sweep: run/status/report/watch/recent/queue/cancel/cleanup
 
 console = Console()
 
@@ -40,7 +40,7 @@ def cli(ctx: click.Context, verbose: bool, quiet: bool):
 # Register all command groups
 cli.add_command(setup)  # hsm setup init, hsm setup configure
 cli.add_command(init_cmd, name="init")  # top-level alias: `hsm init` == `hsm setup init`
-cli.add_command(sweep_cmd)  # hsm sweep run/status/report/errors/watch/recent/queue/cancel/cleanup
+cli.add_command(sweep_cmd)  # hsm sweep run/status/report/watch/recent/queue/cancel/cleanup
 cli.add_command(remote)  # hsm remote add/list/test/health/gpus/clean/remove
 cli.add_command(queue)  # hsm queue mine/position/gpus/reservations
 cli.add_command(docs)  # hsm docs — pointers to the documentation
