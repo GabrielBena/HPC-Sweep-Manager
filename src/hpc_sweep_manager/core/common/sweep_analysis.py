@@ -25,6 +25,7 @@ from typing import Any
 from ..hpc.slurm_protocol import FAILED_STATES, TASK_STATES_FILE
 from .config import SweepConfig
 from .param_generator import ParameterGenerator
+from .utils import task_index
 from .yaml_loader import dump_yaml, load_yaml
 
 logger = logging.getLogger(__name__)
@@ -134,9 +135,10 @@ class SweepCompletionAnalyzer:
                 "completion_rate": 0.0,
             }
 
-        # Find all task directories
+        # Find all task directories, whichever scheme named them (task_index)
         task_dirs = sorted(
-            [d for d in tasks_dir.iterdir() if d.is_dir() and d.name.startswith("task_")]
+            (d for d in tasks_dir.iterdir() if d.is_dir() and task_index(d.name) is not None),
+            key=lambda d: task_index(d.name),
         )
 
         completed_tasks = []
@@ -205,11 +207,7 @@ class SweepCompletionAnalyzer:
 
         # Determine missing tasks by checking which task numbers don't exist AT ALL
         # (no directory exists for them)
-        existing_task_numbers = set()
-        for task_dir in task_dirs:
-            task_match = re.search(r"task_(\d+)", task_dir.name)
-            if task_match:
-                existing_task_numbers.add(int(task_match.group(1)))
+        existing_task_numbers = {task_index(d.name) for d in task_dirs}
 
         # Missing = tasks with no directory at all
         # Running/Failed/Completed = tasks with directories (already counted above)
@@ -426,10 +424,8 @@ class SweepCompletionAnalyzer:
         combinations = []
 
         for task_id in task_ids:
-            # Extract task number from task_id (e.g., "task_001" -> 1)
-            task_match = re.search(r"task_(\d+)", task_id)
-            if task_match:
-                task_num = int(task_match.group(1))
+            # task_7, task_007 or <sweep_id>_task_007 -> 7
+            if (task_num := task_index(task_id)) is not None:
                 # Task numbers are 1-indexed, but combinations list is 0-indexed
                 if 1 <= task_num <= len(self.original_combinations):
                     combinations.append(self.original_combinations[task_num - 1])
@@ -458,14 +454,7 @@ class SweepCompletionAnalyzer:
                             content = f.read()
                             # Support both PBS array format (SUCCESS) and local format (COMPLETED)
                             if "Status: COMPLETED" in content or "Status: SUCCESS" in content:
-                                # Get the combination for this task
-                                task_match = re.search(r"task_(\d+)", task_id)
-                                if task_match:
-                                    task_num = int(task_match.group(1))
-                                    if 1 <= task_num <= len(self.original_combinations):
-                                        verified_combinations.append(
-                                            self.original_combinations[task_num - 1]
-                                        )
+                                verified_combinations += self._get_combinations_for_tasks([task_id])
                     except Exception as e:
                         logger.warning(f"Error reading task info for {task_id}: {e}")
 

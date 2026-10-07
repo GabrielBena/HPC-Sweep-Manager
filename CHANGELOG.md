@@ -392,6 +392,14 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   **For consumers:** exit codes only change in one direction: a failure that exited 0 now
   exits non-zero (1). A script that re-runs `hsm setup init` to refresh the generated files
   must add `--regenerate`.
+- **`hsm sweep status`/`report` read individual-mode task dirs (R5, FR#18).** The sources name
+  task dirs three ways: `task_7` (array), `task_007` (local, ssh), `<sweep_id>_task_007`
+  (individual Slurm jobs). The analyzer kept only names starting with `task_`, so every task
+  of an individual-mode sweep counted as missing and its combinations as never run. One
+  reader, `task_index(name)`, now parses all three schemes wherever HSM reads a task dir
+  name: the analyzer and both Slurm sources' chunk-progress probes. No dir is renamed.
+  **For consumers:** individual-mode sweeps now report their real completed, failed and
+  missing counts; task dir names are unchanged.
 
 ### Removed (2026-10 maintenance pass)
 

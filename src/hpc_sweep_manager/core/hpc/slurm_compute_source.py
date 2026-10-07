@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import shutil
 import subprocess
 from collections.abc import Sequence
@@ -26,6 +25,7 @@ from ..common.compute_source import JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
 from ..common.resumable import FAILED_MARKER, ChunkProgress, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
+from ..common.utils import task_index
 from ..remote.push_exec import resolve_run_prefix
 from .gpu_planner import (
     SubArraySubmission,
@@ -439,11 +439,11 @@ class SlurmComputeSource(SlurmBase):
         for task_dir in Path(tasks_dir).glob("task_*"):
             if not task_dir.is_dir():
                 continue
-            m = re.match(r"task_(\d+)$", task_dir.name)
-            if m and (task_dir / done_sentinel).exists():
-                done.add(int(m.group(1)))
-            if m and (record := task_dir / FAILED_MARKER).is_file():
-                crashes[int(m.group(1))] = len(record.read_text().splitlines())
+            i = task_index(task_dir.name)
+            if i is not None and (task_dir / done_sentinel).exists():
+                done.add(i)
+            if i is not None and (record := task_dir / FAILED_MARKER).is_file():
+                crashes[i] = len(record.read_text().splitlines())
             ckpt = task_dir / checkpoint_subdir
             if ckpt.is_dir():
                 for f in ckpt.rglob("*"):
