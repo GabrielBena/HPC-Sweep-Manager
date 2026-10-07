@@ -599,7 +599,7 @@ class TestResumableCrashFunctional:
     script. A crash exits with its own code and leaves `.hsm_failed`; the walltime SIGTERM the
     batch shell catches and forwards stays a resumable chunk end (exit 0, no record)."""
 
-    def _script(self, tmp_path, train_py):
+    def _script(self, tmp_path, train_py, python_path=None):
         import json
         import sys
 
@@ -614,7 +614,7 @@ class TestResumableCrashFunctional:
                 tasks_dir=str(tmp_path / "tasks"),
                 params_file=str(params),
                 project_dir=str(proj),
-                python_path=sys.executable,
+                python_path=python_path or sys.executable,
                 resumable=True,
                 done_sentinel=".hsm_done",
                 checkpoint_subdir="resume",
@@ -664,21 +664,29 @@ class TestResumableCrashFunctional:
         assert res.returncode == 0, res.stderr
         assert not (task / ".hsm_failed").exists()
 
-    def test_a_sigterm_at_the_seam_is_resumable_not_a_crash(self, tmp_path):
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_a_sigterm_at_the_seam_reaches_the_run_and_is_resumable(self, tmp_path, wrapped):
         import os
         import signal
         import subprocess
+        import sys
         import time
 
-        started = tmp_path / "started"
+        started, saved = tmp_path / "started", tmp_path / "saved"
         # Saves on SIGTERM, then exits non-zero: that exit is the seam, not a crash.
         train = (
             "import os, signal, sys, time\n"
-            "signal.signal(signal.SIGTERM, lambda *a: sys.exit(2))\n"
+            "def save(*a):\n"
+            f"    open({str(saved)!r}, 'w').write('ckpt')\n"
+            "    sys.exit(2)\n"
+            "signal.signal(signal.SIGTERM, save)\n"
             f"open({str(started)!r}, 'w').write(str(os.getpid()))\n"
             "time.sleep(60)\n"
         )
-        script, task = self._script(tmp_path, train)
+        wrapper = tmp_path / "wrap.sh"  # like `conda run`: runs python as a child, forwards nothing
+        wrapper.write_text(f'#!/bin/sh\n{sys.executable} "$@"\nexit $?\n')
+        wrapper.chmod(0o755)
+        script, task = self._script(tmp_path, train, str(wrapper) if wrapped else None)
         task.mkdir(parents=True)
         (task / ".hsm_failed").write_text("exit=3 job=76_1 earlier\n")  # a streak to break
         proc = subprocess.Popen(["bash", str(script)], env=self._env(), stdout=subprocess.DEVNULL)
@@ -688,11 +696,12 @@ class TestResumableCrashFunctional:
         try:
             proc.send_signal(signal.SIGTERM)  # Slurm's --signal=B:TERM@<grace>: the batch shell
             assert proc.wait(timeout=30) == 0
-        finally:  # the stub may outlive the shell: the forwarded TERM does not reach it today
+        finally:
             try:
                 os.kill(int(started.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError, FileNotFoundError):
                 pass
+        assert saved.read_text() == "ckpt"  # the forwarded TERM reached python: it saved
         assert not (task / ".hsm_failed").exists()
         assert "Status: CHUNK_INCOMPLETE" in (task / "task_info.txt").read_text()
 

@@ -351,6 +351,14 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   as "infra suspect" with an `--exclude=<nodes>` hint. A failed, absent or empty `sacct`
   writes nothing, and the old behaviour stays. **For consumers:** a walltime-killed task
   now counts as failed (TIMEOUT) in `status`/`report`, and the run names it.
+- **The pre-walltime SIGTERM reaches the training process (S12, found while fixing S10).**
+  The resumable array script forwarded the TERM to `$PY_PID`, the subshell `eval ... &`
+  forks, and `conda run` doesn't forward TERM either: python never got it, so a chain's
+  chunk ended without its final save and resumed from the last periodic checkpoint. The
+  run now gets its own process group (`set -m`), the TERM goes to the whole group, and the
+  batch shell waits for the group to exit after a TERM (Slurm's walltime bounds that wait).
+  **For consumers:** a training script's SIGTERM handler now runs at the chunk seam; one
+  that does slow work there must finish within `signal_grace`.
 
 ### Removed (2026-10 maintenance pass)
 

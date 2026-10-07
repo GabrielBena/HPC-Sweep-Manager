@@ -211,12 +211,16 @@ _hsm_term() {
     # Guard $PY_PID: a SIGTERM in the microsecond window before it's set would
     # otherwise `kill -TERM ''`. (Slurm fires the signal near walltime, not at
     # launch, so this is belt-and-suspenders.)
-    [[ -n "$PY_PID" ]] && { echo "Caught SIGTERM (pre-walltime). Forwarding to python (pid $PY_PID) to checkpoint..."; kill -TERM "$PY_PID" 2>/dev/null || true; }
+    # The run's whole process group: `eval ... &` forks a subshell, and `conda run` doesn't
+    # forward TERM, so a TERM to $PY_PID alone never reached python (no final save).
+    [[ -n "$PY_PID" ]] && { echo "Caught SIGTERM (pre-walltime). Forwarding to the run (group $PY_PID) to checkpoint..."; kill -TERM -- -"$PY_PID" 2>/dev/null || kill -TERM "$PY_PID" 2>/dev/null || true; }
 }
 trap _hsm_term TERM
 set +e
+set -m  # job control: the run gets its own process group, led by $PY_PID
 eval "$COMMAND" &
 PY_PID=$!
+set +m
 wait "$PY_PID"
 exit_code=$?
 if [[ $exit_code -gt 128 ]] && kill -0 "$PY_PID" 2>/dev/null; then
@@ -226,6 +230,11 @@ if [[ $exit_code -gt 128 ]] && kill -0 "$PY_PID" 2>/dev/null; then
     # 127) when python exited >128 on its own.
     wait "$PY_PID"
     exit_code=$?
+fi
+# After a TERM, python may outlive the group's leader while it saves: wait for the whole group
+# (Slurm's walltime bounds it). Not otherwise: a lingering helper must not hold the chunk open.
+if [[ -n "$_hsm_termed" ]]; then
+    while kill -0 -- -"$PY_PID" 2>/dev/null; do sleep 1; done
 fi
 trap - TERM
 set -e

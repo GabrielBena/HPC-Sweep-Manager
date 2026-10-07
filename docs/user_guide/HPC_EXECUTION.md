@@ -306,8 +306,9 @@ checkpoint format or tracker. Your script must:
    chunk 1, the persistent checkpoint dir on chunk ≥2) and, if `resume_arg` is
    set, also appends `<resume_arg>=<path>` to the command. Resume iff it's
    set/non-empty, else start fresh.
-2. **Save on the pre-walltime signal.** HSM sets `--signal=B:TERM@<grace>`; on
-   SIGTERM, save a resume-complete checkpoint to `HSM_RESUME_TO` (under the
+2. **Save on the pre-walltime signal.** HSM sets `--signal=B:TERM@<grace>`; the
+   batch shell forwards that TERM to the run's whole process group (so it reaches
+   python under `conda run` too) and waits for it to exit. On SIGTERM, save a resume-complete checkpoint to `HSM_RESUME_TO` (under the
    persistent per-task workdir) and exit. Checkpoint periodically too, so a
    hard crash still resumes from the last periodic save.
 3. **Signal done.** Write `$HSM_DONE_SENTINEL` (`$HSM_WORKDIR/.hsm_done`) when
