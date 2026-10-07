@@ -206,7 +206,7 @@ planner the submission uses):
 - **Walltime per sub-array** = `base × factor × (bin max cost / global
   max cost)`, ceiled to the minute, floored at 10 minutes, deliberately
   uncapped (an `l4: 3.0` sub-array legitimately needs longer than base).
-- **Task layout unchanged:** `tasks/task_0001..N` stay globally
+- **Task layout unchanged:** `tasks/task_1..N` stay globally
   numbered; each sub-array gets its own `parameter_combinations_<TYPE>.json`;
   `task_info.txt` records `GPU Type:` per task (cross-arch numerics
   differ — check for arch confounds before pooling seeds).
@@ -678,9 +678,11 @@ sources write `.hsm_manifest.json` as they submit, and `cancel` runs one
 `scancel` naming every job in it (over ssh for a `backend: slurm`
 remote). A `scancel` that fails or gets no answer exits 1.
 
-Per-task outputs land in `sweeps/outputs/<sweep-id>/tasks/task_NNN/`
-(see [`examples/test_train.py`](../../examples/test_train.py) for the
-contract).
+Per-task outputs land in `sweeps/outputs/<sweep-id>/tasks/`, in a dir named
+by the source that ran the task: `task_<N>/` for an array task (`task_7`),
+`<sweep-id>_task_<NNN>/` for an individual job, `task_<NNN>/` for a local or
+ssh task. `hsm sweep status`/`report` read all three (see
+[`examples/test_train.py`](../../examples/test_train.py) for the contract).
 
 ## Known gotcha: array progress reports 1/1
 

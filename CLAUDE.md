@@ -627,7 +627,7 @@ costs). Issue #7 stays OPEN for the deferred stages.
 |---|---|
 | `spec.gpu_type: [A100, H200]` + per-remote/`slurm:` `speed_factors` → LPT split, per-type walltimes, `--dry-run` plan table (same planner call as submit) | `gpu_planner.py` (new), both Slurm sources, `resource_spec.py`, `cli/sweep.py` |
 | Sweep YAML `cost_param`/`cost_map` per-task cost hints (never enter hydra args) | `config.py` SweepConfig, `cli/sweep.py`, `submit_batch(costs=...)` through the ABC |
-| Per-sub-array params files keep `global_index` → `tasks/task_%04d` globally numbered; `task_info.txt` gets `GPU Type:`; manifest `jobs:` entries → per-array progress in `hsm queue mine` | sources, `slurm_array.sh.j2`, `cli/queue.py` |
+| Per-sub-array params files keep `global_index` → `tasks/task_<N>` (unpadded) globally numbered; `task_info.txt` gets `GPU Type:`; manifest `jobs:` entries → per-array progress in `hsm queue mine` | sources, `slurm_array.sh.j2`, `cli/queue.py` |
 | Deferred (issue #7): v1.5 queue-aware placement (score = wait + runtime×factor from capacity probes, NOT typed-pending counts), `hsm calibrate` (measure factors via probe runs), per-type partitions (V100 is lowprio-only) | — |
 
 Live-validated: dry-run plan hand-checked on the real 22-task shape

@@ -1,6 +1,7 @@
 """Utility functions for HPC Sweep Manager."""
 
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,14 @@ def create_sweep_id(prefix: str = "sweep") -> str:
     """Create a unique sweep ID with timestamp."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"{prefix}_{timestamp}"
+
+
+def task_index(name: str) -> int | None:
+    """The task number in a ``tasks/`` dir name, or None for any other name. Each source names
+    its dirs its own way: ``task_7`` (array), ``task_007`` (local, ssh), ``<sweep_id>_task_007``
+    (individual Slurm jobs); consumers' scripts read these names, so readers parse all three."""
+    m = re.fullmatch(r"(?:.+_)?task_(\d+)", name)
+    return int(m[1]) if m else None
 
 
 def parse_walltime(walltime: str) -> int:

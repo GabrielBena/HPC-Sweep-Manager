@@ -45,13 +45,12 @@ import contextlib
 import getpass
 import json
 import logging
-import re
 import shlex
 import time
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import asyncssh
@@ -65,6 +64,7 @@ from ..common.compute_source import (
 from ..common.resource_spec import ResourceSpec
 from ..common.resumable import FAILED_MARKER, ChunkProgress, ResumableConfig, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
+from ..common.utils import task_index
 from ..hpc.gpu_planner import (
     SubArraySubmission,
     build_array_submissions,
@@ -889,14 +889,13 @@ class SSHSlurmComputeSource(SlurmBase):
             return None
         before, _, rest = out.partition("HSM_SEP")
         after, _, failed = rest.partition("HSM_SEP")
-        done: set[int] = set()
-        for line in before.splitlines():
-            # Anchor to the sentinel's PARENT (`.../task_<N>/<sentinel>` at the
-            # end), not the first `/task_N/` — a workdir prefix could itself
-            # contain a `/task_<digit>/` component and mis-parse the index.
-            m = re.search(r"task_(\d+)/[^/]+$", line.strip())
-            if m:
-                done.add(int(m.group(1)))
+
+        def task_of(path: str) -> int | None:
+            # The file's PARENT (`.../task_<N>/<file>`), not the first `/task_N/`: a workdir
+            # prefix could itself contain a `/task_<digit>/` component.
+            return task_index(PurePosixPath(path.strip()).parent.name)
+
+        done = {i for ln in before.splitlines() if (i := task_of(ln)) is not None}
         mtime: float | None = None
         tail = after.strip().splitlines()
         if tail:
@@ -904,8 +903,10 @@ class SSHSlurmComputeSource(SlurmBase):
                 mtime = float(tail[-1].strip())
             except ValueError:
                 mtime = None
-        crashes = {
-            int(i): int(n) for n, i in re.findall(r"^\s*(\d+) .*task_(\d+)/[^/]+$", failed, re.M)
+        crashes = {  # `wc -l` lines: `<n> <path>`, then `<n> total`
+            i: int(n)
+            for n, _, path in (ln.strip().partition(" ") for ln in failed.splitlines())
+            if n.isdigit() and (i := task_of(path)) is not None
         }
         return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime, crashes=crashes)
 
