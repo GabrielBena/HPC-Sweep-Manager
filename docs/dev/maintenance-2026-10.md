@@ -63,11 +63,11 @@ is deleted; the CHANGELOG keeps the record.
 | R1 | *[FR#11]* A re-run needs a hand-written sweep file. | `hsm sweep rerun <id> --failed --timeout [--missing] [--walltime X]`, built on `sweep_analysis` selections and `tasks_state.json`. It writes `rerun_<ts>.yaml` with `combinations:` and then runs it. | |
 | R2 | *[FR#12]* `grid` is a full product; unnamed `paired:` groups crash and exit 0. | `exclude:` / `include:` filters and an explicit `combinations:` list in the generator. | |
 | R3 | *[FR#14]* Tasks that start in the same second share Hydra's `outputs/<date>/<time>` in a shared cwd. The next sweep's `rsync --delete` also removes the logs that running tasks write there. | Inject `hydra.run.dir=<task_dir>/.hydra_run` next to `wandb.group=` and `output.dir=`, behind **one** switch that also makes the `wandb.group=` injection conditional (a known limitation). The per-sweep snapshot (S4) removes the `--delete` effect. | |
-| R4 | *[FR#17]* Nothing validates keys: a remote-level `pre_script` and a sweep-level `gird:` are both silently ignored. | One schema of known keys per block, with "did you mean `spec.pre_script`". It replaces the ad-hoc key sets. | |
-| R5 | *[FR#18, corrected: three schemes]* Task dirs are named `task_N` (array), `task_NNN` (local/ssh) or `<id>_task_NNN` (individual). The analyzer counts individual-mode tasks as missing. | Canonical `task_<N>` with a tolerant reader (`task_index(name)`). | |
-| R6 | *[FR#19]* A stale `project.root` or `train_script` fails late; a real run first creates a ghost tree. | `HSMConfig.check_paths()` before the dry-run output. | |
+| R4 | *[FR#17]* Nothing validates keys: a remote-level `pre_script` and a sweep-level `gird:` are both silently ignored. | One schema of known keys per block, with "did you mean `spec.pre_script`". It replaces the ad-hoc key sets. | #54 ✓ |
+| R5 | *[FR#18, corrected: three schemes]* Task dirs are named `task_N` (array), `task_NNN` (local/ssh) or `<id>_task_NNN` (individual). The analyzer counts individual-mode tasks as missing. | A tolerant reader (`task_index(name)`) for all three; renaming to one scheme is Gabriel's call (consumers read these paths). | #57 ✓ (reader; renaming open) |
+| R6 | *[FR#19]* A stale `project.root` or `train_script` fails late; a real run first creates a ghost tree. | `HSMConfig.check_paths()` before the dry-run output. | #54 ✓ |
 | R7 | *[FR#20, corrected]* The mid-run pulls fire per *job*, so an array only pulls at the end. A pull has no retry and no `--partial`. | A periodic pull every 10 min while jobs are live; rsync retry with backoff on rc 255/10/12/30/35; `--partial`. | #46 ✓ |
-| R8 | *[NEW]* Several commands misreport success or failure: | | |
+| R8 | *[NEW]* Several commands misreport success or failure: | | #55 ✓ · #56 ✓ |
 | | - pre-flight errors exit 0 | `click.ClickException` | |
 | | - the `sweeps_root` error is reported as "config not found" | drop the `except` that masks it | |
 | | - a CANCELLED sweep exits 0 | exit 1 | |
@@ -203,8 +203,8 @@ project's default pool. Tell Comp-PVR its `pre_script` can use `$HSM_CODE_DIR`.
 | cli | C-1 (#23 ✓) · `--remote` with `auto`, per-key spec filter, unknown alias, sweep-id collisions, honest exit codes | C1, C2, C6, C7, R8 | P0 |
 | cli | C-2 (#29 ✓) · `remote add/remove` edit the project file only; `remote clean` guards | C3, C8 | P0 |
 | cli | C-3 (#34 ✓: C4; #44 ✓: C5) · YAML 1.2 loader and walltime check; per-remote interpreter precedence (C5, after X-2) | C4, C5 | P1 |
-| cli | C-4 · one schema of known config keys; path checks before submit | R4, R6 | P2 |
-| cli | C-5 · one task-dir naming scheme; analyzer and `report` fixes | R5, R8 | P2 |
+| cli | C-4 (#54 ✓) · one schema of known config keys; path checks before submit | R4, R6 | P2 |
+| cli | C-5 (#55 ✓ · #56 ✓: R8; #57 ✓: R5) · one task-dir naming scheme; analyzer and `report` fixes | R5, R8 | P2 |
 | cli | C-6 · `exclude`/`include`/`combinations` in the generator; `hsm sweep rerun` | R2, R1 | P2 |
 | cli | C-7 · thin `cli/sweep.py` | consolidation | — |
 | chore | chore-6 (#30 ✓; #36 ✓, #40 ✓: tracker, a docs repair + size test) · dead code, unused dependencies, Makefile, `requirements.txt` | G (deps, dead code) | — |
