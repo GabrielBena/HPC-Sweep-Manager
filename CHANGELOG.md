@@ -442,6 +442,15 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   backslash reaches the script too (on every backend; a `$` still expands, as before).
   Every template is now run under bash in the tests, not only string-matched.
 
+- **`hsm remote health --watch` no longer crashes on its first redraw (G1).** The module
+  imported `datetime` and called `datetime.now()`. Every command is now invoked with
+  `--help` in the tests.
+- **A template variable nobody passed fails the render instead of printing as "" (G2).**
+  An empty `{{ python_path }}` or `{{ remote_code_dir }}` used to build a command with a
+  hole in it, gotcha #11's class of bug. An optional variable can still be tested with
+  `{% if %}`. Every production render already passes all the variables its template uses;
+  only test helpers had holes (a `cd` with no path, a COMMAND with no interpreter).
+
 ### Removed (2026-10 maintenance pass)
 
 - **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,

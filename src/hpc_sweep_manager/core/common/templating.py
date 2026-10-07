@@ -11,7 +11,13 @@ from typing import Any
 import yaml
 
 try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    from jinja2 import Environment, FileSystemLoader, Undefined
+
+    class _PrintFailsUndefined(Undefined):
+        """A missing variable can still be tested (``{% if x %}``) but never printed: printed as
+        "", it built commands with holes, gotcha #11's class of bug (G2)."""
+
+        __str__ = Undefined._fail_with_undefined_error
 
     JINJA2_AVAILABLE = True
 except ImportError:
@@ -106,7 +112,8 @@ def render_template(template_name: str, **kwargs) -> str:
 
     env = Environment(
         loader=FileSystemLoader(template_dir),
-        autoescape=select_autoescape(["html", "xml", "sh"]),
+        autoescape=False,  # shell scripts, not HTML
+        undefined=_PrintFailsUndefined,
         trim_blocks=True,
         lstrip_blocks=True,
     )

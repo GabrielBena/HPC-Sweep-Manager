@@ -242,6 +242,7 @@ class TestTemplateRendering:
             python_path="python",
             script_path="train.py",
             params_hydra='"lr=0.001"',
+            params_yaml="seed: 1\n",
             wandb_group=None,
         )
         assert rendered.startswith("#!/bin/bash")
@@ -308,6 +309,7 @@ class TestCondaInitOrdering:
             run_prefix="conda run -n env python",
             script_path="train.py",
             params_hydra='"lr=1"',
+            params_yaml="seed: 1\n",
             wandb_group=None,
             cuda_visible_devices=None,
         )
