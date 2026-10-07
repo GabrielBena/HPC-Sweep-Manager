@@ -1787,6 +1787,20 @@ class TestChunkProgress:
         assert prog.done_indices == frozenset({9})
 
     @pytest.mark.asyncio
+    async def test_parses_crash_records(self, tmp_path):
+        # Issue #15: the third section is `wc -l` over each task's .hsm_failed.
+        out = (
+            "/r/sw/tasks/task_1/.hsm_done\nHSM_SEP\n1700000100.2\nHSM_SEP\n"
+            "  2 /r/sw/tasks/task_4/.hsm_failed\n  1 /r/sw/tasks/task_12/.hsm_failed\n  3 total\n"
+        )
+        src = await self._src(tmp_path, out)
+        prog = await src.chunk_progress(12, done_sentinel=".hsm_done", checkpoint_subdir="resume")
+        assert prog.crashes == {4: 2, 12: 1}
+        assert prog.done_indices == frozenset({1}) and prog.checkpoint_mtime == 1700000100.2
+        cmd = src._fake_conn.run_calls[-1]["cmd"]
+        assert "-name .hsm_failed -type f -exec wc -l {} +" in cmd and cmd.endswith("|| true'")
+
+    @pytest.mark.asyncio
     async def test_empty_output(self, tmp_path):
         src = await self._src(tmp_path, "HSM_SEP\n")
         prog = await src.chunk_progress(2, done_sentinel=".hsm_done", checkpoint_subdir="resume")

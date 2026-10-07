@@ -7,6 +7,7 @@
 
 # The code this task runs (its sweep's snapshot on a remote); pre_script may use it.
 export HSM_CODE_DIR={{ project_dir }}
+{% include "_module_init.sh.j2" %}
 {% for mod in modules %}
 module load {{ mod }}
 {% endfor %}
@@ -134,6 +135,9 @@ HSM_WORKDIR="$TASK_OUTPUT_DIR"
 HSM_RESUME_TO="$HSM_WORKDIR/{{ checkpoint_subdir }}"
 HSM_DONE_SENTINEL="$HSM_WORKDIR/{{ done_sentinel }}"
 export HSM_WORKDIR HSM_RESUME_TO HSM_DONE_SENTINEL
+# HSM's crash record: one line per chunk in a row that crashed. A task with
+# {{ max_failures }} of them is out of retries; delete the file to retry it.
+HSM_FAILED="$HSM_WORKDIR/.hsm_failed"
 {% if resume_from_present %}
 export HSM_RESUME_FROM="$HSM_RESUME_TO"
 {% else %}
@@ -146,6 +150,10 @@ export HSM_RESUME_FROM=""
 if [[ -f "$HSM_DONE_SENTINEL" ]]; then
     echo "Task $GLOBAL_INDEX already signalled done (.hsm_done present). Skipping."
     exit 0
+fi
+if [[ -f "$HSM_FAILED" ]] && (( $(wc -l < "$HSM_FAILED") >= {{ max_failures }} )); then
+    echo "Task $GLOBAL_INDEX crashed in {{ max_failures }} chunks in a row ($HSM_FAILED). Not re-run."
+    exit 1
 fi
 {% else %}
 
@@ -193,12 +201,13 @@ echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"
 # --signal=B:TERM@<grace> and FORWARD it (the python child is what must save).
 # `set +e` is mandatory: under the script-wide `set -e`, the non-zero `wait`
 # a SIGTERM/timeout produces would kill the script BEFORE the sentinel check
-# below. We exit 0 on an incomplete chunk because a non-zero mid-budget exit is
-# EXPECTED — the chain driver decides done/advance/fail from the sentinel +
-# checkpoint progress, never from this chunk's exit code; a COMPLETED Slurm
-# state also keeps `hsm queue` readable.
+# below. A chunk cut by that SIGTERM (walltime or preemption) exits 0 — the
+# normal mid-budget outcome the next chunk resumes; any other non-zero exit is
+# a crash and exits with its code, so Slurm records FAILED (issues #15, #16).
 PY_PID=""
+_hsm_termed=""
 _hsm_term() {
+    _hsm_termed=1
     # Guard $PY_PID: a SIGTERM in the microsecond window before it's set would
     # otherwise `kill -TERM ''`. (Slurm fires the signal near walltime, not at
     # launch, so this is belt-and-suspenders.)
@@ -222,13 +231,22 @@ trap - TERM
 set -e
 
 if [[ -f "$HSM_DONE_SENTINEL" ]]; then
+    rm -f "$HSM_FAILED"
     echo "Completed (done sentinel present): $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
     echo "Status: SUCCESS" >> "$TASK_OUTPUT_DIR/task_info.txt"
     exit 0
 fi
-# No sentinel: this chunk ran its slice (or timed out mid-budget). Record it but
-# do NOT mark Status: FAILED — the chain driver, not this exit code, judges the
-# task. The next chunk resumes from $HSM_RESUME_TO.
+# 143: the run itself died of a TERM (a scancel or preemption that reached it first) - a seam.
+if [[ $exit_code -ne 0 && $exit_code -ne 143 && -z "$_hsm_termed" ]]; then
+    echo "exit=$exit_code job=${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID} $(date)" >> "$HSM_FAILED"
+    echo "Failed: $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Status: FAILED" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    echo "Exit Code: $exit_code" >> "$TASK_OUTPUT_DIR/task_info.txt"
+    exit $exit_code
+fi
+# No sentinel: this chunk ran its slice (or timed out mid-budget), which also
+# ends a crash streak. The next chunk resumes from $HSM_RESUME_TO.
+rm -f "$HSM_FAILED"
 echo "Chunk ended without done sentinel (exit=$exit_code): $(date)" >> "$TASK_OUTPUT_DIR/task_info.txt"
 echo "Status: CHUNK_INCOMPLETE" >> "$TASK_OUTPUT_DIR/task_info.txt"
 exit 0

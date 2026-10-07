@@ -41,6 +41,11 @@ class FakeSource:
         if archives is not None:
             self._archives = archives
             self._should_archive = lambda any_failed: self._archives
+            self.archive_calls: list[tuple[bool, int]] = []  # (any_failed, collects before it)
+
+    async def _archive_remote(self, any_failed: bool) -> bool:
+        self.archive_calls.append((any_failed, len(self.collect_calls)))
+        return True
 
     async def setup(self, sweep_dir: Path, sweep_id: str) -> bool:
         return True
@@ -224,6 +229,30 @@ class TestDrive:
         assert src.collect_calls == [False]  # exactly one, terminal
         assert res.chunks_run == 3
 
+    @pytest.mark.asyncio
+    async def test_a_task_out_of_retries_fails_the_chain_once_the_rest_is_done(self):
+        # Issue #15: task 2 crashes (one line in .hsm_failed), then again -> out of retries.
+        # Task 1 progressing keeps the chain alive in between; a crash below the cap is retried.
+        src = FakeSource(
+            [
+                ChunkProgress(frozenset(), 100.0, {2: 1}),
+                ChunkProgress(frozenset({1}), 200.0, {2: 2}),
+            ]
+        )
+        res = await _run(src, _cfg(max_task_crashes=2), params=2)
+        assert res.chain_decision == "failed" and res.chunks_run == 2
+        assert src.collect_calls == [True]  # the remote is kept
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("archives", [True, False])
+    async def test_a_failed_chain_archives_unless_opted_out(self, archives):
+        # Issue #15: a FAILED chain left finished checkpoints on purgeable /scratch.
+        src = FakeSource([ChunkProgress(frozenset(), None)] * 2, archives=archives)
+        res = await _run(src, _cfg(max_consecutive_failures=2), params=2)
+        assert res.chain_decision == "failed"
+        assert src.archive_calls == ([(True, 0)] if archives else [])  # before the pull (4b)
+        assert src.collect_calls == [True]  # the pull; never an rm -rf
+
 
 class TestReviewFixes:
     """Cold-review hardenings: advance re-attach, baseline restore/persist,
@@ -316,3 +345,11 @@ class TestReviewFixes:
         src = FakeSource([])
         with pytest.raises(ValueError, match="0 tasks"):
             await _run(src, _cfg(), params=0)
+
+
+def test_task_crashes_have_their_own_cap():
+    # Review of #51: two transient crashes must not end a multi-day task by default.
+    cfg = ResumableConfig.from_dict({"enabled": True, "chunk_walltime": "23:00:00"})
+    assert (cfg.max_consecutive_failures, cfg.max_task_crashes) == (2, 3)
+    assert ResumableConfig.from_manifest(cfg.to_manifest()).max_task_crashes == 3
+    assert "max_task_crashes" in " ".join(ResumableConfig(max_task_crashes=0).validate())

@@ -63,7 +63,7 @@ from ..common.compute_source import (
     SubmissionMode,
 )
 from ..common.resource_spec import ResourceSpec
-from ..common.resumable import ChunkProgress, ResumableConfig, ResumableContext
+from ..common.resumable import FAILED_MARKER, ChunkProgress, ResumableConfig, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..hpc.gpu_planner import (
     SubArraySubmission,
@@ -775,6 +775,7 @@ class SSHSlurmComputeSource(SlurmBase):
             resume_arg=(rcfg.resume_arg if rcfg else None),
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
+            max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
         job_id = await self._sbatch(sub.job_name, script_content)
 
@@ -869,21 +870,25 @@ class SSHSlurmComputeSource(SlurmBase):
         tasks = shlex.quote(self._remote_tasks_dir)
         sent = shlex.quote(done_sentinel)
         ckpt_glob = shlex.quote(f"*/{checkpoint_subdir}/*")
-        # Two finds joined by a sentinel line: the first lists done-sentinel
+        # Three finds joined by a sentinel line: the first lists done-sentinel
         # paths (bounded by -maxdepth 2 = tasks/task_N/.hsm_done); the second
         # reduces every checkpoint file's mtime to a single max so the output
-        # stays tiny no matter how many checkpoint files exist.
+        # stays tiny no matter how many checkpoint files exist; the third counts
+        # each crash record's lines (`<n> <path>`).
         cmd = (
             f"find {tasks} -maxdepth 2 -name {sent} -type f 2>/dev/null; "
             f"echo HSM_SEP; "
             f"find {tasks} -path {ckpt_glob} -type f -printf '%T@\\n' 2>/dev/null "
-            f"| sort -n | tail -1"
+            f"| sort -n | tail -1; echo HSM_SEP; "
+            f"find {tasks} -maxdepth 2 -name {FAILED_MARKER} -type f -exec wc -l {{}} + "
+            f"2>/dev/null || true"
         )
         rc, out, err = await self._sh(["bash", "-c", cmd])
         if rc != 0:
             logger.warning(f"progress probe on {self.host} failed (rc={rc}): {err.strip()}")
             return None
-        before, _, after = out.partition("HSM_SEP")
+        before, _, rest = out.partition("HSM_SEP")
+        after, _, failed = rest.partition("HSM_SEP")
         done: set[int] = set()
         for line in before.splitlines():
             # Anchor to the sentinel's PARENT (`.../task_<N>/<sentinel>` at the
@@ -899,7 +904,10 @@ class SSHSlurmComputeSource(SlurmBase):
                 mtime = float(tail[-1].strip())
             except ValueError:
                 mtime = None
-        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime)
+        crashes = {
+            int(i): int(n) for n, i in re.findall(r"^\s*(\d+) .*task_(\d+)/[^/]+$", failed, re.M)
+        }
+        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=mtime, crashes=crashes)
 
     async def _after_poll(self, newly_done: int) -> None:
         """While jobs are live, pull ``tasks/`` every :data:`PULL_EVERY_S` (R7), without weight
@@ -1012,8 +1020,9 @@ class SSHSlurmComputeSource(SlurmBase):
             stderr = (result.stderr or "").strip() or "no stderr"
             logger.warning(
                 f"Server-side archive on {self.host} failed (rc="
-                f"{result.returncode}): {stderr}. The /scratch copy is kept; "
-                f"`hsm sweep collect {self.sweep_id}` archives it again."
+                f"{result.returncode}): {stderr}. The /scratch copy is kept; `hsm sweep collect "
+                f"{self.sweep_id}` archives it again (a sweep with failed jobs: only under "
+                f"`archive_on: always`)."
             )
             return False
 

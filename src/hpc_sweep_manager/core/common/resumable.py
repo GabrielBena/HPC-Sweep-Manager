@@ -12,13 +12,16 @@ runaway guards live in :mod:`.chain`; this module is purely the configuration.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .chain import ChainConfig
 from .utils import parse_walltime
 
 logger = logging.getLogger(__name__)
+
+# The per-task crash record the array template keeps (one line per crashed chunk in a row).
+FAILED_MARKER = ".hsm_failed"
 
 # Keys ResumableConfig understands; anything else in a config block is dropped
 # with a warning (tolerant, like ResourceSpec.from_dict).
@@ -32,6 +35,7 @@ _KNOWN_KEYS = frozenset(
         "checkpoint_subdir",
         "max_chunks",
         "max_consecutive_failures",
+        "max_task_crashes",
     }
 )
 
@@ -68,7 +72,8 @@ class ResumableConfig:
     done_sentinel: str = ".hsm_done"  # script writes this under HSM_WORKDIR when complete
     checkpoint_subdir: str = "resume"  # per-task persistent ckpt dir under the workdir
     max_chunks: int = 10  # runaway guard: chain length cap
-    max_consecutive_failures: int = 2  # no-progress strikes -> mark the chain FAILED
+    max_consecutive_failures: int = 2  # chunks in a row without progress -> chain FAILED
+    max_task_crashes: int = 3  # a task's crashes in a row before it is out of retries
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> ResumableConfig:
@@ -84,7 +89,12 @@ class ResumableConfig:
                 continue
             clean[k] = v
         # light coercion for the int knobs (YAML may hand us strings)
-        for int_key in ("signal_grace", "max_chunks", "max_consecutive_failures"):
+        for int_key in (
+            "signal_grace",
+            "max_chunks",
+            "max_consecutive_failures",
+            "max_task_crashes",
+        ):
             if int_key in clean:
                 try:
                     clean[int_key] = int(clean[int_key])
@@ -126,6 +136,8 @@ class ResumableConfig:
             errors.append("resumable.max_chunks must be >= 1")
         if self.max_consecutive_failures < 1:
             errors.append("resumable.max_consecutive_failures must be >= 1")
+        if self.max_task_crashes < 1:
+            errors.append("resumable.max_task_crashes must be >= 1")
         return errors
 
     def chain_config(self) -> ChainConfig:
@@ -146,6 +158,7 @@ class ResumableConfig:
             "checkpoint_subdir": self.checkpoint_subdir,
             "max_chunks": self.max_chunks,
             "max_consecutive_failures": self.max_consecutive_failures,
+            "max_task_crashes": self.max_task_crashes,
         }
 
     @classmethod
@@ -165,10 +178,13 @@ class ChunkProgress:
     * ``done_indices`` — global task indices whose ``.hsm_done`` sentinel exists.
     * ``checkpoint_mtime`` — newest mtime (epoch seconds) of any file under any
       task's checkpoint subdir, or ``None`` if nothing has been written yet.
+    * ``crashes`` — global task index → chunks in a row it crashed in (lines of its
+      :data:`FAILED_MARKER`).
     """
 
     done_indices: frozenset[int]
     checkpoint_mtime: float | None
+    crashes: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -122,6 +122,9 @@ slurm:
     - openmpi                #    (h100/l4/multigpu) should be loaded on the command line
                              #    BEFORE `hsm sweep run`, not in the script — they set Slurm
                              #    constraints that can conflict with the directives above.
+                             #    When modules are loaded (here or in pre_script), HSM
+                             #    first sources the module system's init if `module` is
+                             #    undefined (a non-login shell).
   pre_script:                # arbitrary shell commands before the training script
     - "source ~/.bashrc"
     - "conda activate my-env"
@@ -271,10 +274,24 @@ the previous, so the seam is serialized) or stops:
 
 - **done** — every task wrote `.hsm_done`.
 - **failed** — `max_chunks` reached without finishing, OR
-  `max_consecutive_failures` chunks made no progress (a deterministic crash).
+  `max_consecutive_failures` chunks made no progress (a deterministic crash), OR
+  every task not done is out of retries (below).
 
 Done-detection is the **sentinel, never the exit code**: a timed-out chunk
-exits non-zero yet is the *normal* mid-budget outcome. The launcher drives the
+exits non-zero yet is the *normal* mid-budget outcome. A chunk exits 0 when
+the run exited 0 or its batch shell caught a SIGTERM (the pre-walltime
+signal, a preemption). Any other non-zero exit is a **crash**: the chunk exits with
+that code (Slurm shows FAILED) and appends `exit=<code> job=<id> <date>` to
+`tasks/task_<i>/.hsm_failed`; a chunk that ends any other way removes it. A
+task with `max_task_crashes` (default 3) crashes in a row is out of retries: later
+chunks skip it, and the chain ends FAILED once the other tasks are done. A run that
+dies of a TERM itself (exit 143: a scancel or preemption that reached it first) is
+a seam, not a crash. Deleting its `.hsm_failed` while the chain runs gives it its
+retries back; to retry a chain that already ended FAILED, delete the tasks'
+`.hsm_failed`, set `chain.state.failed` to `false` in `.hsm_manifest.json`, and run
+`hsm sweep advance <sweep_id>`. A
+FAILED chain is archived to `archive_dir` like a DONE one (unless
+`archive_on: never`) and its remote dir is kept for inspection. The launcher drives the
 chain while alive — run it under `tmux`/`nohup` (an always-on workstation is
 ideal). If it dies, resume with `hsm sweep advance <sweep_id>` (re-attaches via
 the manifest; submits the next chunk if the current one is terminal). A cron
@@ -320,7 +337,8 @@ resumable:
   done_sentinel: ".hsm_done"     # script writes this under $HSM_WORKDIR when complete
   checkpoint_subdir: "resume"    # per-task persistent ckpt dir; HSM passes HSM_RESUME_{FROM,TO}
   max_chunks: 10                 # runaway guard (chain length cap)
-  max_consecutive_failures: 2    # no-progress strikes -> mark the chain FAILED
+  max_consecutive_failures: 2    # chunks in a row without progress -> FAILED
+  max_task_crashes: 3            # a task's crashes in a row before it is out of retries
 ```
 
 `hsm queue mine` annotates the chain's array row `(chunk k/max)`. `--dry-run`

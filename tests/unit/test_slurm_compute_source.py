@@ -594,6 +594,109 @@ class TestArrayParamsExtractionFunctional:
         assert not args_out.exists()
 
 
+class TestResumableCrashFunctional:
+    """Issues #15/#16: run the rendered RESUMABLE array script under bash with a stub training
+    script. A crash exits with its own code and leaves `.hsm_failed`; the walltime SIGTERM the
+    batch shell catches and forwards stays a resumable chunk end (exit 0, no record)."""
+
+    def _script(self, tmp_path, train_py):
+        import json
+        import sys
+
+        proj = tmp_path / "proj"
+        proj.mkdir(exist_ok=True)
+        (proj / "train.py").write_text(train_py)
+        params = tmp_path / "params.json"
+        params.write_text(json.dumps([{"index": 1, "global_index": 1, "params": {"lr": 0.1}}]))
+        script = tmp_path / "array_job.sh"
+        script.write_text(
+            _render_array_script(
+                tasks_dir=str(tmp_path / "tasks"),
+                params_file=str(params),
+                project_dir=str(proj),
+                python_path=sys.executable,
+                resumable=True,
+                done_sentinel=".hsm_done",
+                checkpoint_subdir="resume",
+                max_failures=2,
+            )
+        )
+        return script, tmp_path / "tasks" / "task_1"
+
+    @staticmethod
+    def _env(**extra):
+        import os
+
+        return {**os.environ, "SLURM_ARRAY_TASK_ID": "1", "SLURM_ARRAY_JOB_ID": "77", **extra}
+
+    def test_a_crash_exits_with_its_code_and_records_it_until_out_of_retries(self, tmp_path):
+        import subprocess
+
+        runs = tmp_path / "runs"
+        train = f"import sys\nopen({str(runs)!r}, 'a').write('x')\nsys.exit(3)\n"
+        script, task = self._script(tmp_path, train)
+
+        def run():
+            return subprocess.run(["bash", str(script)], env=self._env(), capture_output=True)
+
+        assert run().returncode == 3  # Slurm records FAILED, not COMPLETED 0:0
+        assert (task / ".hsm_failed").read_text().startswith("exit=3 job=77_1 ")
+        assert "Status: FAILED" in (task / "task_info.txt").read_text()
+        assert run().returncode == 3
+        assert len((task / ".hsm_failed").read_text().splitlines()) == 2
+        third = run()  # out of retries (max_failures=2): not re-run
+        assert third.returncode == 1 and b"Not re-run" in third.stdout
+        assert runs.read_text() == "xx"
+
+    @pytest.mark.parametrize(
+        "train",
+        [
+            "import os, sys\nopen(os.environ['HSM_DONE_SENTINEL'], 'w').close()\nsys.exit(1)\n",
+            "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)\n",  # a TERM reached it first
+        ],
+    )
+    def test_done_then_a_bad_exit_and_a_run_killed_by_term_are_no_crash(self, tmp_path, train):
+        # Review of #51: .hsm_done wins over the exit code; 143 is a seam (scancel, preemption).
+        import subprocess
+
+        script, task = self._script(tmp_path, train)
+        res = subprocess.run(["bash", str(script)], env=self._env(), capture_output=True)
+        assert res.returncode == 0, res.stderr
+        assert not (task / ".hsm_failed").exists()
+
+    def test_a_sigterm_at_the_seam_is_resumable_not_a_crash(self, tmp_path):
+        import os
+        import signal
+        import subprocess
+        import time
+
+        started = tmp_path / "started"
+        # Saves on SIGTERM, then exits non-zero: that exit is the seam, not a crash.
+        train = (
+            "import os, signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, lambda *a: sys.exit(2))\n"
+            f"open({str(started)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(60)\n"
+        )
+        script, task = self._script(tmp_path, train)
+        task.mkdir(parents=True)
+        (task / ".hsm_failed").write_text("exit=3 job=76_1 earlier\n")  # a streak to break
+        proc = subprocess.Popen(["bash", str(script)], env=self._env(), stdout=subprocess.DEVNULL)
+        deadline = time.monotonic() + 30
+        while not (started.exists() and started.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        try:
+            proc.send_signal(signal.SIGTERM)  # Slurm's --signal=B:TERM@<grace>: the batch shell
+            assert proc.wait(timeout=30) == 0
+        finally:  # the stub may outlive the shell: the forwarded TERM does not reach it today
+            try:
+                os.kill(int(started.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError, FileNotFoundError):
+                pass
+        assert not (task / ".hsm_failed").exists()
+        assert "Status: CHUNK_INCOMPLETE" in (task / "task_info.txt").read_text()
+
+
 class TestMultiGpuTypeLocal:
     """Review finding: the local source's multi-type wiring was untested —
     only the SSH twin was. Same invariants, local transport."""
@@ -800,9 +903,11 @@ class TestNativeResumable:
         (tasks / "task_2" / "resume").mkdir(parents=True)
         (tasks / "task_2" / "resume" / "ckpt").write_text("x")
         (tasks / "task_3").mkdir(parents=True)
+        (tasks / "task_3" / ".hsm_failed").write_text("exit=3 a\nexit=3 b\n")  # 2 crashes
         prog = await src.chunk_progress(3, done_sentinel=".hsm_done", checkpoint_subdir="resume")
         assert prog.done_indices == frozenset({1})
         assert prog.checkpoint_mtime is not None
+        assert prog.crashes == {3: 2}
 
     @pytest.mark.asyncio
     async def test_non_array_resumable_rejected(self, tmp_path):

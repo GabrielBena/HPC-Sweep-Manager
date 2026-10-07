@@ -1,0 +1,19 @@
+{# Shared module-system init, before `modules:` / `pre_script` (issue #15).
+
+   Lmod / Environment Modules define the `module` shell function from
+   /etc/profile.d, which only a login shell sources: in a job submitted from a
+   non-login shell (sbatch over SSH, a detached task) `module load` fails with
+   "command not found". If `module` is missing, source the first standard init
+   script found. `|| true`: a profile script not written for `set -e` must not
+   end the task. Rendered only when the script loads modules.
+#}
+{% if modules or "module" in pre_script | join(" ") %}
+if ! command -v module >/dev/null 2>&1; then
+    for _hsm_mi in "${LMOD_PKG:+$LMOD_PKG/init/bash}" /etc/profile.d/lmod.sh /etc/profile.d/z00_lmod.sh \
+                   /usr/share/lmod/lmod/init/bash /etc/profile.d/modules.sh; do
+        [ -n "$_hsm_mi" ] && [ -f "$_hsm_mi" ] && { . "$_hsm_mi" || true; }
+        command -v module >/dev/null 2>&1 && break
+    done
+    command -v module >/dev/null 2>&1 || echo "warning: no module system found; \`module load\` will fail" >&2
+fi
+{% endif %}

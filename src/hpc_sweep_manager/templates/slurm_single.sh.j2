@@ -6,6 +6,7 @@
 
 # The code this task runs (its sweep's snapshot on a remote); pre_script may use it.
 export HSM_CODE_DIR={{ project_dir }}
+{% include "_module_init.sh.j2" %}
 {% for mod in modules %}
 module load {{ mod }}
 {% endfor %}

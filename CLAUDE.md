@@ -235,6 +235,10 @@ it's trying to reintroduce them, push back.
    native SlurmComputeSource uses `_python_needs_conda_init(python_path)`.
    **The historical `ln -sfn <module-prefix> ~/miniforge3` workaround is no
    longer needed** — `pre_script: [module load miniforge3]` is sufficient.
+   `module` itself is undefined in a non-login shell (sbatch over SSH): when a
+   script loads modules, the shared partial `templates/_module_init.sh.j2`
+   renders first and sources the module system's init if `module` is missing
+   (S10, issue #15).
 
 2. **`~` / `$USER` / `$HOME` in remote paths don't expand where it matters.**
    `output.dir=<path>` inside double-quoted COMMAND strings and the rsync
@@ -641,7 +645,11 @@ existing array/SSH-Slurm path: `hsm sweep run --resumable --chunk-walltime
 (HSM-driven, advance-on-poll): chunk *k+1* re-submits the **whole** array
 `--dependency=afterany:k`; done tasks no-op via a `.hsm_done` sentinel; the
 chain stops on the sentinel (NEVER exit code/epoch), bounded by `max_chunks`
-+ `max_consecutive_failures`. Composes with #7 (each typed sub-array capped at
++ `max_consecutive_failures`. A crash (non-zero exit without the SIGTERM the
+batch shell caught) exits with its code and appends to the task's `.hsm_failed`;
+`max_consecutive_failures` lines in a row put the task out of retries (skipped;
+chain FAILED once the rest is done), and a FAILED chain is archived unless
+`archive_on: never`, its remote kept (S10, issues #15/#16). Composes with #7 (each typed sub-array capped at
 `chunk_walltime`). Live-validated: 2-chunk V100-`lowprio` resume on uzh.
 
 | What | Where |

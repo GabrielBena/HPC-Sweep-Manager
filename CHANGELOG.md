@@ -189,6 +189,33 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   reservation at setup. It now warns at submission only about a maintenance window
   that starts before a job of this walltime would end ("won't start before <end>; a
   walltime ≤ X would start now"), using the cluster's clock, for native Slurm too.
+- **A crashed resumable chunk is FAILED, with its exit code; a FAILED chain archives (S10,
+  #15, #16).** A chunk's script exited 0 whenever the run left no `.hsm_done`, so a crash
+  (a CUDA OOM, an exception) was recorded `COMPLETED 0:0`, looked like the walltime seam,
+  and was run again every chunk while other tasks progressed. The script now exits 0 only
+  when the run exited 0 or the batch shell caught a SIGTERM (walltime, preemption). Any
+  other non-zero exit is a crash: the script exits with that code, so Slurm records FAILED,
+  and appends `exit=<code> job=<array>_<task> <date>` to `tasks/task_<i>/.hsm_failed`. A
+  chunk that ends any other way removes the file; a run that dies of a TERM itself (143) is
+  a seam. A task with `max_task_crashes` (a new knob, default 3) crashes in a row is out of
+  retries: later chunks skip it (exit 1), and once
+  every other task is done the chain ends FAILED at once, naming it. `.hsm_done` stays the
+  only proof of done. A chain that ends FAILED is now archived to `archive_dir` before the
+  pull, as a DONE one is; its remote dir is still kept. **For consumers:** with
+  `archive_on: completed` (the default) a FAILED chain is now archived too, with
+  `any_failed: True` in `.archived`; only `archive_on: never` skips it. A crashing task now
+  costs `max_task_crashes` chunks, not one per chunk until the chain stops. To retry a chain
+  that ended FAILED: delete the tasks' `.hsm_failed`, set `chain.state.failed` to `false` in
+  `.hsm_manifest.json`, and run `hsm sweep advance <id>`.
+- **`module load` works in a job submitted from a non-login shell (S10, #15).** Lmod and
+  Environment Modules define `module` from `/etc/profile.d`, which only a login shell
+  sources, so `modules:` and a `pre_script` `module load` failed with `module: command not
+  found` in jobs sbatch'd over SSH (the S3IT `module load miniforge3` recipe was a no-op;
+  conda was found by the fallback probe). When a script loads modules, every template now
+  first sources the first init script that exists (`$LMOD_PKG/init/bash`,
+  `/etc/profile.d/lmod.sh`, `/etc/profile.d/z00_lmod.sh`, `/usr/share/lmod/lmod/init/bash`,
+  `/etc/profile.d/modules.sh`) if `module` is undefined, and warns if none defines it.
+  Scripts that load no modules are unchanged.
 - **A login-node blip no longer ends a Slurm-over-SSH launcher (S11, R9).** A dropped
   connection made the next `squeue` raise and killed a multi-day wait. The connection
   now has a 30 s keepalive and each command a 5 min bound (none for the archive rsync

@@ -24,7 +24,7 @@ from typing import Any
 
 from ..common.compute_source import JobInfo, SubmissionMode
 from ..common.resource_spec import ResourceSpec
-from ..common.resumable import ChunkProgress, ResumableContext
+from ..common.resumable import FAILED_MARKER, ChunkProgress, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
 from ..remote.push_exec import resolve_run_prefix
 from .gpu_planner import (
@@ -365,6 +365,7 @@ class SlurmComputeSource(SlurmBase):
             resume_arg=(rcfg.resume_arg if rcfg else None),
             done_sentinel=(rcfg.done_sentinel if rcfg else ".hsm_done"),
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
+            max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
         script_path = scripts_dir / f"{sub.job_name}.slurm"
         script_path.write_text(script_content)
@@ -433,6 +434,7 @@ class SlurmComputeSource(SlurmBase):
         files are already on the filesystem the driver runs on."""
         _, _, tasks_dir = self._ensure_dirs()
         done: set[int] = set()
+        crashes: dict[int, int] = {}
         newest: float | None = None
         for task_dir in Path(tasks_dir).glob("task_*"):
             if not task_dir.is_dir():
@@ -440,6 +442,8 @@ class SlurmComputeSource(SlurmBase):
             m = re.match(r"task_(\d+)$", task_dir.name)
             if m and (task_dir / done_sentinel).exists():
                 done.add(int(m.group(1)))
+            if m and (record := task_dir / FAILED_MARKER).is_file():
+                crashes[int(m.group(1))] = len(record.read_text().splitlines())
             ckpt = task_dir / checkpoint_subdir
             if ckpt.is_dir():
                 for f in ckpt.rglob("*"):
@@ -447,7 +451,7 @@ class SlurmComputeSource(SlurmBase):
                         mt = f.stat().st_mtime
                         if newest is None or mt > newest:
                             newest = mt
-        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=newest)
+        return ChunkProgress(done_indices=frozenset(done), checkpoint_mtime=newest, crashes=crashes)
 
     async def health_check(self) -> dict[str, Any]:
         try:

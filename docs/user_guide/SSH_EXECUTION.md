@@ -339,6 +339,11 @@ Put it in `pre_script:` as above — HSM renders `module load` *before* its
 conda-init probe and defers to the module's conda when it's on PATH, so
 `conda run -n <env>` resolves the right env and your GPU job stays on GPU. (No
 `ln -sfn … ~/miniforge3` symlink needed — that old workaround is obsolete.)
+A job submitted over SSH runs in a non-login shell, where `module` is not
+defined; when the script loads modules, HSM first sources the module system's
+init script (`$LMOD_PKG/init/bash`, `/etc/profile.d/lmod.sh`, `z00_lmod.sh`,
+`/usr/share/lmod/lmod/init/bash` or `/etc/profile.d/modules.sh`, the first that
+exists) and warns if none defines `module`.
 
 ### Smoke test
 
