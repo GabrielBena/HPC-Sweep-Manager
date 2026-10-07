@@ -113,11 +113,15 @@ HSM-injected args:
   tasks that start in the same second never share `outputs/<date>/<time>`.
 
 `hydra_overrides:` in `.hsm/config.yaml` lists which of the three each task gets,
-in order. A project without a `wandb` config drops `wandb.group`:
+in order (`[]` for none; an unknown name stops the run). A project without a `wandb`
+config drops `wandb.group`:
 
 ```yaml
 hydra_overrides: [output.dir, hydra.run.dir]
 ```
+
+Anything your app writes to Hydra's output dir now lands in the task dir and is
+pulled back with it. A project that sets its own `hydra.run.dir` drops it from the list.
 
 Minimum viable Python:
 

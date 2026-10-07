@@ -425,9 +425,13 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `[wandb.group, output.dir, hydra.run.dir]`. A project without a `wandb` config drops
   `wandb.group` from the list, so `wandb.group=` is no longer forced on every project (a known
   limitation until now). Unknown names are dropped with a warning; a resumable chain keeps the
-  list it was launched with. **For consumers:** the command gains one trailing override, and
-  `hsm sweep run` says so until the project sets `hydra_overrides:`. A script that is not a
-  Hydra app can set `hydra_overrides: [wandb.group, output.dir]` to get the old command.
+  list it was launched with. An unknown name stops the run: dropping it silently would cost
+  every task its `output.dir` on a typo. **For consumers:** the command gains one trailing
+  override, and `hsm sweep run` says so until the project sets `hydra_overrides:`. Whatever
+  an app writes to Hydra's output dir (or to its cwd, when Hydra changes into the run dir)
+  now lands in the task dir and is pulled back with it. A project that sets its own
+  `hydra.run.dir`, or a script that is not a Hydra app and checks its keys strictly, sets
+  `hydra_overrides: [wandb.group, output.dir]` to get the old command.
 
 ### Removed (2026-10 maintenance pass)
 

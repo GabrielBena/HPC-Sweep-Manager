@@ -182,3 +182,6 @@ class TestOneDriverAtATime:
         saved = _chain_manifest(hydra_overrides=["output.dir"])
         await _advance_via_manifest(tmp_path, saved, out, block=False)
         assert src.hydra_overrides == ("output.dir",)  # the chain keeps the project's pick
+        odd = _chain_manifest(hydra_overrides=["output.dir", "from.a.newer.hsm"])
+        await _advance_via_manifest(tmp_path, odd, out, block=False)
+        assert src.hydra_overrides == ("output.dir",)  # an unknown name can't break rendering

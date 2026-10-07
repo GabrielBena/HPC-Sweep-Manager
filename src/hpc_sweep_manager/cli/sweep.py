@@ -598,7 +598,11 @@ def _run_sweep_via_orchestrator(
         f"[green]Execution backend: {source.source_type} "
         f"(mode={resolved_mode}, submission={sub_mode})[/green]"
     )
-    if (overrides := hsm_config.get_hydra_overrides() if hsm_config else None) is not None:
+    try:
+        overrides = hsm_config.get_hydra_overrides() if hsm_config else None
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+    if overrides is not None:
         source.hydra_overrides = overrides
     else:  # the R3 default differs from v0.1: say so until the project picks
         console.print(
@@ -1404,7 +1408,7 @@ async def _advance_via_manifest(
     from ..core.common.param_generator import ParameterGenerator
     from ..core.common.resumable import ResumableConfig
     from ..core.common.sweep_orchestrator import run_resumable_sweep_async
-    from ..core.common.templating import LEGACY_HYDRA_OVERRIDES
+    from ..core.common.templating import HYDRA_OVERRIDES, LEGACY_HYDRA_OVERRIDES
     from ..core.remote.push_exec import resolve_run_prefix
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
@@ -1446,7 +1450,12 @@ async def _advance_via_manifest(
         source._remote_scripts_dir = f"{source._remote_sweep_dir}/scripts"
         source._remote_code_dir = manifest.get("remote_code_dir")
         source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
-        source.hydra_overrides = tuple(chain.get("hydra_overrides", LEGACY_HYDRA_OVERRIDES))
+        saved = chain.get("hydra_overrides")  # a chain launched before R3 has none
+        source.hydra_overrides = (
+            tuple(k for k in saved if k in HYDRA_OVERRIDES)
+            if isinstance(saved, list)
+            else LEGACY_HYDRA_OVERRIDES
+        )
 
         statuses = await source.adopt(last_job_ids, jobs=manifest.get("jobs") or ())
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]

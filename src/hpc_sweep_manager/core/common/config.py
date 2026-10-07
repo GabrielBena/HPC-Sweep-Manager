@@ -51,7 +51,6 @@ KNOWN_KEYS = dict(
     paths={"conda_env", "train_script", "config_dir", "output_dir", "python_interpreter"},
     project={"name", "root"},
     wandb={"project", "entity"},
-    hydra_overrides=frozenset(HYDRA_OVERRIDES),
     sweep_file={"sweep", "defaults", "metadata", "script", "complete", "resumable"},
     sweep={"grid", "paired", "cost_param", "cost_map", "resumable"},
 )
@@ -82,9 +81,6 @@ def config_warnings(config: dict | None, sweep: dict | None = None) -> list[str]
     for b in blocks:
         other = {"local": "slurm", "slurm": "local"}.get(b)
         msgs += _unknown(cfg.get(b), K[b], f"{b}.", other and {f"{other}.": K[other]})
-    if (names := cfg.get("hydra_overrides")) is not None:
-        names = dict.fromkeys(map(str, names if isinstance(names, list) else [names]))
-        msgs += _unknown(names, K["hydra_overrides"], "hydra_overrides: ")
     remotes = _sub(cfg.get("distributed"), "remotes")
     for alias, remote in remotes.items() if isinstance(remotes, dict) else ():
         p = f"distributed.remotes.{alias}."  # `gpus` is known at both levels: allowlist, count
@@ -439,13 +435,18 @@ class HSMConfig:
 
     def get_hydra_overrides(self) -> tuple[str, ...] | None:
         """Which of HSM's overrides each task gets (``hydra_overrides:``, R3), or ``None`` when
-        unset: every source then appends all of them. Unknown names are dropped (and warned
-        about by :func:`config_warnings`)."""
+        unset: every source then appends all of them. An unknown name raises ValueError rather
+        than being dropped: a typo of ``output.dir`` would silently cost every task its dir."""
         keys = self.config_data.get("hydra_overrides")
         if keys is None:
             return None
         keys = keys if isinstance(keys, list) else [keys]
-        return tuple(k for k in keys if isinstance(k, str) and k in HYDRA_OVERRIDES)
+        if bad := [str(k) for k in keys if str(k) not in HYDRA_OVERRIDES]:
+            near = difflib.get_close_matches(bad[0], list(HYDRA_OVERRIDES), n=1)
+            hint = f"; did you mean `{near[0]}`?" if near else ""
+            names = ", ".join(HYDRA_OVERRIDES)
+            raise ValueError(f"hydra_overrides: `{bad[0]}` is not one of {names}{hint}")
+        return tuple(keys)
 
     def get_wandb_config(self) -> dict[str, Any]:
         """Get wandb configuration from config."""
