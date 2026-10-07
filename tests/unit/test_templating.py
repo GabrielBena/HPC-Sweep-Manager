@@ -119,9 +119,13 @@ class TestCondaInitPartialRenders:
         "modules": [],
         "pre_script": [],
         "project_dir": "/tmp/project",
+        "remote_code_dir": "/remote/code",
+        "remote_task_dir": "/remote/tasks/j",
+        "run_prefix": "conda run -n env python",
         "python_path": "conda run -n env python",
         "script_path": "train.py",
         "params_hydra": '"seed=1"',
+        "params_yaml": "seed: 1\n",
         "wandb_group": "g",
     }
 
@@ -176,6 +180,7 @@ class TestCondaInitPartialRenders:
             run_prefix="conda run -n env python",
             script_path="train.py",
             params_hydra='"seed=1"',
+            params_yaml="seed: 1\n",
             wandb_group="g",
         )
         assert "MAMBA_EXE" in rendered
@@ -199,6 +204,7 @@ class TestCondaInitPartialRenders:
             python_path="conda run -n env python",
             script_path="train.py",
             params_hydra='"seed=1"',
+            params_yaml="seed: 1\n",
             wandb_group="g",
             cuda_visible_devices=None,
             modules=[],
@@ -219,6 +225,7 @@ class TestCondaInitPartialRenders:
             python_path="/abs/python",
             script_path="train.py",
             params_hydra='"seed=1"',
+            params_yaml="seed: 1\n",
             wandb_group="g",
             cuda_visible_devices=None,
             modules=[],
@@ -276,6 +283,7 @@ class TestGpuPinning:
         job_name="j",
         job_id="abc",
         params_hydra='"seed=1"',
+        params_yaml="seed: 1\n",
         wandb_group="g",
         modules=[],
         pre_script=[],
@@ -422,3 +430,20 @@ class TestHydraOverrides:
         only = self._command(template, hydra_overrides=("output.dir",))
         assert only.endswith(f' output.dir={d}"') and "wandb.group" not in only
         assert "output.dir" not in self._command(template, hydra_overrides=())
+
+
+class TestStrictRendering:
+    """G2: a variable a template prints but nobody passed fails the render, instead of leaving a
+    hole in a command (gotcha #11's class); an optional one is still testable with `{% if %}`."""
+
+    def test_a_missing_printed_variable_fails(self):
+        from jinja2 import UndefinedError
+
+        kw = {**TestCondaInitPartialRenders._BASE_KWARGS}
+        del kw["python_path"]
+        with pytest.raises(UndefinedError, match="python_path"):
+            render_template("slurm_single.sh.j2", **kw)
+
+    def test_an_unset_optional_variable_is_just_false(self):
+        rendered = render_template("slurm_array.sh.j2", **TestCondaInitPartialRenders._BASE_KWARGS)
+        assert "GPU Type" not in rendered  # `{% if gpu_type %}` with no gpu_type
