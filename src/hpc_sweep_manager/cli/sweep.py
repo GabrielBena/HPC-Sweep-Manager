@@ -1466,6 +1466,8 @@ async def _advance_via_manifest(
             chain_state=state,
             do_setup=False,
             initial_job_ids=last_job_ids,
+            # ADVANCE was saved for the last chunk, then its successor was never recorded.
+            initial_decided=int(chunks[-1].get("index", state.chunk_index)) < state.chunk_index,
             initial_prev_done=int(chain.get("last_done_count") or 0),
             initial_prev_mtime=chain.get("last_checkpoint_mtime"),
             poll_interval=source.poll_interval,

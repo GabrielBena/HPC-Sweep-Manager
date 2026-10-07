@@ -731,7 +731,12 @@ class SSHSlurmComputeSource(SlurmBase):
         # numbered). The local mirror is created on collect_results().
         remote_params_file = f"{self._remote_sweep_dir}/{sub.params_filename}"
         script = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
-        queued = await self._queued_chunk(sub.job_name, script) if resumable else None
+        # Chunk 0 has no earlier driver to have orphaned it.
+        queued = (
+            await self._queued_chunk(sub.job_name, script)
+            if resumable and resumable.chunk_index
+            else None
+        )
         if not queued:  # an adopted chunk's tasks read this file: never rewrite it under them
             await self._write_remote_file(
                 remote_params_file, json.dumps(list(sub.entries), indent=2)

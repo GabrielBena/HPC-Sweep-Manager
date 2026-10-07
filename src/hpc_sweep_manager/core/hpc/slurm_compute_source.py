@@ -339,7 +339,12 @@ class SlurmComputeSource(SlurmBase):
         # tasks/task_<n> (unpadded) stays globally numbered across sub-arrays.
         params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
         script_path = (scripts_dir / f"{sub.job_name}.slurm").absolute()  # as squeue's %o shows it
-        queued = await self._queued_chunk(sub.job_name, str(script_path)) if resumable else None
+        # Chunk 0 has no earlier driver to have orphaned it.
+        queued = (
+            await self._queued_chunk(sub.job_name, str(script_path))
+            if resumable and resumable.chunk_index
+            else None
+        )
         if not queued:  # an adopted chunk's tasks read this file: never rewrite it under them
             params_file.write_text(json.dumps(list(sub.entries), indent=2))
 

@@ -102,6 +102,9 @@ def task_states(sacct_out: str, task_of: Callable[[str], str | None]) -> dict[st
     return states
 
 
+QUEUE_TRIES, QUEUE_RETRY_S = 3, 20.0  # squeue asked before a chunk is adopted or submitted
+
+
 class SlurmBase(ComputeSource):
     """A :class:`ComputeSource` whose jobs live in a Slurm scheduler."""
 
@@ -205,7 +208,11 @@ class SlurmBase(ComputeSource):
         """A chain's chunk already queued, by a driver that stopped between its sbatch and its
         manifest: the next driver adopts it rather than queueing the chunk twice. When squeue
         can't say, or names several, nothing is submitted: a guess could double the chunk."""
-        ids = await self._live_ids(job_name, script)
+        for attempt in range(QUEUE_TRIES):  # a squeue blip shouldn't stop a launcher at a seam
+            if attempt:
+                await asyncio.sleep(QUEUE_RETRY_S)
+            if (ids := await self._live_ids(job_name, script)) is not None:
+                break
         if ids is None or len(ids) > 1:
             why = "squeue gave no answer" if ids is None else f"live jobs {sorted(ids)}"
             raise RuntimeError(

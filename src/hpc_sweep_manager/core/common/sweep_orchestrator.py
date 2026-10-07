@@ -458,6 +458,7 @@ async def run_resumable_sweep_async(
     chain_state: ChainState | None = None,
     do_setup: bool = True,
     initial_job_ids: list[str] | None = None,
+    initial_decided: bool = False,
     initial_prev_done: int = 0,
     initial_prev_mtime: float | None = None,
     block: bool = True,
@@ -510,15 +511,17 @@ async def run_resumable_sweep_async(
     # the manifest never persists an empty `chunks` list (a crash between the
     # post-evaluate persist and the next submit would otherwise strand the
     # chain: the next advance would see "no chunks recorded").
+    # `initial_decided`: that chunk was evaluated (ADVANCE saved) but its successor never got
+    # submitted - submit it now, after that chunk, rather than judge the old one twice (a strike).
     if initial_job_ids:
         chunks_meta.append(
             {
-                "index": state.chunk_index,
+                "index": state.chunk_index - initial_decided,
                 "job_ids": list(initial_job_ids),
                 "terminal_states": [],
             }
         )
-    prev_job_ids: list[str] = []
+    prev_job_ids: list[str] = list(initial_job_ids or []) if initial_decided else []
     # The no-progress baseline. On a fresh foreground run it accumulates across
     # chunks; on a detached `advance` re-attach it's RESTORED from the manifest
     # (initial_prev_*) so the consecutive-failure cap fires just as promptly for
@@ -528,7 +531,7 @@ async def run_resumable_sweep_async(
     prev_mtime: float | None = initial_prev_mtime
     obs_done = initial_prev_done
     obs_mtime: float | None = initial_prev_mtime
-    current: list[str] | None = initial_job_ids
+    current: list[str] | None = None if initial_decided else initial_job_ids
     decision: ChainDecision | None = None
     submitted_this_call = 0
     last_job_ids: list[str] = list(initial_job_ids or [])

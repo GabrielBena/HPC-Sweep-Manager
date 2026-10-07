@@ -409,8 +409,10 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   after a re-attach. Now one process drives a chain at a time (it holds
   `.hsm_launcher.lock` in the sweep dir for its whole run); before queueing a chunk, a
   driver looks for this chain's job already in the queue (`squeue -n <job name>`, the
-  same script) and adopts it rather than submitting again (SSH-Slurm and native Slurm).
-  The manifest is written to a temp file and renamed, and the chain records its `costs`
+  same script) and adopts it rather than submitting again (SSH-Slurm and native Slurm);
+  when squeue can't say (three tries) or names several, it submits nothing and stops, and
+  the next `advance` submits that chunk without judging the previous one a second time
+  (which cost a strike). The manifest is written to a temp file and renamed, and the chain records its `costs`
   for `advance`. **For consumers:** `hsm sweep advance` is now safe beside a live
   launcher, so a cron of it needs no care: it prints "Another process drives chain …"
   and exits 0.

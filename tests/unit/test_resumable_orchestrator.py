@@ -168,6 +168,21 @@ class TestDrive:
         assert len(src.submit_calls) == 1 and len(src.persist_calls) == 1  # none after the wait
 
     @pytest.mark.asyncio
+    async def test_an_advance_after_an_unsubmitted_chunk_judges_nothing_twice(self):
+        # Review of #59: ADVANCE was saved for chunk 0 (one strike), then the submit of chunk 1
+        # stopped. The advance must submit chunk 1 after chunk 0, not judge chunk 0 again.
+        from hpc_sweep_manager.core.common.chain import ChainState
+
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 300.0)])
+        state = ChainState(chunk_index=1, consecutive_no_progress=1)
+        res = await _run(
+            src, _cfg(), params=2, chain_state=state, initial_job_ids=["job0"], initial_decided=True
+        )
+        assert res.chain_decision == "done"
+        first = src.submit_calls[0]
+        assert (first["chunk_index"], first["dependency"]) == (1, "afterany:job0")
+
+    @pytest.mark.asyncio
     async def test_done_in_one_chunk(self):
         src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)])
         res = await _run(src, _cfg(), params=2)

@@ -1015,8 +1015,11 @@ class TestChainDriverCrash:
     @pytest.mark.parametrize(
         "reply", [(1, "", "slurmctld down"), (0, "5 PENDING /s.sh\n6 RUNNING /s.sh\n", "")]
     )
-    async def test_nothing_is_submitted_when_squeue_cannot_tell(self, tmp_path, reply):
+    async def test_nothing_is_submitted_when_squeue_cannot_tell(self, tmp_path, reply, monkeypatch):
         # Review of R10: a failed squeue, or two live chunks, must not lead to a third sbatch.
+        from hpc_sweep_manager.core.hpc import slurm_base
+
+        monkeypatch.setattr(slurm_base, "QUEUE_RETRY_S", 0)
         src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
 
         async def sh(argv):
