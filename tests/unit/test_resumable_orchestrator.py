@@ -168,6 +168,21 @@ class TestDrive:
         assert len(src.submit_calls) == 1 and len(src.persist_calls) == 1  # none after the wait
 
     @pytest.mark.asyncio
+    async def test_an_advance_after_an_unsubmitted_chunk_judges_nothing_twice(self):
+        # Review of #59: ADVANCE was saved for chunk 0 (one strike), then the submit of chunk 1
+        # stopped. The advance must submit chunk 1 after chunk 0, not judge chunk 0 again.
+        from hpc_sweep_manager.core.common.chain import ChainState
+
+        src = FakeSource([ChunkProgress(frozenset({1, 2}), 300.0)])
+        state = ChainState(chunk_index=1, consecutive_no_progress=1)
+        res = await _run(
+            src, _cfg(), params=2, chain_state=state, initial_job_ids=["job0"], initial_decided=True
+        )
+        assert res.chain_decision == "done"
+        first = src.submit_calls[0]
+        assert (first["chunk_index"], first["dependency"]) == (1, "afterany:job0")
+
+    @pytest.mark.asyncio
     async def test_done_in_one_chunk(self):
         src = FakeSource([ChunkProgress(frozenset({1, 2}), 100.0)])
         res = await _run(src, _cfg(), params=2)
@@ -353,3 +368,11 @@ def test_task_crashes_have_their_own_cap():
     assert (cfg.max_consecutive_failures, cfg.max_task_crashes) == (2, 3)
     assert ResumableConfig.from_manifest(cfg.to_manifest()).max_task_crashes == 3
     assert "max_task_crashes" in " ".join(ResumableConfig(max_task_crashes=0).validate())
+
+
+@pytest.mark.asyncio
+async def test_costs_persisted_in_chain():
+    # `hsm sweep advance` re-submits with them: the same GPU-type split every chunk (R10).
+    src = FakeSource([ChunkProgress(frozenset({1, 2}), 250.0)])
+    await _run(src, _cfg(), costs=[1.0, 3.0])
+    assert src.persist_calls[-1]["chain"]["costs"] == [1.0, 3.0]

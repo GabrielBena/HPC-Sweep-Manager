@@ -25,7 +25,7 @@ from typing import Any
 
 from ..common.compute_source import TERMINAL_STATES, ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
-from ..common.utils import format_walltime, parse_walltime
+from ..common.utils import format_walltime, parse_walltime, write_atomic
 from .gpu_planner import jobs_manifest_entries
 from .scheduler_queue import (
     Reservation,
@@ -100,6 +100,9 @@ def task_states(sacct_out: str, task_of: Callable[[str], str | None]) -> dict[st
             secs = int(elapsed) if elapsed.isdigit() else None
             states[task] = {"state": state, "exit_code": code, "node": node, "elapsed_s": secs}
     return states
+
+
+QUEUE_TRIES, QUEUE_RETRY_S = 3, 20.0  # squeue asked before a chunk is adopted or submitted
 
 
 class SlurmBase(ComputeSource):
@@ -181,6 +184,47 @@ class SlurmBase(ComputeSource):
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
 
+    async def _live_ids(self, job_name: str, script: str) -> set[str] | None:
+        """The live jobs named ``job_name`` that run ``script`` (a path unique to the sweep; a
+        chain's finished chunks share both, hence live only), or None when squeue gave no answer."""
+        user = self.slurm_user or getpass.getuser()
+        argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
+        rc, out, _ = await self._sh(argv)
+        if rc != 0:
+            return None
+        rows = [line.split() for line in out.splitlines()]
+        return {
+            strip_array_suffix(row[0])
+            for row in rows
+            if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
+        }
+
+    async def _queued_id(self, job_name: str, script: str) -> str | None:
+        """The one live job named ``job_name`` that runs ``script``, or None."""
+        ids = await self._live_ids(job_name, script)
+        return ids.pop() if ids and len(ids) == 1 else None
+
+    async def _queued_chunk(self, job_name: str, script: str) -> str | None:
+        """A chain's chunk already queued, by a driver that stopped between its sbatch and its
+        manifest: the next driver adopts it rather than queueing the chunk twice. When squeue
+        can't say, or names several, nothing is submitted: a guess could double the chunk."""
+        for attempt in range(QUEUE_TRIES):  # a squeue blip shouldn't stop a launcher at a seam
+            if attempt:
+                await asyncio.sleep(QUEUE_RETRY_S)
+            if (ids := await self._live_ids(job_name, script)) is not None:
+                break
+        if ids is None or len(ids) > 1:
+            why = "squeue gave no answer" if ids is None else f"live jobs {sorted(ids)}"
+            raise RuntimeError(
+                f"{job_name}: can't tell whether this chunk is already queued ({why}); nothing "
+                f"submitted. Check `squeue -n {job_name}`, then run `hsm sweep advance`."
+            )
+        if ids:
+            job_id = ids.pop()
+            logger.warning(f"{job_name}: adopting job {job_id}, queued by a driver that stopped")
+            return job_id
+        return None
+
     async def _write_manifest(
         self,
         job_ids: list[str],
@@ -207,7 +251,7 @@ class SlurmBase(ComputeSource):
             manifest |= {"resumable": resumable_manifest, "chain": chain}
         if self.sweep_dir is not None:
             try:
-                (self.sweep_dir / ".hsm_manifest.json").write_text(json.dumps(manifest, indent=2))
+                write_atomic(self.sweep_dir / ".hsm_manifest.json", json.dumps(manifest, indent=2))
             except OSError as e:
                 logger.warning(f"could not write the manifest: {e}")
 

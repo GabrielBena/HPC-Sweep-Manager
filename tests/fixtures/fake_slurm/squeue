@@ -11,8 +11,9 @@ CANCELLED and FAILED states are sticky once set.
 Supports a tiny subset of squeue flags:
 - -j JOB_ID  (may be repeated or comma-separated)
 - -u USER    (accepted; every fake job is the caller's)
+- -n NAME    (only the jobs of that name)
 - -h         (header suppressed; we never print one anyway)
-- -o FORMAT  (recognizes %i = job id, %T = state, %j = job name)
+- -o FORMAT  (recognizes %i = job id, %T = state, %j = job name, %o = the script)
 """
 
 from __future__ import annotations
@@ -65,6 +66,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("-j", "--job", action="append", default=[])
     parser.add_argument("-u", "--user")
+    parser.add_argument("-n", "--name")
     parser.add_argument("-h", action="store_true", dest="suppress_header")
     parser.add_argument("-o", "--format", default="%i %T %j")
     args, _ = parser.parse_known_args()
@@ -80,6 +82,8 @@ def main() -> int:
                 requested_ids.add(piece)
 
     now = time.time()
+    if args.name:
+        jobs = [j for j in jobs if j["name"] == args.name]
     if requested_ids:
         jobs = [j for j in jobs if j["id"] in requested_ids]
     # Real squeue lists only PENDING/RUNNING (and COMPLETING) jobs by default: finished jobs
@@ -98,6 +102,7 @@ def main() -> int:
         line = line.replace("%i", j["id"])
         line = line.replace("%T", state)
         line = line.replace("%j", j["name"])
+        line = line.replace("%o", j.get("script_path", ""))
         print(line)
     return 0
 

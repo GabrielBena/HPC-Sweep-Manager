@@ -751,6 +751,12 @@ def _run_sweep_via_orchestrator(
         progress_cb = _progress
 
     if rconf.enabled:
+        from ..core.remote.ssh_compute_source import launcher_lock
+
+        lock = launcher_lock(sweep_dir)  # open, so held, while this launcher drives the chain
+        if lock is None:
+            console.print(f"[red]Another process drives chain {sweep_id}.[/red]")
+            raise SystemExit(1)
         console.print(
             f"[cyan]Resumable chain: up to {rconf.max_chunks} chunks of "
             f"≤{rconf.chunk_walltime} each. The launcher drives the chain while "
@@ -1455,10 +1461,13 @@ async def _advance_via_manifest(
             # so the chain stays one group and the failure cap accounts faithfully
             # across re-attach (not reset each advance).
             wandb_group=chain.get("wandb_group"),
+            costs=chain.get("costs"),
             job_name_prefix=sweep_id,
             chain_state=state,
             do_setup=False,
             initial_job_ids=last_job_ids,
+            # ADVANCE was saved for the last chunk, then its successor was never recorded.
+            initial_decided=int(chunks[-1].get("index", state.chunk_index)) < state.chunk_index,
             initial_prev_done=int(chain.get("last_done_count") or 0),
             initial_prev_mtime=chain.get("last_checkpoint_mtime"),
             poll_interval=source.poll_interval,
@@ -1503,11 +1512,13 @@ def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
     .hsm_manifest.json, re-attaches over SSH, and — if the current chunk is
     terminal — submits the next chunk (default; non-blocking, cron-friendly) or
     drives to completion (--max-iterations 0). Submits NEW Slurm jobs, so it is
-    DISTINCT from `hsm sweep collect` (which only pulls/archives). Intended for
-    a DETACHED chain — don't run it while a live launcher is still driving the
-    same chain (both could submit the next chunk).
+    DISTINCT from `hsm sweep collect` (which only pulls/archives). Safe beside a
+    live launcher: one process drives a chain at a time (`.hsm_launcher.lock`),
+    and the other steps aside.
     """
     import json
+
+    from ..core.remote.ssh_compute_source import launcher_lock
 
     console = ctx.obj["console"]
     logger = ctx.obj["logger"]
@@ -1515,6 +1526,13 @@ def advance_cmd(ctx, sweep_id, max_iterations, verbose, quiet):
     manifest_path = sweep_dir / ".hsm_manifest.json"
     if not manifest_path.exists():
         console.print(f"[red]No manifest at {manifest_path}.[/red]")
+        return
+    # Held until this command returns, and taken before the manifest is read, so the chain state
+    # read is the latest. Held already: its launcher or another advance drives the chain, the
+    # normal case for a cron advance (exit 0).
+    lock = launcher_lock(sweep_dir)
+    if lock is None:
+        console.print(f"[yellow]Another process drives chain {sweep_id}; nothing to do.[/yellow]")
         return
     try:
         manifest = json.loads(manifest_path.read_text())

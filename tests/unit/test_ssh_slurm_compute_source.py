@@ -1861,3 +1861,26 @@ class TestChainManifestRoundTrip:
         assert restored.script_path == "train.py"
         assert restored._chain_state.chunk_index == 1
         assert restored._resumable_config.chunk_walltime == "23:00:00"
+
+
+class TestChainDriverCrash:
+    """A chain driver that stops between its sbatch and its manifest (tracker R10)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state, adopted", [("PENDING", True), ("COMPLETED", False)])
+    async def test_the_next_driver_adopts_a_queued_chunk(self, tmp_path, state, adopted):
+        from hpc_sweep_manager.core.common.resumable import ResumableConfig, ResumableContext
+
+        conn = FakeConn(responder=_setup_ok_responder())
+        src = await TestStatus._tracking(tmp_path, conn)
+        script = f"{src._remote_scripts_dir}/sweep_1_array.slurm"
+        lookup = "squeue -h -u gbena -n sweep_1_array -o '%i %T %o'"
+        conn.add(lookup, _Result(0, f"555 {state} {script}\n"))
+        conn.add("sbatch /", _Result(0, "Submitted batch job 556\n"))
+        ctx = ResumableContext(1, ResumableConfig(enabled=True, chunk_walltime="23:00:00"))
+        ids = await src.submit_batch([{"s": 0}], "sweep_1", "array", resumable=ctx)
+        assert ids == (["555"] if adopted else ["556"])
+        sent = [c["cmd"] for c in conn.run_calls]
+        assert lookup in sent
+        assert any(c.startswith("sbatch") for c in sent) is not adopted
+        assert any("parameter_combinations" in c for c in sent) is not adopted

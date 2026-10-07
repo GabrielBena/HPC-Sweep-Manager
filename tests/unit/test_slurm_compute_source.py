@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import getpass
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -946,6 +947,8 @@ class TestNativeMultiTypeResumable:
         ids = iter(["700", "701"])
 
         def fake_run(cmd, capture_output=True, text=True):
+            if cmd[0] == "squeue":  # no chunk of this chain queued yet (R10's adoption check)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
             if cmd[0] != "sbatch":  # e.g. the pre-submit reservation check
                 return OTHER_COMMAND
 
@@ -984,3 +987,72 @@ class TestNativeMultiTypeResumable:
         assert rendered.count("#SBATCH --signal=B:TERM@90") == 2
         assert rendered.count("#SBATCH --dependency=afterany:600:601") == 2
         assert "--gres=gpu:A100:1" in rendered and "--gres=gpu:H200:1" in rendered
+
+
+class TestChainDriverCrash:
+    """A chain driver that stops between its sbatch and its manifest (tracker R10)."""
+
+    @staticmethod
+    def _chunk(tmp_path):
+        from hpc_sweep_manager.core.common.resumable import ResumableConfig, ResumableContext
+
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+        src.sweep_dir, src.sweep_id = tmp_path / "sw", "sw"
+        ctx = ResumableContext(1, ResumableConfig(enabled=True, chunk_walltime="23:00:00"))
+        return src.submit_batch([{"seed": 0}, {"seed": 1}], "sw", "array", resumable=ctx)
+
+    @pytest.mark.asyncio
+    async def test_the_next_driver_adopts_a_queued_chunk(self, tmp_path, fake_slurm):
+        fake_slurm.set_pending_seconds(60)  # the chunk stays queued
+        ids = await self._chunk(tmp_path)  # this driver then dies before its manifest
+        params = tmp_path / "sw" / "parameter_combinations.json"
+        params.write_text("read by the queued tasks")
+        assert await self._chunk(tmp_path) == ids  # the next driver adopts it
+        assert len(fake_slurm.jobs()) == 1
+        assert params.read_text() == "read by the queued tasks"  # never rewritten under them
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reply", [(1, "", "slurmctld down"), (0, "5 PENDING /s.sh\n6 RUNNING /s.sh\n", "")]
+    )
+    async def test_nothing_is_submitted_when_squeue_cannot_tell(self, tmp_path, reply, monkeypatch):
+        # Review of R10: a failed squeue, or two live chunks, must not lead to a third sbatch.
+        from hpc_sweep_manager.core.hpc import slurm_base
+
+        monkeypatch.setattr(slurm_base, "QUEUE_RETRY_S", 0)
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+
+        async def sh(argv):
+            return reply
+
+        src._sh = sh
+        with pytest.raises(RuntimeError, match="nothing submitted"):
+            await src._queued_chunk("sw_array", "/s.sh")
+
+    @pytest.mark.asyncio
+    async def test_a_finished_chunk_is_not_adopted(self, tmp_path, fake_slurm):
+        fake_slurm.set_pending_seconds(0)
+        fake_slurm.set_running_seconds(0)  # out of the queue at once
+        first = await self._chunk(tmp_path)
+        assert await self._chunk(tmp_path) != first
+        assert len(fake_slurm.jobs()) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_manifest_write_failing_midway_keeps_the_old_one(self, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        src = SlurmComputeSource(project_dir=str(tmp_path), script_path="train.py")
+        src.sweep_dir, src.sweep_id = tmp_path, "sw"
+        await src._write_manifest(["500"], "array", 2)
+        old = (tmp_path / ".hsm_manifest.json").read_text()
+        real = Path.write_text
+
+        def torn(path, data, *args, **kwargs):  # the disk fills halfway through
+            real(path, data[: len(data) // 2])
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(Path, "write_text", torn)
+        await src._write_manifest(["501"], "array", 2)
+        monkeypatch.undo()
+        assert (tmp_path / ".hsm_manifest.json").read_text() == old
+        assert [p.name for p in tmp_path.iterdir()] == [".hsm_manifest.json"]

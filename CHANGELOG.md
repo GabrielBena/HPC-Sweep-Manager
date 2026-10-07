@@ -400,6 +400,22 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   name: the analyzer and both Slurm sources' chunk-progress probes. No dir is renamed.
   **For consumers:** individual-mode sweeps now report their real completed, failed and
   missing counts; task dir names are unchanged.
+- **A resumable chain is never submitted twice (R10).** Nothing stopped a cron
+  `hsm sweep advance` from driving a chain its live launcher was driving too, and a
+  driver that died between a chunk's `sbatch` and its manifest left that chunk out of
+  it: either way the next chunk could be queued twice. The manifest itself was written
+  in place, so a crash mid-write could leave half a file, and `advance` dropped the
+  sweep's cost hints, so a multi-type `gpu_type` chain could split its tasks differently
+  after a re-attach. Now one process drives a chain at a time (it holds
+  `.hsm_launcher.lock` in the sweep dir for its whole run); before queueing a chunk, a
+  driver looks for this chain's job already in the queue (`squeue -n <job name>`, the
+  same script) and adopts it rather than submitting again (SSH-Slurm and native Slurm);
+  when squeue can't say (three tries) or names several, it submits nothing and stops, and
+  the next `advance` submits that chunk without judging the previous one a second time
+  (which cost a strike). The manifest is written to a temp file and renamed, and the chain records its `costs`
+  for `advance`. **For consumers:** `hsm sweep advance` is now safe beside a live
+  launcher, so a cron of it needs no care: it prints "Another process drives chain …"
+  and exits 0.
 
 ### Removed (2026-10 maintenance pass)
 

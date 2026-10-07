@@ -116,3 +116,64 @@ class TestAdvanceHelperGuards:
         # tmp_path has no sweep_config.yaml -> can't re-derive the param set.
         await _advance_via_manifest(tmp_path, _chain_manifest(), out, block=False)
         assert "sweep_config.yaml" in out.file.getvalue()
+
+
+class TestOneDriverAtATime:
+    """One process drives a chain at a time; a cron `advance` steps aside (tracker R10)."""
+
+    def test_a_second_driver_steps_aside(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from hpc_sweep_manager.cli import sweep as sweep_mod
+        from hpc_sweep_manager.core.remote.ssh_compute_source import launcher_lock
+
+        monkeypatch.chdir(tmp_path)
+        d = tmp_path / "sweeps/outputs/sw1"
+        d.mkdir(parents=True)
+        (d / ".hsm_manifest.json").write_text(json.dumps(_chain_manifest()))
+        driven = []
+
+        async def drive(sweep_dir, manifest, console, *, block):
+            driven.append(sweep_dir)
+
+        monkeypatch.setattr(sweep_mod, "_advance_via_manifest", drive)
+        live = launcher_lock(d)  # a live launcher drives the chain
+        res = CliRunner().invoke(sweep_cmd, ["advance", "sw1"], obj=_obj())
+        assert res.exit_code == 0 and "Another process drives chain sw1" in res.output
+        assert driven == []
+        live.close()
+        assert CliRunner().invoke(sweep_cmd, ["advance", "sw1"], obj=_obj()).exit_code == 0
+        assert len(driven) == 1
+
+    @pytest.mark.asyncio
+    async def test_advance_resubmits_with_the_saved_costs(self, tmp_path, monkeypatch):
+        import io
+
+        from hpc_sweep_manager.core.common import sweep_orchestrator
+        from hpc_sweep_manager.core.common.sweep_orchestrator import SweepResult
+        from hpc_sweep_manager.core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
+
+        class Reattached:
+            _remote_sweep_dir, conda_env, python_path, poll_interval = "/r/sw1", None, "python", 0
+
+            async def reattach(self, *args):
+                return True
+
+            async def adopt(self, job_ids, jobs=()):
+                return dict.fromkeys(job_ids, "COMPLETED")
+
+            async def cleanup(self):
+                pass
+
+        calls = []
+
+        async def run(**kwargs):
+            calls.append(kwargs)
+            return SweepResult(sweep_id="sw1", sweep_dir=tmp_path, chain_decision="advance")
+
+        monkeypatch.setattr(SSHSlurmComputeSource, "from_manifest", lambda m: Reattached())
+        monkeypatch.setattr(sweep_orchestrator, "run_resumable_sweep_async", run)
+        (tmp_path / "sweep_config.yaml").write_text("sweep:\n  grid:\n    lr: [1, 2]\n")
+        out = Console(file=io.StringIO(), force_terminal=False, width=200)
+        await _advance_via_manifest(tmp_path, _chain_manifest(costs=[1.0, 3.0]), out, block=False)
+        assert calls[0]["costs"] == [1.0, 3.0]
