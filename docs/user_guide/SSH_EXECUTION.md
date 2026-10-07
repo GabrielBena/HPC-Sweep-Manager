@@ -379,7 +379,9 @@ REMOTE=uzh CONDA_ENV=cpvr \
   queue HSM asks `sacct` for the real terminal state, and `hsm sweep run` exits
   non-zero if anything failed — so check the exit code in scripts. Failing task
   dirs + the logs dir are printed; `hsm sweep report <id> --scan-tasks` and
-  `hsm sweep errors <id>` give detail.
+  `hsm sweep errors <id>` give detail. How each task ended (TIMEOUT,
+  OUT_OF_MEMORY, node, elapsed) is in the local `tasks_state.json`; see
+  [HPC_EXECUTION.md](HPC_EXECUTION.md#how-each-task-ended-tasks_statejson).
 
 ### Recovering a sweep whose launcher died — `hsm sweep collect`
 

@@ -745,7 +745,7 @@ class SSHSlurmComputeSource(SlurmBase):
         # Per-(sub-)array params file — written to the remote sweep dir so
         # the array template's $SLURM_ARRAY_TASK_ID python helper can find
         # it ("index" is array-local; "global_index" keeps the task's
-        # original 1..N position so tasks/task_%04d stays globally
+        # original 1..N position so tasks/task_<n> (unpadded) stays globally
         # numbered). The local mirror is created on collect_results().
         remote_params_file = f"{self._remote_sweep_dir}/{sub.params_filename}"
         await self._write_remote_file(remote_params_file, json.dumps(list(sub.entries), indent=2))
@@ -783,6 +783,7 @@ class SSHSlurmComputeSource(SlurmBase):
         local_tasks_dir.mkdir(parents=True, exist_ok=True)
 
         params: dict[str, Any] = {"_array_size": len(sub.entries)}
+        params["_global_indices"] = [e["global_index"] for e in sub.entries]  # row -> task dir
         if sub.gpu_type:
             params["_gpu_type"] = sub.gpu_type
         self.active_jobs[job_id] = JobInfo(
@@ -929,6 +930,8 @@ class SSHSlurmComputeSource(SlurmBase):
         if self._remote_sweep_dir is None or self.sweep_dir is None:
             logger.warning(f"collect_results called before setup on {self.name}")
             return False
+        # sacct only, into the LOCAL sweep dir: untouched by the archive -> pull -> rm -rf below.
+        await self.record_task_states()
 
         # Resumable chains (issue #12): between chunks pull partial progress but
         # do NOT archive or rm -rf — the next chunk's checkpoints live in the

@@ -987,6 +987,37 @@ class TestCollectResults:
         assert rm_calls[0]["timeout"] is None  # a big tree may take longer than the 300 s bound
 
     @pytest.mark.asyncio
+    async def test_task_states_land_in_the_local_sweep_dir(self, tmp_path):
+        """S8: one sacct at collect writes tasks_state.json into the LOCAL sweep dir, never the
+        remote one the cleanup deletes, and before the archive -> pull -> rm -rf sequence."""
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        rows = "7_1|COMPLETED|0:0|n1|50\n7_2|TIMEOUT|0:15|n2|86400\n"
+        conn.add("sacct -j 7 -P", _Result(0, stdout=rows))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="t.py",
+            archive_dir="/shares/a",
+            archive_on="always",
+            fake_conn=conn,
+        )
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        (jid,) = await src.submit_batch([{"s": 0}, {"s": 1}], "sweep_1", mode="array")
+        src.update_job_status(jid, "FAILED")
+        assert await src.collect_results() is True
+        states = json.loads((tmp_path / "sweep" / "tasks_state.json").read_text())
+        assert {t: s["state"] for t, s in states.items()} == {
+            "task_1": "COMPLETED",
+            "task_2": "TIMEOUT",
+        }
+        cmds = [c["cmd"] for c in conn.run_calls]
+        assert not any("tasks_state" in c for c in cmds)
+        sacct = next(i for i, c in enumerate(cmds) if c.startswith("sacct -j 7 -P"))
+        assert sacct < next(i for i, c in enumerate(cmds) if "rsync -a" in c)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["FAILED", "CANCELLED"])  # `hsm sweep cancel`, then collect
     async def test_no_cleanup_on_failure(self, tmp_path, status):
         conn = FakeConn(responder=_setup_ok_responder())

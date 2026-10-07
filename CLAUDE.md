@@ -347,7 +347,11 @@ it's trying to reintroduce them, push back.
 7. **Array-job progress reports `1/1` not `N/N`.** `SlurmComputeSource`
    inserts one `JobInfo` for the whole array; `wait_for_all` reports `1 done`
    even when `N` tasks succeeded. The per-task truth lives in
-   `tasks/*/task_info.txt`. Acceptable for now — defer until users complain.
+   `tasks/*/task_info.txt`, and in `tasks_state.json` (S8): at collect,
+   `SlurmBase.record_task_states` runs one `sacct` for every job and maps each
+   array row to `task_<global index>` via the JobInfo's `_global_indices`. A
+   walltime kill writes no `Status:` line, so the analyzer falls back to this
+   file; a failed/absent/empty sacct writes nothing (never a guess).
 
 7b. **Terminal state comes from `sacct`; a failed call is never a verdict.**
    A job leaving `squeue` is NOT success, and a failed `squeue`/`sacct` is NOT

@@ -403,11 +403,12 @@ def jobs_manifest_entries(
     out: list[dict[str, Any]] = []
     for jid in job_ids:
         p = jobinfo_params.get(jid) or {}
-        out.append(
-            {
-                "job_id": jid,
-                "gpu_type": p.get("_gpu_type"),
-                "num_tasks": int(p.get("_array_size", 1)),
-            }
-        )
+        entry = {
+            "job_id": jid,
+            "gpu_type": p.get("_gpu_type"),
+            "num_tasks": int(p.get("_array_size", 1)),
+        }
+        if p.get("_global_indices"):  # an array's row -> task dir map (tasks_state.json)
+            entry["global_indices"] = list(p["_global_indices"])
+        out.append(entry)
     return out
