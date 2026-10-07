@@ -106,9 +106,8 @@ class SlurmBase(ComputeSource):
     """A :class:`ComputeSource` whose jobs live in a Slurm scheduler."""
 
     slurm_user: str | None = None  # whose queue to read; defaults to the local user
-    sweep_dir: Path | None = None  # the local sweep dir, set by setup()
     poll_interval = 60.0  # Slurm jobs run for hours: a poll a minute is soon enough
-    sweep_dir: Path | None = None  # set by setup(); the manifest is written there
+    sweep_dir: Path | None = None  # the local sweep dir, set by setup(): manifest, task states
     sweep_id: str | None = None
 
     def __init__(self, *args, **kwargs):
@@ -159,15 +158,20 @@ class SlurmBase(ComputeSource):
         info = self.active_jobs.get(job_id) or self.completed_jobs.get(job_id)
         return info.status if info else "UNKNOWN"
 
-    async def adopt(self, job_ids: Sequence[str], pause: float = 20.0) -> dict[str, str]:
+    async def adopt(
+        self, job_ids: Sequence[str], pause: float = 20.0, jobs: Sequence[dict] = ()
+    ) -> dict[str, str]:
         """Track already-submitted jobs (a re-attach) and return their settled statuses.
 
         Polls up to ``SACCT_GRACE`` times, ``pause`` apart, until every job is either queued or
         named by sacct, so a fresh process reaches the verdict a live launcher would. A job Slurm
-        couldn't be asked about stays ``UNKNOWN``.
+        couldn't be asked about stays ``UNKNOWN``. ``jobs`` (the manifest's entries) gives each
+        array its task-dir map back.
         """
+        order = {e["job_id"]: e["global_indices"] for e in jobs if e.get("global_indices")}
         for job in job_ids:
-            self.active_jobs.setdefault(job, JobInfo(job, job, {}, self.name, status="UNKNOWN"))
+            params = {"_global_indices": order[job]} if job in order else {}
+            self.active_jobs.setdefault(job, JobInfo(job, job, params, self.name, status="UNKNOWN"))
         for poll in range(SACCT_GRACE):
             await self.update_all_job_statuses()
             if not self._sacct_misses.keys() & self.active_jobs.keys():
@@ -252,7 +256,9 @@ class SlurmBase(ComputeSource):
             states = task_states(out, task_of) if rc == 0 else {}
             if states:  # merged: a distributed sweep's Slurm children share the sweep dir
                 path = self.sweep_dir / TASK_STATES_FILE
-                old = json.loads(path.read_text()) if path.exists() else {}
+                from ..common.sweep_analysis import load_task_states
+
+                old = load_task_states(self.sweep_dir)  # {} when absent or unreadable
                 path.write_text(json.dumps({**old, **states}, indent=2, sort_keys=True))
             elif rc != 0:
                 logger.info(f"sacct failed (rc={rc}): {err.strip()}; no {TASK_STATES_FILE}")

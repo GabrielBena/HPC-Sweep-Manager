@@ -18,6 +18,7 @@ from hpc_sweep_manager.cli.sweep import _report_slurm_ends
 from hpc_sweep_manager.core.common.compute_source import JobInfo
 from hpc_sweep_manager.core.common.resource_spec import ResourceSpec
 from hpc_sweep_manager.core.common.sweep_analysis import SweepCompletionAnalyzer
+from hpc_sweep_manager.core.hpc.gpu_planner import jobs_manifest_entries
 from hpc_sweep_manager.core.hpc.slurm_base import SlurmBase
 from hpc_sweep_manager.core.hpc.slurm_compute_source import SlurmComputeSource
 
@@ -170,6 +171,24 @@ class TestRecordMapping:
         await Scripted(other, (0, "7_1|TIMEOUT|0:15|n|9\n", ""), two).record_task_states()
         assert not (other / "tasks_state.json").exists()  # which sub-array? never a guess
 
+    async def test_a_reattach_takes_each_arrays_map_from_the_manifest(self, tmp_path):
+        # Review of #50: `hsm sweep collect` of a typed sweep (two sub-arrays) recorded nothing.
+        params = {"7": {"_array_size": 2, "_global_indices": [1, 3]}, "8": {"_global_indices": [2]}}
+        entries = jobs_manifest_entries(["7", "8"], params)
+        src = Scripted(tmp_path, (0, "7_2|TIMEOUT|0:15|n|9\n8_1|COMPLETED|0:0|n|9\n", ""), {})
+
+        async def settled():
+            pass
+
+        src.update_all_job_statuses = settled
+        await src.adopt(["7", "8"], pause=0, jobs=entries)
+        await src.record_task_states()
+        got = json.loads((tmp_path / "tasks_state.json").read_text())
+        assert {t: s["state"] for t, s in got.items()} == {
+            "task_3": "TIMEOUT",
+            "task_2": "COMPLETED",
+        }
+
     async def test_two_children_of_a_distributed_sweep_merge_into_one_file(self, tmp_path):
         a = Scripted(tmp_path, (0, "10_1|TIMEOUT|0:15|a|9\n", ""), dict([_array("10", [1])]))
         b = Scripted(tmp_path, (0, "20_1|COMPLETED|0:0|b|9\n", ""), dict([_array("20", [2])]))
@@ -235,6 +254,12 @@ class TestAnalyzer:
         assert r["running_tasks"] == ["task_2", "task_4"]
         assert r["failed_tasks"] == ["task_3"]
 
+    def test_a_cancelled_task_counts_as_cancelled_not_failed(self, tmp_path):
+        states = {"task_2": _state("CANCELLED", "0:0", "n", 30)}
+        r = SweepCompletionAnalyzer(_sweep(tmp_path, states)).analyze_from_task_directories()
+        assert r["cancelled_tasks"] == ["task_2"] and r["total_cancelled"] == 1
+        assert "task_2" not in r["failed_tasks"]
+
     def test_the_done_sentinel_stays_authoritative(self, tmp_path):
         sweep = _sweep(tmp_path, EXPECTED)
         (sweep / "tasks" / "task_2" / ".hsm_done").write_text("done\n")
@@ -263,7 +288,39 @@ class TestSummary:
         assert _report_slurm_ends(tmp_path, console) == ["task_1"]
         assert "Infra suspect" not in console.export_text()
 
+    def test_a_done_task_and_a_sweep_wide_fast_failure_are_not_flagged(self, tmp_path):
+        # Review of #50: .hsm_done wins over a SIGKILL while flushing; a config error that kills
+        # every task within seconds is a bug to fix, not a node to exclude.
+        states = {f"task_{i}": _state("FAILED", "1:0", f"n{i}", 3) for i in range(1, 5)}
+        states["task_5"] = _state("TIMEOUT", "0:15", "n5", 86400)
+        (tmp_path / "tasks" / "task_5").mkdir(parents=True)
+        (tmp_path / "tasks" / "task_5" / ".hsm_done").write_text("done\n")
+        (tmp_path / "tasks_state.json").write_text(json.dumps(states))
+        console = Console(record=True, width=300)
+        assert _report_slurm_ends(tmp_path, console) == [f"task_{i}" for i in range(1, 5)]
+        assert "Infra suspect" not in console.export_text()
+
     def test_no_file_prints_nothing(self, tmp_path):
         console = Console(record=True)
         assert _report_slurm_ends(tmp_path, console) == []
         assert console.export_text() == ""
+
+
+def test_task_of_matches_the_task_dirs_the_array_template_makes():
+    # Review of #50: rows map to unpadded task_<n>; a template "fixed" to task_%04d would
+    # silently break the mapping.
+    from hpc_sweep_manager.core.common.templating import render_template
+
+    assert 'TASK_OUTPUT_DIR="/t/task_${GLOBAL_INDEX}"' in render_template(
+        "slurm_array.sh.j2",
+        job_name="j",
+        num_jobs=1,
+        params_file="/p.json",
+        sbatch_directives="",
+        tasks_dir="/t",
+        logs_dir="/l",
+        project_dir="/proj",
+        python_path="python",
+        script_path="t.py",
+        sweep_id="s",
+    )

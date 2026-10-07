@@ -141,6 +141,7 @@ class SweepCompletionAnalyzer:
 
         completed_tasks = []
         failed_tasks = []
+        cancelled_tasks = []  # by `hsm sweep cancel`, from tasks_state.json
         running_tasks = []
         task_statuses = {}
 
@@ -190,7 +191,7 @@ class SweepCompletionAnalyzer:
                         running_tasks.append(task_id)
                         task_statuses[task_id]["status"] = "UNKNOWN"
                 elif ended := self._slurm_ended(task_id):
-                    failed_tasks.append(task_id)
+                    (cancelled_tasks if ended == "CANCELLED" else failed_tasks).append(task_id)
                     task_statuses[task_id]["status"] = ended
                 else:
                     # No status line found - task might be running
@@ -235,7 +236,7 @@ class SweepCompletionAnalyzer:
             "total_expected": total_expected,
             "total_completed": total_completed,
             "total_failed": total_failed,
-            "total_cancelled": 0,  # PBS array jobs don't have cancelled status, only SUCCESS/FAILED
+            "total_cancelled": len(cancelled_tasks),
             "total_missing": total_missing,
             "total_running": total_running,
             "completion_rate": (total_completed / total_expected * 100)
@@ -243,12 +244,12 @@ class SweepCompletionAnalyzer:
             else 0,
             "completed_tasks": completed_tasks,
             "failed_tasks": failed_tasks,
-            "cancelled_tasks": [],  # PBS array jobs don't have cancelled status
+            "cancelled_tasks": cancelled_tasks,
             "running_tasks": running_tasks,
             "missing_task_numbers": missing_task_numbers,
             "missing_combinations": self.missing_combinations,
             "failed_combinations": self.failed_combinations,
-            "cancelled_combinations": [],  # PBS array jobs don't have cancelled status
+            "cancelled_combinations": self._get_combinations_for_tasks(cancelled_tasks),
             "needs_completion": total_missing > 0 or total_failed > 0,
             "task_statuses": task_statuses,
             "scan_method": "task_directories",

@@ -336,7 +336,7 @@ class SlurmComputeSource(SlurmBase):
 
         # "index" is array-local (matched against $SLURM_ARRAY_TASK_ID);
         # "global_index" keeps the task's original 1..N position so
-        # tasks/task_%04d stays globally numbered across sub-arrays.
+        # tasks/task_<n> (unpadded) stays globally numbered across sub-arrays.
         params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
         params_file.write_text(json.dumps(list(sub.entries), indent=2))
 
