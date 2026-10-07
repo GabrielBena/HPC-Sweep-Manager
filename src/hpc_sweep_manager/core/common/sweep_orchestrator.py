@@ -547,6 +547,7 @@ async def run_resumable_sweep_async(
                     "last_done_count": obs_done,
                     "last_checkpoint_mtime": obs_mtime,
                     "wandb_group": wandb_group,
+                    "costs": costs,  # the same GPU-type split (issue #7) for every chunk
                 },
                 job_ids=last_job_ids,
                 num_tasks=num_tasks,

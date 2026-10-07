@@ -357,12 +357,12 @@ Caveats (v1): Slurm backends only (`--mode array` native, or a `backend: slurm`
 remote — local/ssh-bash are rejected); `--max-runs` is rejected with
 `--resumable` (a chain re-submits the full set each chunk). `hsm sweep collect`
 refuses a chain (it could delete the remote checkpoints between chunks) and
-points at `advance`. **`hsm sweep advance` is for a DETACHED chain only** — do
-NOT run it (or a cron of it) while a live `hsm sweep run --resumable` launcher
-is still driving the same chain: both could submit the next chunk (a `.hsm_chain.lock`
-is a planned follow-up; for now, pick one driver). A narrow launcher-crash
-window between submit and manifest-persist can likewise orphan a chunk — also a
-hardening follow-up. `hsm sweep cancel <id>` cancels the chain's running chunk (and
+points at `advance`. One process drives a chain at a time: the launcher or an
+`advance` holds `.hsm_launcher.lock` in the sweep dir while it runs, and an `advance`
+that finds it held says so and exits 0, so a cron of it is safe beside a live
+launcher. A driver that died between a chunk's `sbatch` and its manifest leaves
+that chunk queued but unrecorded; the next driver finds it in the queue (by job name
+and script) and adopts it instead of submitting it again. `hsm sweep cancel <id>` cancels the chain's running chunk (and
 any chunk queued after it), then marks the chain stopped so `advance` won't resubmit
 it; stop a live launcher first, or it submits the next chunk.
 

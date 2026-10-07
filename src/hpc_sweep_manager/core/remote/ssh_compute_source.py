@@ -91,7 +91,8 @@ _KILL_USER_PROCESSES = (
 def launcher_lock(sweep_dir: Path) -> Any:
     """Take ``<sweep_dir>/.hsm_launcher.lock`` (an open file; closing it releases the lock,
     and so does the process ending, even killed), or None when another process holds it.
-    A launcher holds it while it drives the sweep; ``hsm sweep collect`` refuses without it."""
+    A launcher holds it while it drives the sweep; ``hsm sweep collect`` refuses without it.
+    A resumable chain's driver (its launcher, or ``hsm sweep advance``) holds it too."""
     lock = open(sweep_dir / ".hsm_launcher.lock", "a")  # noqa: SIM115 — held past this call
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

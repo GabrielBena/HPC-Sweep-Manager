@@ -338,7 +338,10 @@ class SlurmComputeSource(SlurmBase):
         # "global_index" keeps the task's original 1..N position so
         # tasks/task_<n> (unpadded) stays globally numbered across sub-arrays.
         params_file = self.sweep_dir / sub.params_filename  # type: ignore[union-attr]
-        params_file.write_text(json.dumps(list(sub.entries), indent=2))
+        script_path = (scripts_dir / f"{sub.job_name}.slurm").absolute()  # as squeue's %o shows it
+        queued = await self._queued_chunk(sub.job_name, str(script_path)) if resumable else None
+        if not queued:  # an adopted chunk's tasks read this file: never rewrite it under them
+            params_file.write_text(json.dumps(list(sub.entries), indent=2))
 
         rcfg = resumable.config if resumable else None
         script_content = render_template(
@@ -367,18 +370,7 @@ class SlurmComputeSource(SlurmBase):
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
             max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
-        script_path = scripts_dir / f"{sub.job_name}.slurm"
-        script_path.write_text(script_content)
-
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["sbatch", str(script_path)],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"sbatch (array) failed: {result.stderr.strip() or 'no stderr'}")
-        job_id = parse_sbatch_job_id(result.stdout)
+        job_id = queued or await self._sbatch(script_path, script_content)
 
         params: dict[str, Any] = {"_array_size": len(sub.entries)}
         params["_global_indices"] = [e["global_index"] for e in sub.entries]  # row -> task dir
@@ -400,6 +392,19 @@ class SlurmComputeSource(SlurmBase):
             f"{len(sub.entries)} tasks{gpu_note})"
         )
         return job_id
+
+    async def _sbatch(self, script_path: Path, script: str) -> str:
+        """Write ``script_path``, submit it; return the job id."""
+        script_path.write_text(script)
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["sbatch", str(script_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"sbatch (array) failed: {result.stderr.strip() or 'no stderr'}")
+        return parse_sbatch_job_id(result.stdout)
 
     async def _sh(self, argv: Sequence[str]) -> tuple[int, str, str]:
         try:

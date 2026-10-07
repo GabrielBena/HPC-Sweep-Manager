@@ -42,7 +42,6 @@ without a real cluster.
 from __future__ import annotations
 
 import contextlib
-import getpass
 import json
 import logging
 import shlex
@@ -57,14 +56,13 @@ import asyncssh
 
 from ..common.chain import ChainState
 from ..common.compute_source import (
-    TERMINAL_STATES,
     JobInfo,
     SubmissionMode,
 )
 from ..common.resource_spec import ResourceSpec
 from ..common.resumable import FAILED_MARKER, ChunkProgress, ResumableConfig, ResumableContext
 from ..common.templating import params_to_hydra_args, params_to_yaml, render_template
-from ..common.utils import task_index
+from ..common.utils import task_index, write_atomic
 from ..hpc.gpu_planner import (
     SubArraySubmission,
     build_array_submissions,
@@ -72,10 +70,8 @@ from ..hpc.gpu_planner import (
     normalize_speed_factors,
     replace_sub_walltime,
 )
-from ..hpc.scheduler_queue import strip_array_suffix
 from ..hpc.slurm_base import SlurmBase
 from ..hpc.slurm_protocol import (
-    SLURM_STATE_MAP,
     format_signal,
     parse_sbatch_job_id,
     render_sbatch_directives,
@@ -289,20 +285,6 @@ class SSHSlurmComputeSource(SlurmBase):
                 stderr += " (too many tasks for one job array? try --mode individual)"
             raise RuntimeError(f"sbatch {path} failed on {self.host}: {stderr}")
         return parse_sbatch_job_id(result.stdout or "")
-
-    async def _queued_id(self, job_name: str, script: str) -> str | None:
-        """The one live job named ``job_name`` that runs ``script`` (a path unique to the
-        sweep; a chain's finished chunks share both, hence live only), or None."""
-        user = self.slurm_user or getpass.getuser()
-        argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
-        rc, out, _ = await self._sh(argv)
-        rows = [line.split() for line in out.splitlines()] if rc == 0 else []
-        ids = {
-            strip_array_suffix(row[0])
-            for row in rows
-            if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
-        }
-        return ids.pop() if len(ids) == 1 else None
 
     async def _resolve_remote_path(self, path: str) -> str:
         """Expand ``~`` / ``$USER`` / ``$HOME`` / ``$SCRATCH`` etc. on the remote.
@@ -605,7 +587,7 @@ class SSHSlurmComputeSource(SlurmBase):
         content = json.dumps(manifest, indent=2, default=str)
         if self.sweep_dir is not None:
             try:
-                (self.sweep_dir / ".hsm_manifest.json").write_text(content)
+                write_atomic(self.sweep_dir / ".hsm_manifest.json", content)
             except OSError as e:  # noqa: BLE001
                 logger.warning(f"could not write local manifest: {e}")
         if self._remote_sweep_dir is not None:
@@ -748,7 +730,12 @@ class SSHSlurmComputeSource(SlurmBase):
         # original 1..N position so tasks/task_<n> (unpadded) stays globally
         # numbered). The local mirror is created on collect_results().
         remote_params_file = f"{self._remote_sweep_dir}/{sub.params_filename}"
-        await self._write_remote_file(remote_params_file, json.dumps(list(sub.entries), indent=2))
+        script = f"{self._remote_scripts_dir}/{sub.job_name}.slurm"
+        queued = await self._queued_chunk(sub.job_name, script) if resumable else None
+        if not queued:  # an adopted chunk's tasks read this file: never rewrite it under them
+            await self._write_remote_file(
+                remote_params_file, json.dumps(list(sub.entries), indent=2)
+            )
 
         rcfg = resumable.config if resumable else None
         script_content = render_template(
@@ -777,7 +764,7 @@ class SSHSlurmComputeSource(SlurmBase):
             checkpoint_subdir=(rcfg.checkpoint_subdir if rcfg else "resume"),
             max_failures=(rcfg.max_task_crashes if rcfg else None),
         )
-        job_id = await self._sbatch(sub.job_name, script_content)
+        job_id = queued or await self._sbatch(sub.job_name, script_content)
 
         local_tasks_dir = self.sweep_dir / "tasks"  # type: ignore[union-attr]
         local_tasks_dir.mkdir(parents=True, exist_ok=True)

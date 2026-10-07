@@ -1,6 +1,7 @@
 """Utility functions for HPC Sweep Manager."""
 
 import logging
+import os
 import re
 import sys
 from datetime import datetime
@@ -84,3 +85,14 @@ def format_walltime(seconds: int) -> str:
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temp file in its dir and a rename: a reader never
+    sees half a file, and a write failing midway leaves the old one."""
+    tmp = path.with_name(f"{path.name}.tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)

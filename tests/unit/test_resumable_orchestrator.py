@@ -353,3 +353,11 @@ def test_task_crashes_have_their_own_cap():
     assert (cfg.max_consecutive_failures, cfg.max_task_crashes) == (2, 3)
     assert ResumableConfig.from_manifest(cfg.to_manifest()).max_task_crashes == 3
     assert "max_task_crashes" in " ".join(ResumableConfig(max_task_crashes=0).validate())
+
+
+@pytest.mark.asyncio
+async def test_costs_persisted_in_chain():
+    # `hsm sweep advance` re-submits with them: the same GPU-type split every chunk (R10).
+    src = FakeSource([ChunkProgress(frozenset({1, 2}), 250.0)])
+    await _run(src, _cfg(), costs=[1.0, 3.0])
+    assert src.persist_calls[-1]["chain"]["costs"] == [1.0, 3.0]

@@ -25,7 +25,7 @@ from typing import Any
 
 from ..common.compute_source import TERMINAL_STATES, ComputeSource, JobInfo
 from ..common.resource_spec import ResourceSpec
-from ..common.utils import format_walltime, parse_walltime
+from ..common.utils import format_walltime, parse_walltime, write_atomic
 from .gpu_planner import jobs_manifest_entries
 from .scheduler_queue import (
     Reservation,
@@ -181,6 +181,27 @@ class SlurmBase(ComputeSource):
         tracked = {**self.completed_jobs, **self.active_jobs}
         return {job: tracked[job].status for job in job_ids}
 
+    async def _queued_id(self, job_name: str, script: str) -> str | None:
+        """The one live job named ``job_name`` that runs ``script`` (a path unique to the
+        sweep; a chain's finished chunks share both, hence live only), or None."""
+        user = self.slurm_user or getpass.getuser()
+        argv = ["squeue", "-h", "-u", user, "-n", job_name, "-o", "%i %T %o"]
+        rc, out, _ = await self._sh(argv)
+        rows = [line.split() for line in out.splitlines()] if rc == 0 else []
+        ids = {
+            strip_array_suffix(row[0])
+            for row in rows
+            if row[2:] == [script] and SLURM_STATE_MAP.get(row[1]) not in TERMINAL_STATES
+        }
+        return ids.pop() if len(ids) == 1 else None
+
+    async def _queued_chunk(self, job_name: str, script: str) -> str | None:
+        """A chain's chunk already queued, by a driver that stopped between its sbatch and its
+        manifest: the next driver adopts it rather than queueing the chunk twice."""
+        if job_id := await self._queued_id(job_name, script):
+            logger.warning(f"{job_name}: adopting job {job_id}, queued by a driver that stopped")
+        return job_id
+
     async def _write_manifest(
         self,
         job_ids: list[str],
@@ -207,7 +228,7 @@ class SlurmBase(ComputeSource):
             manifest |= {"resumable": resumable_manifest, "chain": chain}
         if self.sweep_dir is not None:
             try:
-                (self.sweep_dir / ".hsm_manifest.json").write_text(json.dumps(manifest, indent=2))
+                write_atomic(self.sweep_dir / ".hsm_manifest.json", json.dumps(manifest, indent=2))
             except OSError as e:
                 logger.warning(f"could not write the manifest: {e}")
 
