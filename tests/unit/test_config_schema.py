@@ -140,9 +140,31 @@ class TestConfigWarnings:
         (warning,) = config_warnings({"hpc": {}})
         assert warning == "HSM config: `hpc` is not a known key, so it is ignored"
 
+    def test_hydra_overrides_names_are_checked(self):
+        assert config_warnings({"hydra_overrides": ["output.dir", "hydra.run.dir"]}) == []
+        (warning,) = config_warnings({"hydra_overrides": ["output.dir", "wandb_group"]})
+        assert "`hydra_overrides: wandb_group` is not a known key" in warning
+        assert "did you mean `hydra_overrides: wandb.group`?" in warning
+
+    @pytest.mark.parametrize(
+        ("value", "keys"),
+        [
+            (None, None),  # unset: every source appends all of HSM's overrides
+            ([], ()),
+            (["hydra.run.dir", "output.dir"], ("hydra.run.dir", "output.dir")),
+            (["wandb_group", "output.dir", {"x": 1}], ("output.dir",)),  # unknowns dropped
+            ("output.dir", ("output.dir",)),
+        ],
+    )
+    def test_hydra_overrides_getter(self, value, keys):
+        cfg = {} if value is None else {"hydra_overrides": value}
+        assert HSMConfig(cfg).get_hydra_overrides() == keys
+
     def test_non_mapping_blocks_do_not_crash(self):
-        bad = {"local": "x", "distributed": {"remotes": ["uzh"]}}
-        assert config_warnings(bad, {"sweep": None}) == []
+        bad = {"local": "x", "distributed": {"remotes": ["uzh"]}, "hydra_overrides": 5}
+        assert config_warnings(bad, {"sweep": None}) == [
+            "HSM config: `hydra_overrides: 5` is not a known key, so it is ignored"
+        ]
 
 
 class TestCheckPaths:

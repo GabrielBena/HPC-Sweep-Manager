@@ -9,6 +9,7 @@ from typing import Any, Optional
 
 from .resource_spec import ResourceSpec
 from .resumable import ResumableConfig
+from .templating import HYDRA_OVERRIDES
 from .yaml_loader import load_yaml
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,8 @@ _SHARED = {"remote_root", "rsync_excludes", "keep_remote_on_success", "conda_env
 
 # The keys each block knows (R4); config_warnings reports any other one, since it is ignored.
 KNOWN_KEYS = dict(
-    config={"local", "slurm", "distributed", "paths", "project", "wandb", "metadata"},
+    config={"local", "slurm", "distributed", "paths", "project", "wandb", "metadata"}
+    | {"hydra_overrides"},
     local={"walltime", "cpus_per_task", "mem", "gpus", "pre_script", "visible_gpus", "sweeps_root"},
     slurm=_SPEC_KEYS | {"qos_whitelist", "max_array_size", "speed_factors"},
     distributed={"enabled", "remotes", "local_max_jobs", *_SHARED},
@@ -49,6 +51,7 @@ KNOWN_KEYS = dict(
     paths={"conda_env", "train_script", "config_dir", "output_dir", "python_interpreter"},
     project={"name", "root"},
     wandb={"project", "entity"},
+    hydra_overrides=frozenset(HYDRA_OVERRIDES),
     sweep_file={"sweep", "defaults", "metadata", "script", "complete", "resumable"},
     sweep={"grid", "paired", "cost_param", "cost_map", "resumable"},
 )
@@ -79,6 +82,9 @@ def config_warnings(config: dict | None, sweep: dict | None = None) -> list[str]
     for b in blocks:
         other = {"local": "slurm", "slurm": "local"}.get(b)
         msgs += _unknown(cfg.get(b), K[b], f"{b}.", other and {f"{other}.": K[other]})
+    if (names := cfg.get("hydra_overrides")) is not None:
+        names = dict.fromkeys(map(str, names if isinstance(names, list) else [names]))
+        msgs += _unknown(names, K["hydra_overrides"], "hydra_overrides: ")
     remotes = _sub(cfg.get("distributed"), "remotes")
     for alias, remote in remotes.items() if isinstance(remotes, dict) else ():
         p = f"distributed.remotes.{alias}."  # `gpus` is known at both levels: allowlist, count
@@ -430,6 +436,16 @@ class HSMConfig:
         if script and not (here(root or ".") / here(script)).is_file():
             missing.append((key, script))
         return [f"{k} = {v!r} does not exist on this machine" for k, v in missing]
+
+    def get_hydra_overrides(self) -> tuple[str, ...] | None:
+        """Which of HSM's overrides each task gets (``hydra_overrides:``, R3), or ``None`` when
+        unset: every source then appends all of them. Unknown names are dropped (and warned
+        about by :func:`config_warnings`)."""
+        keys = self.config_data.get("hydra_overrides")
+        if keys is None:
+            return None
+        keys = keys if isinstance(keys, list) else [keys]
+        return tuple(k for k in keys if isinstance(k, str) and k in HYDRA_OVERRIDES)
 
     def get_wandb_config(self) -> dict[str, Any]:
         """Get wandb configuration from config."""

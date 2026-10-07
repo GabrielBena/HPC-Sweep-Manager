@@ -189,9 +189,9 @@ WANDB_GROUP="{{ sweep_id }}"
 {% endif %}
 
 {% if resumable and resume_from_present and resume_arg %}
-COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR {{ resume_arg }}=$HSM_RESUME_FROM"
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON {{ task_overrides(hydra_overrides, "$WANDB_GROUP", "$TASK_OUTPUT_DIR") }} {{ resume_arg }}=$HSM_RESUME_FROM"
 {% else %}
-COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON wandb.group=$WANDB_GROUP output.dir=$TASK_OUTPUT_DIR"
+COMMAND="{{ python_path }} {{ script_path }} $PARAMS_JSON {{ task_overrides(hydra_overrides, "$WANDB_GROUP", "$TASK_OUTPUT_DIR") }}"
 {% endif %}
 echo "Executing: $COMMAND"
 echo "$COMMAND" > "$TASK_OUTPUT_DIR/command.txt"

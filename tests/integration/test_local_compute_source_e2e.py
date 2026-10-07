@@ -236,3 +236,15 @@ async def test_pre_script_lines_execute(tmp_path, no_gpus):
     final = await src.wait_for_all(poll_interval=0.05)
     assert final == {job_id: "COMPLETED"}
     assert side.read_text().strip() == "hello"
+
+
+async def test_the_project_picks_the_overrides(configured_source, tmp_path):  # R3
+    src, _, sentinel = configured_source
+    src.hydra_overrides = ("hydra.run.dir",)
+    assert await src.setup(tmp_path / "sweep", "test_sweep")
+    await src.submit_job({"seed": 1}, "task_001", "test_sweep")
+    await src.wait_for_all(poll_interval=0.05)
+
+    (row,) = [json.loads(line) for line in sentinel.read_text().splitlines()]
+    task = tmp_path / "sweep" / "tasks" / "task_001"
+    assert row["argv"] == ["seed=1", f"hydra.run.dir={task}/.hydra_run"]

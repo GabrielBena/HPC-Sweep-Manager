@@ -25,6 +25,7 @@ class FakeSource:
 
     name = "fake"
     source_type = "fake_slurm"
+    hydra_overrides = ("wandb.group", "output.dir", "hydra.run.dir")
 
     def __init__(self, progress_script: list[ChunkProgress], *, archives: bool | None = None):
         self._script = list(progress_script)
@@ -337,6 +338,7 @@ class TestReviewFixes:
         )
         last = src.persist_calls[-1]["chain"]
         assert last["wandb_group"] == "grp"
+        assert last["hydra_overrides"] == ["wandb.group", "output.dir", "hydra.run.dir"]
         assert last["last_done_count"] == 2
         assert last["last_checkpoint_mtime"] == 250.0
 

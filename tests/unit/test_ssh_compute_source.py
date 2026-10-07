@@ -435,6 +435,17 @@ class TestSubmit:
         [upload] = [c["input"] for c in fake_conn.launches()]
         assert "\nexport CUDA_VISIBLE_DEVICES=\n" in upload
 
+    async def test_the_project_picks_the_overrides(self, tmp_path):  # R3
+        fake_conn = FakeConn()
+        src = _make_src(tmp_path, fake_conn=fake_conn)
+        src.hydra_overrides = ("output.dir",)
+        await src.setup(tmp_path / "sweep", "test_sweep")
+        await src.submit_job({"i": 1}, "task_001", "test_sweep")
+
+        [upload] = [c["input"] for c in fake_conn.launches()]
+        command = next(line for line in upload.splitlines() if line.startswith("COMMAND="))
+        assert command.endswith('/tasks/task_001"') and "wandb.group" not in command
+
     async def test_slot_back_pressure(self, tmp_path):
         """The third submission waits, polling, until a task finishes and frees its slot."""
         fake_conn = FakeConn()

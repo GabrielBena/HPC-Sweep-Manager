@@ -96,9 +96,11 @@ class TestSetup:
     async def test_setup_delegates_to_children(self, tmp_path):
         a, b = MockChild("a"), MockChild("b")
         src = DistributedComputeSource(child_sources=[a, b])
+        src.hydra_overrides = ("output.dir",)  # the project's pick reaches every child (R3)
         ok = await src.setup(tmp_path / "sweep", "sweep_test")
         assert ok is True
         assert a.setup_called and b.setup_called
+        assert a.hydra_overrides == b.hydra_overrides == ("output.dir",)
         assert src.stats.health_status == "healthy"
         assert src.sweep_id == "sweep_test"
 

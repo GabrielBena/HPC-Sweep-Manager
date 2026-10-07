@@ -207,6 +207,8 @@ class DistributedComputeSource(ComputeSource):
         """Set every child up; one that fails gets no tasks (and is cleaned up)."""
         if not self._child_sources and self._hsm_config is not None:
             await self._build_children_from_config()
+        for child in self._child_sources:
+            child.hydra_overrides = self.hydra_overrides
         sweep_dir.mkdir(parents=True, exist_ok=True)
         results = await asyncio.gather(
             *(c.setup(sweep_dir, sweep_id) for c in self._child_sources), return_exceptions=True

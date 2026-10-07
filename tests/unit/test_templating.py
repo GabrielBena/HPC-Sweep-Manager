@@ -7,6 +7,7 @@ import pytest
 from hpc_sweep_manager.core.common.templating import (
     params_to_hydra_args,
     render_template,
+    task_overrides,
 )
 from hpc_sweep_manager.core.hpc.slurm_compute_source import _python_needs_conda_init
 
@@ -396,3 +397,29 @@ class TestModuleInit:
         env = {"PATH": "/usr/bin:/bin", "LMOD_PKG": str(tmp_path)}  # no exported `module`
         r = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True)
         assert (r.returncode, r.stdout) == (0, "loaded load cuda\n"), r.stderr
+
+
+class TestHydraOverrides:
+    """R3: one switch (`hydra_overrides:`) picks HSM's overrides. By default each task also gets
+    its own Hydra run dir, so tasks that start in the same second never share one."""
+
+    def test_task_overrides_keep_the_given_order(self):
+        assert task_overrides(["hydra.run.dir", "wandb.group"], "g", "/t") == (
+            "hydra.run.dir=/t/.hydra_run wandb.group=g"
+        )
+        assert task_overrides((), "g", "/t") == ""
+
+    def _command(self, template, **kw):
+        kw = {**TestCondaInitPartialRenders._BASE_KWARGS, "remote_task_dir": "/tmp/task", **kw}
+        r = render_template(template, uses_conda=False, job_id="1", cuda_visible_devices=None, **kw)
+        return next(line for line in r.splitlines() if line.startswith("COMMAND="))
+
+    @pytest.mark.parametrize("template", TestModuleInit.TEMPLATES)
+    def test_each_template_appends_the_chosen_overrides(self, template):
+        array = template == "slurm_array.sh.j2"
+        d, g = ("$TASK_OUTPUT_DIR", "$WANDB_GROUP") if array else ("/tmp/task", "g")
+        default = f" wandb.group={g} output.dir={d} hydra.run.dir={d}/.hydra_run" + '"'
+        assert self._command(template).endswith(default)
+        only = self._command(template, hydra_overrides=("output.dir",))
+        assert only.endswith(f' output.dir={d}"') and "wandb.group" not in only
+        assert "output.dir" not in self._command(template, hydra_overrides=())

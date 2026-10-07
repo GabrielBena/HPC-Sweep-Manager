@@ -269,6 +269,26 @@ class TestSubmit:
             await src.submit_job(params={"seed": 0}, job_name="task_0", sweep_id="sweep_1")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["individual", "array"])
+    async def test_the_project_picks_the_overrides(self, tmp_path, mode):  # R3
+        conn = FakeConn(responder=_setup_ok_responder())
+        conn.add("sbatch", _Result(0, stdout="Submitted batch job 7\n"))
+        src = _StubSrc(
+            name="uzh",
+            host="uzh",
+            project_dir=str(tmp_path),
+            script_path="train.py",
+            fake_conn=conn,
+        )
+        src.hydra_overrides = ("output.dir",)
+        await src.setup(tmp_path / "sweep", "sweep_1")
+        await src.submit_batch([{"seed": 0}], "sweep_1", mode=mode, job_name_prefix="sweep_1")
+        cats = [c for c in conn.run_calls if c["cmd"].startswith("cat > ")]
+        [body] = [c["input"] for c in cats if c["cmd"].rstrip("'\"").endswith(".slurm")]
+        command = next(line for line in body.splitlines() if line.startswith("COMMAND="))
+        assert "output.dir=" in command and "wandb.group" not in command
+
+    @pytest.mark.asyncio
     async def test_submit_array_writes_params_and_returns_id(self, tmp_path):
         conn = FakeConn(responder=_setup_ok_responder())
         conn.add("sbatch", _Result(0, stdout="Submitted batch job 999\n"))

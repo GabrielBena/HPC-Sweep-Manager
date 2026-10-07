@@ -27,7 +27,7 @@ from ..core.common.sweep_orchestrator import (
     run_sweep_async,
     spec_from_cli,
 )
-from ..core.common.templating import params_to_hydra_args
+from ..core.common.templating import params_to_hydra_args, task_overrides
 from ..core.common.yaml_loader import load_yaml
 from ..core.hpc.slurm_base import cpu_only
 from .common import common_options
@@ -598,6 +598,14 @@ def _run_sweep_via_orchestrator(
         f"[green]Execution backend: {source.source_type} "
         f"(mode={resolved_mode}, submission={sub_mode})[/green]"
     )
+    if (overrides := hsm_config.get_hydra_overrides() if hsm_config else None) is not None:
+        source.hydra_overrides = overrides
+    else:  # the R3 default differs from v0.1: say so until the project picks
+        console.print(
+            "[dim]Each task now also gets hydra.run.dir=<task_dir>/.hydra_run, so tasks no "
+            "longer share outputs/<date>/<time>. List the overrides you want under "
+            "`hydra_overrides:` in .hsm/config.yaml to choose.[/dim]"
+        )
     if resolved_mode != mode:
         console.print(f"[cyan](mode auto-resolved from {mode!r} → {resolved_mode!r})[/cyan]")
     if source.source_type == "ssh_slurm_remote":
@@ -711,10 +719,9 @@ def _run_sweep_via_orchestrator(
                 console.print(f"[bold]W&B group:[/bold]  {group}")
 
             if combinations:
-                # The wrapper templates also append wandb.group=/output.dir= per
-                # task; mirror them (with placeholders) so the shown command
-                # matches what actually runs rather than just the param subset.
-                suffix = f"wandb.group={group or '<sweep_id>'} output.dir=<task_dir>"
+                # The wrapper templates also append HSM's overrides per task; mirror
+                # them (with placeholders) so the shown command matches what runs.
+                suffix = task_overrides(source.hydra_overrides, group or "<sweep_id>", "<task_dir>")
                 console.print("\n[bold]Command (task 1, as the wrapper runs it):[/bold]")
                 console.print(f"  cd {project_dir} && \\")
                 console.print(
@@ -1397,6 +1404,7 @@ async def _advance_via_manifest(
     from ..core.common.param_generator import ParameterGenerator
     from ..core.common.resumable import ResumableConfig
     from ..core.common.sweep_orchestrator import run_resumable_sweep_async
+    from ..core.common.templating import LEGACY_HYDRA_OVERRIDES
     from ..core.remote.push_exec import resolve_run_prefix
     from ..core.remote.ssh_slurm_compute_source import SSHSlurmComputeSource
 
@@ -1438,6 +1446,7 @@ async def _advance_via_manifest(
         source._remote_scripts_dir = f"{source._remote_sweep_dir}/scripts"
         source._remote_code_dir = manifest.get("remote_code_dir")
         source._run_prefix = resolve_run_prefix(source.conda_env, source.python_path)
+        source.hydra_overrides = tuple(chain.get("hydra_overrides", LEGACY_HYDRA_OVERRIDES))
 
         statuses = await source.adopt(last_job_ids, jobs=manifest.get("jobs") or ())
         running = [j for j, s in statuses.items() if s not in TERMINAL_STATES]

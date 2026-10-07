@@ -416,6 +416,18 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   for `advance`. **For consumers:** `hsm sweep advance` is now safe beside a live
   launcher, so a cron of it needs no care: it prints "Another process drives chain …"
   and exits 0.
+- **Each task gets its own Hydra run dir, and one switch picks HSM's overrides (R3, FR#14).**
+  Tasks that started in the same second shared Hydra's `outputs/<date>/<time>` in the shared
+  code dir; one died with `PermissionError` on its `mkdir`. Every task command now also ends
+  in `hydra.run.dir=<task_dir>/.hydra_run`, so Hydra's `.hydra/` config and job log land in
+  the task dir and come back with it. The new project-config key `hydra_overrides:` lists
+  which of HSM's overrides each task gets, in order; the default is
+  `[wandb.group, output.dir, hydra.run.dir]`. A project without a `wandb` config drops
+  `wandb.group` from the list, so `wandb.group=` is no longer forced on every project (a known
+  limitation until now). Unknown names are dropped with a warning; a resumable chain keeps the
+  list it was launched with. **For consumers:** the command gains one trailing override, and
+  `hsm sweep run` says so until the project sets `hydra_overrides:`. A script that is not a
+  Hydra app can set `hydra_overrides: [wandb.group, output.dir]` to get the old command.
 
 ### Removed (2026-10 maintenance pass)
 
