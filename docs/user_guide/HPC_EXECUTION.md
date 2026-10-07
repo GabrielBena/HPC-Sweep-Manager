@@ -609,7 +609,10 @@ the rest survive; it never rewrites a config file that has comments (it
 prints the YAML to paste instead).
 
 An unknown key in `spec:` (or in the `slurm:` / `local:` blocks) is dropped
-with a warning that names it; the rest of the block still applies. An
+with a warning that names it; the rest of the block still applies. `hsm sweep run`
+warns about an unknown key anywhere in `.hsm/config.yaml` or the sweep file, with
+the key it probably meant: a remote-level `pre_script` gets "did you mean
+`distributed.remotes.<alias>.spec.pre_script`?". An
 invalid value of a known key (`gpus: -1`, `gpu_type` without `gpus`) stops
 the run with an error naming the block.
 

@@ -9,13 +9,14 @@ from typing import TYPE_CHECKING, Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 
 if TYPE_CHECKING:
     from ..core.common.config import HSMConfig, SweepConfig
 
 import asyncio
 
-from ..core.common.config import HSMConfig, resolve_sweep_dir
+from ..core.common.config import HSMConfig, config_warnings, resolve_sweep_dir
 from ..core.common.sweep_orchestrator import (
     SUPPORTED_MODES as _ORCHESTRATOR_MODES,
 )
@@ -26,6 +27,7 @@ from ..core.common.sweep_orchestrator import (
     spec_from_cli,
 )
 from ..core.common.templating import params_to_hydra_args
+from ..core.common.yaml_loader import load_yaml
 from ..core.hpc.slurm_base import cpu_only
 from .common import common_options
 from .launch_gate import fair_share_gate
@@ -953,6 +955,15 @@ def run_sweep(
         config = _load_and_validate_config(config_path, console, logger)
         if config is None:
             return
+
+        # Unknown keys are ignored, so say so (R4); a stale path stops the run first (R6).
+        raw = load_yaml(config_path.read_text())
+        for warning in config_warnings(hsm_config.config_data if hsm_config else None, raw):
+            console.print(f"[yellow]Warning: {escape(warning)}[/yellow]")
+        if missing := (hsm_config or HSMConfig({})).check_paths(config.script):
+            for m in missing:
+                console.print(f"[red]Error: {escape(m)}[/red]")
+            raise SystemExit(2)
 
         if config.complete is not None:
             console.print(

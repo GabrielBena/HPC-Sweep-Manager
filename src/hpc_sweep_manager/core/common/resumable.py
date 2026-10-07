@@ -12,7 +12,7 @@ runaway guards live in :mod:`.chain`; this module is purely the configuration.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 from .chain import ChainConfig
@@ -22,22 +22,6 @@ logger = logging.getLogger(__name__)
 
 # The per-task crash record the array template keeps (one line per crashed chunk in a row).
 FAILED_MARKER = ".hsm_failed"
-
-# Keys ResumableConfig understands; anything else in a config block is dropped
-# with a warning (tolerant, like ResourceSpec.from_dict).
-_KNOWN_KEYS = frozenset(
-    {
-        "enabled",
-        "chunk_walltime",
-        "signal_grace",
-        "resume_arg",
-        "done_sentinel",
-        "checkpoint_subdir",
-        "max_chunks",
-        "max_consecutive_failures",
-        "max_task_crashes",
-    }
-)
 
 # A per-remote ``resumable:`` block may only carry CLUSTER-bound knobs (the
 # 24h cap is a fact about the pool, not the workload). Workload guards
@@ -164,6 +148,10 @@ class ResumableConfig:
     @classmethod
     def from_manifest(cls, data: dict[str, Any] | None) -> ResumableConfig:
         return cls.from_dict(data)
+
+
+# Keys ResumableConfig understands; any other is dropped with a warning (like ResourceSpec).
+_KNOWN_KEYS = frozenset(f.name for f in fields(ResumableConfig))
 
 
 @dataclass(frozen=True)
