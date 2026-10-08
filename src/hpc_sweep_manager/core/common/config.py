@@ -3,6 +3,7 @@
 import difflib
 import logging
 import os
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Optional
@@ -60,7 +61,9 @@ def _sub(block: Any, key: str) -> Any:
     return block.get(key) if isinstance(block, dict) else None
 
 
-def _unknown(block: Any, known: set, path: str = "", near: dict | None = None) -> list[str]:
+def _unknown(
+    block: Any, known: AbstractSet[str], path: str = "", near: dict | None = None
+) -> list[str]:
     """One message per key of ``block`` outside ``known``, with the key it probably meant:
     the same key in a ``near`` block (``{path prefix: its known keys}``), else a near spelling."""
     out = []
@@ -80,7 +83,7 @@ def config_warnings(config: dict | None, sweep: dict | None = None) -> list[str]
     msgs = _unknown(cfg, K["config"], near={f"{b}.": K[b] for b in blocks})
     for b in blocks:
         other = {"local": "slurm", "slurm": "local"}.get(b)
-        msgs += _unknown(cfg.get(b), K[b], f"{b}.", other and {f"{other}.": K[other]})
+        msgs += _unknown(cfg.get(b), K[b], f"{b}.", {f"{other}.": K[other]} if other else None)
     remotes = _sub(cfg.get("distributed"), "remotes")
     for alias, remote in remotes.items() if isinstance(remotes, dict) else ():
         p = f"distributed.remotes.{alias}."  # `gpus` is known at both levels: allowlist, count
@@ -162,13 +165,13 @@ class SweepConfig:
     paired: list[dict[str, dict[str, list[Any]]]] = field(default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-    script: str = None  # Training script path (optional)
-    complete: str = None  # Completion sweep ID (optional)
+    script: str | None = None  # Training script path (optional)
+    complete: str | None = None  # Completion sweep ID (optional)
     # Heterogeneous GPU scheduling (issue #7): name of a swept param whose
     # value is each task's relative cost, plus an optional value→cost
     # translation (e.g. {5: 7.0, 16: 23.0} — measured hours, ratios matter).
     # Consumed by core/hpc/gpu_planner.task_costs; never enters hydra args.
-    cost_param: str = None
+    cost_param: str | None = None
     cost_map: dict[Any, Any] = field(default_factory=dict)
     # Resumable chained runs (issue #12): the typed knob block (enabled,
     # chunk_walltime, signal_grace, resume_arg, done_sentinel, checkpoint_subdir,

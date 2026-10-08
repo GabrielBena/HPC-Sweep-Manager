@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, cast
 
 import click
 from rich.console import Console
@@ -14,9 +14,11 @@ from rich.markup import escape
 
 if TYPE_CHECKING:
     from ..core.common.config import HSMConfig, SweepConfig
+    from ..core.common.sweep_orchestrator import ChainSource
 
 import asyncio
 
+from ..core.common.compute_source import SubmissionMode
 from ..core.common.config import HSMConfig, config_warnings, resolve_sweep_dir
 from ..core.common.sweep_orchestrator import (
     SUPPORTED_MODES as _ORCHESTRATOR_MODES,
@@ -172,7 +174,12 @@ def _detect_project_paths(
     else:
         script_path = detector.detect_train_script()
 
-    return python_path, script_path, project_dir
+    if script_path is None:
+        raise click.ClickException(
+            "No training script found: set `paths.train_script` in .hsm/config.yaml, "
+            "or `script:` in the sweep file."
+        )
+    return str(python_path or "python"), str(script_path), project_dir
 
 
 def _describe_gpu_allowlist(allow) -> str:
@@ -500,7 +507,7 @@ def _run_sweep_via_orchestrator(
     logger: logging.Logger,
     remote_alias: str | None = None,
     gpus_arg: str | None = None,
-    remote_submission: str | None = None,
+    remote_submission: SubmissionMode | None = None,
     costs: list | None = None,
     sweep_resumable_block: dict | None = None,
     resumable_flag: bool = False,
@@ -777,7 +784,7 @@ def _run_sweep_via_orchestrator(
         try:
             result = asyncio.run(
                 run_resumable_sweep_async(
-                    source=source,
+                    source=cast("ChainSource", source),  # resumable is gated to the Slurm sources
                     sweep_dir=sweep_dir,
                     sweep_id=sweep_id,
                     params_list=combinations,
@@ -923,7 +930,7 @@ def run_sweep(
     hsm_config: Optional["HSMConfig"] = None,
     remote_alias: str | None = None,
     gpus_arg: str | None = None,
-    remote_submission: str | None = None,
+    remote_submission: SubmissionMode | None = None,
     resumable_flag: bool = False,
     chunk_walltime: str | None = None,
     force: bool = False,
@@ -1141,7 +1148,7 @@ def run_cmd(
     quiet,
 ):
     """Run parameter sweep."""
-    remote_submission = None
+    remote_submission: SubmissionMode | None = None
     if mode in (None, "auto"):
         mode = "remote" if remote_alias else "auto"  # with --remote, auto means remote
     elif mode == "remote" and not remote_alias:
@@ -1211,7 +1218,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
     try:
         # Idempotency: if the remote sweep dir is gone, a prior successful
         # collect already pulled + archived + cleaned it. Re-running is a no-op.
-        exists = await source._ssh_run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
+        exists = await source._ssh_run(f"test -d {shlex.quote(manifest['remote_sweep_dir'])}")
         if exists.returncode == 1:  # test -d says no (None: unknown, go on)
             console.print(
                 f"[green]Remote sweep dir already cleaned on {source.host} — "
@@ -1280,7 +1287,7 @@ async def _collect_ssh(sweep_dir: Path, manifest: dict, console: Console) -> Non
     source = SSHComputeSource.from_manifest(manifest, sweep_dir)
     try:
         source._conn = await source._open_connection()
-        found = await source._run(f"test -d {shlex.quote(source._remote_sweep_dir)}")
+        found = await source._run(f"test -d {shlex.quote(manifest['remote_sweep_dir'])}")
         if found.returncode == 1:  # a collect already pulled and cleaned it
             console.print(f"[green]Nothing left to collect on {source.host}.[/green]")
             return

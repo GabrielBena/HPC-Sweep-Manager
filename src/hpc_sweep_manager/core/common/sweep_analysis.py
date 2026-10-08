@@ -138,7 +138,7 @@ class SweepCompletionAnalyzer:
         # Find all task directories, whichever scheme named them (task_index)
         task_dirs = sorted(
             (d for d in tasks_dir.iterdir() if d.is_dir() and task_index(d.name) is not None),
-            key=lambda d: task_index(d.name),
+            key=lambda d: task_index(d.name) or 0,  # never None: filtered above
         )
 
         completed_tasks = []
@@ -277,7 +277,7 @@ class SweepCompletionAnalyzer:
 
         # If source_mapping.yaml doesn't exist or has no task assignments,
         # fall back to task directory scanning (useful for PBS array jobs)
-        task_assignments = self.source_mapping.get("task_assignments", {})
+        task_assignments = (self.source_mapping or {}).get("task_assignments", {})
         if not task_assignments or overwrite_source_mapping:
             logger.info("No task assignments in source_mapping.yaml, using task directory scanning")
             return self.analyze_from_task_directories(overwrite_source_mapping, verify_running)
@@ -461,7 +461,7 @@ class SweepCompletionAnalyzer:
         return verified_combinations
 
     def _update_source_mapping_from_directories(
-        self, task_statuses: dict[str, str], overwrite: bool = False
+        self, task_statuses: dict[str, dict[str, Any]], overwrite: bool = False
     ):
         """Update source_mapping.yaml with actual task statuses from directories.
 
@@ -471,7 +471,7 @@ class SweepCompletionAnalyzer:
         try:
             if not self.source_mapping_path.exists() or overwrite:
                 # Create initial source mapping if it doesn't exist
-                mapping_data = {
+                mapping_data: dict[str, Any] = {
                     "sweep_metadata": {
                         "total_tasks": len(self.original_combinations),
                         "compute_sources": ["HPC"],
@@ -531,7 +531,7 @@ class SweepCompletionAnalyzer:
             items.append((key, value))
         return str(tuple(items))
 
-    def _get_actual_task_status(self, task_id: str, verify_running: bool = True) -> str:
+    def _get_actual_task_status(self, task_id: str, verify_running: bool = True) -> str | None:
         """Get the actual status of a task from its directory.
 
         Args:
@@ -682,7 +682,7 @@ class SweepCompletionAnalyzer:
         return False
 
 
-def find_incomplete_sweeps(sweeps_root: Path = None) -> list[dict[str, Any]]:
+def find_incomplete_sweeps(sweeps_root: Path | None = None) -> list[dict[str, Any]]:
     """Find all incomplete sweeps in the outputs directory."""
     if sweeps_root is None:
         sweeps_root = Path("sweeps/outputs")

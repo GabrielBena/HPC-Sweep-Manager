@@ -582,6 +582,7 @@ def init_project(
     old_config_path = project_path / "sweeps" / "hsm_config.yaml"
     migrating = False
 
+    config: dict = {}
     if old_config_path.exists():
         console.print("\n[yellow]📦 Found existing config at sweeps/hsm_config.yaml[/yellow]")
         console.print("[cyan]Migrating to new .hsm/ structure...[/cyan]\n")
@@ -617,7 +618,6 @@ def init_project(
                 console.print(f"  - {issue}")
 
         # Interactive configuration if requested
-        config = {}
         if interactive:
             console.print("\n[bold]Interactive Configuration[/bold]")
             config = _interactive_configuration(project_info, console)

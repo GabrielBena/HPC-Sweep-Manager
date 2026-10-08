@@ -6,6 +6,7 @@ import re
 import shlex
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import click
 from rich.console import Console
@@ -71,7 +72,7 @@ def _remotes_block(data: dict, path: Path) -> dict:
     """The project config's ``distributed.remotes`` (created if absent); malformed → error."""
     if data.get("distributed") is None:
         data["distributed"] = {"enabled": False}
-    dist = data["distributed"]
+    dist: Any = data["distributed"]
     if isinstance(dist, dict) and dist.get("remotes") is None:
         dist["remotes"] = {}
     remotes = dist.get("remotes") if isinstance(dist, dict) else None
@@ -218,7 +219,7 @@ def add(name: str, host: str, key: str, port: int, max_jobs: int, enabled: bool 
 
     # Only persist connection fields that were explicitly given — a bare entry
     # resolves entirely from ~/.ssh/config via the alias.
-    remote_config = {} if enabled is None else {"enabled": enabled}
+    remote_config: dict[str, Any] = {} if enabled is None else {"enabled": enabled}
     if host:
         remote_config["host"] = host
     if port:
@@ -536,7 +537,7 @@ def clean(name: str, all_projects: bool, yes: bool):
         connect = create_ssh_connection(host, remote_cfg.get("ssh_key"), remote_cfg.get("ssh_port"))
         async with await connect as conn:
             probe = _clean_probe(root, project)
-            out = (await conn.run(probe, check=False)).stdout or ""
+            out = str((await conn.run(probe, check=False)).stdout or "")
             target, exists, why = _clean_verdict(out, all_projects)
             if why:
                 raise click.ClickException(
