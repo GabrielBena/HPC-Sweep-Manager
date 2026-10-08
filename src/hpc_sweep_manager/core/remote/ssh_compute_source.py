@@ -123,7 +123,7 @@ class SSHComputeSource(ComputeSource):
         script_path: str = "",
         remote_root: str = "~/.hsm/runs",
         max_parallel_jobs: int = 1,
-        gpus: None | int | Sequence[int] = None,
+        gpus: None | str | int | Sequence[int] = None,
         default_spec: ResourceSpec | None = None,
         rsync_excludes: Sequence[str] | None = None,
         keep_remote_on_success: bool = False,
@@ -413,6 +413,7 @@ class SSHComputeSource(ComputeSource):
         self.stats.total_submitted += 1
         if self._manifest:  # listed before it starts: a collect never removes it unknowingly
             self._write_manifest()
+        out = ""
         for attempt in range(1, LAUNCH_TRIES + 1):
             try:
                 out = ((await self._run(launch, input=script_content)).stdout or "").strip()
@@ -762,7 +763,7 @@ def build_ssh_source(
     project_dir: str,
     script_path: str,
     default_spec: ResourceSpec | None = None,
-    gpus_override: None | int | Sequence[int] = None,
+    gpus_override: None | str | int | Sequence[int] = None,
     conda_env_override: str | None = None,
     project_conda_env: str | None = None,
 ) -> SSHComputeSource:
@@ -811,7 +812,7 @@ def build_ssh_source(
     )
 
     if gpus_override is not None:
-        gpus_value: None | int | Sequence[int] = gpus_override
+        gpus_value: None | str | int | Sequence[int] = gpus_override
     else:
         gpus_value = remote_cfg.get("gpus")
         if isinstance(gpus_value, str):  # YAML `gpus: "1,2"` / `ALL` / `cpu`, never char by char

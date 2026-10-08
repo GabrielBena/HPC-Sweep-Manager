@@ -295,8 +295,7 @@ class SlurmComputeSource(SlurmBase):
             speed_factors=self.speed_factors,
             costs=costs,
         )
-        if resumable is not None:
-            cap = resumable.config.chunk_walltime
+        if resumable is not None and (cap := resumable.config.chunk_walltime):
             submissions = [replace_sub_walltime(sub, cap) for sub in submissions]
         job_ids: list[str] = []
         try:

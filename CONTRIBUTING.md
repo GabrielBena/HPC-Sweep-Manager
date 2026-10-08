@@ -8,7 +8,7 @@ rule: **`main` stays green.** CI runs the test suite on every PR; don't merge re
 ```bash
 git clone git@github.com:GabrielBena/HPC-Sweep-Manager.git
 cd HPC-Sweep-Manager
-pip install -e ".[dev]"     # editable install + pytest/ruff/pre-commit
+pip install -e ".[dev]"     # editable install + pytest/ruff/pyright/pre-commit
 pre-commit install          # ruff on commit, the no-push-to-main guard on push
 ```
 
@@ -66,11 +66,13 @@ Keep `CHANGELOG.md` updated under `## [Unreleased]` for user-facing changes.
 
 ## Gates
 
-ruff is the style SSOT. `[tool.ruff]` in `pyproject.toml` and the pinned `ruff==0.15.13` match loom's. CI's
-`gates` job runs the same pre-commit hooks as a local commit, plus the chunk cap:
+ruff is the style SSOT. `[tool.ruff]` in `pyproject.toml` and the pinned `ruff==0.15.13` match loom's. pyright
+(pinned, standard mode, over `src`: `[tool.pyright]`) is the type gate. CI's `gates` job runs the same
+pre-commit hooks as a local commit, then pyright and the chunk cap:
 
 ```bash
 pre-commit run --all-files                       # ruff + ruff-format, exactly as CI runs them
+pyright                                          # 0 errors over src, as CI requires
 scripts/chunk_size.sh origin/main 150            # this branch's hand-written lines
 git config blame.ignoreRevsFile .git-blame-ignore-revs   # once per clone: blame skips the format commit
 ```

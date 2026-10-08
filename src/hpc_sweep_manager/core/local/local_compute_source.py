@@ -72,7 +72,7 @@ class LocalComputeSource(ComputeSource):
         script_path: str = "",
         project_dir: str = ".",
         default_spec: ResourceSpec | None = None,
-        visible_gpus: None | int | Sequence[int] = None,
+        visible_gpus: None | str | int | Sequence[int] = None,
         conda_env: str | None = None,
     ):
         """Build a local slot-queue compute source.

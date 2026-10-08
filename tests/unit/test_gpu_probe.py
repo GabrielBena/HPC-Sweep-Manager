@@ -60,11 +60,11 @@ class TestProbe:
             stderr = ""
 
         class FakeConn:
-            async def __aenter__(self):
-                return self
+            def close(self):
+                pass
 
-            async def __aexit__(self, *a):
-                return False
+            async def wait_closed(self):
+                pass
 
             async def run(self, cmd, check=False):
                 assert "nvidia-smi" in cmd
@@ -84,11 +84,11 @@ class TestProbe:
             stderr = "nvidia-smi: command not found"
 
         class FakeConn:
-            async def __aenter__(self):
-                return self
+            def close(self):
+                pass
 
-            async def __aexit__(self, *a):
-                return False
+            async def wait_closed(self):
+                pass
 
             async def run(self, cmd, check=False):
                 return FakeResult()

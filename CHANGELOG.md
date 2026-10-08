@@ -451,6 +451,12 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   `{% if %}`. Every production render already passes all the variables its template uses;
   only test helpers had holes (a `cd` with no path, a COMMAND with no interpreter).
 
+- **pyright guards `src` (chore-8).** Standard mode over the library, pinned like ruff and run by
+  CI's gates job; `[tool.pyright]` replaces a `[tool.mypy]` block that never ran (and `mypy`
+  leaves the dev extra). Making it pass changed two behaviours, both for the safer: a sweep
+  with no training script found stops with a clear message instead of crashing later, and a
+  missing interpreter falls back to `python` rather than the string `None`.
+
 ### Removed (2026-10 maintenance pass)
 
 - **Unused heavy dependencies.** HSM no longer installs `wandb`, `pandas`, `numpy`,
