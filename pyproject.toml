@@ -40,7 +40,8 @@ dev = [
     "pytest-asyncio>=0.21.0",
     # ruff is exact-pinned: it is the style SSOT, so CI, pre-commit and the editor name the same version.
     "ruff==0.15.13",
-    "mypy>=1.0.0",
+    # pyright is exact-pinned like ruff: the type gate, the same locally and in CI.
+    "pyright==1.1.414",
     "pre-commit>=3.0.0",
 ]
 
@@ -74,12 +75,11 @@ ignore = ["N803", "N806", "E741"]
 # (chore-6). Drop this line with the file.
 "src/hpc_sweep_manager/cli/configure.py" = ["F841", "E722"]
 
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
+[tool.pyright]
+# The type gate (loom's standard mode) over the library; tests are checked by running them.
+include = ["src"]
+typeCheckingMode = "standard"
+pythonVersion = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

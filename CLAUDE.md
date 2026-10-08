@@ -6,8 +6,8 @@ then dip into [ARCHITECTURE.md](ARCHITECTURE.md) for the design rationale and
 
 ## Process
 
-PRs follow [CONTRIBUTING.md](CONTRIBUTING.md): one open PR per lane, ruff via pre-commit as the
-gate, at most 150 hand-written `src` lines per PR (`scripts/chunk_size.sh`), a CHANGELOG entry,
+PRs follow [CONTRIBUTING.md](CONTRIBUTING.md): one open PR per lane, ruff (pre-commit) and pyright as
+gates, at most 150 hand-written `src` lines per PR (`scripts/chunk_size.sh`), a CHANGELOG entry,
 and a true merge. Until v0.2.0, [the maintenance tracker](docs/dev/maintenance-2026-10.md) lists
 the open rows.
 

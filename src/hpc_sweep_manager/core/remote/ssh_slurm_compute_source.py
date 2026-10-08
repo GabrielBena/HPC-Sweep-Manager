@@ -53,6 +53,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import asyncssh
+from asyncssh.constants import OPEN_REQUEST_SESSION_FAILED
 
 from ..common.chain import ChainState
 from ..common.compute_source import (
@@ -187,11 +188,8 @@ class SSHSlurmComputeSource(SlurmBase):
         self.sweep_dir: Path | None = None
         self.sweep_id: str | None = None
         self._run_prefix: str = "python"
-        # Resumable chains (issue #12): the driver sets _pull_excludes so the
-        # incremental + final tasks/ pulls skip the heavy checkpoint subdir
-        # (it rides the cheap server-side archive instead of the WAN). The
-        # config/state are restored by from_manifest for `hsm sweep advance`.
-        self._pull_excludes: tuple[str, ...] = ()
+        # Resumable chains (issue #12): the config/state are restored by from_manifest for
+        # `hsm sweep advance`; the driver sets _pull_excludes (SlurmBase).
         self._resumable_config: ResumableConfig | None = None
         self._chain_state: ChainState | None = None
         self._down_since: float | None = None  # when the ssh link went down (None: up)
@@ -250,7 +248,7 @@ class SSHSlurmComputeSource(SlurmBase):
                 self._conn.close()
             self._conn = await self._open_connection()
             never_ran = isinstance(e, asyncssh.ChannelOpenError) and (
-                e.code != asyncssh.OPEN_REQUEST_SESSION_FAILED  # an unanswered exec may have run
+                e.code != OPEN_REQUEST_SESSION_FAILED  # an unanswered exec may have run
             )
             if not (resend or never_ran):
                 raise
@@ -703,8 +701,7 @@ class SSHSlurmComputeSource(SlurmBase):
             speed_factors=self.speed_factors,
             costs=costs,
         )
-        if resumable is not None:
-            cap = resumable.config.chunk_walltime
+        if resumable is not None and (cap := resumable.config.chunk_walltime):
             submissions = [replace_sub_walltime(sub, cap) for sub in submissions]
         return [
             await self._submit_one_array(
@@ -832,6 +829,8 @@ class SSHSlurmComputeSource(SlurmBase):
         stuck task or a dead launcher can't strand the tasks that DID finish.
         """
         remote_tasks = f"{self._remote_sweep_dir}/tasks"
+        if self.sweep_dir is None:  # survives python -O, unlike an assert
+            raise RuntimeError("no local sweep dir: setup() or from_manifest() comes first")
         local_tasks = str(self.sweep_dir / "tasks")
         # _pull_excludes is set by the resumable driver to skip the heavy
         # checkpoint subdir (issue #12); empty for ordinary sweeps.
@@ -997,7 +996,7 @@ class SSHSlurmComputeSource(SlurmBase):
         archive_target = f"{archive_base}/{self.sweep_id}"
         cmd = (
             f"mkdir -p {shlex.quote(archive_target)} && "
-            f"rsync -a {shlex.quote(self._remote_sweep_dir + '/')} "
+            f"rsync -a {shlex.quote(f'{self._remote_sweep_dir}/')} "
             f"{shlex.quote(archive_target + '/')}"
         )
         if snapshot := own_snapshot(self._remote_code_dir, self.sweep_id):

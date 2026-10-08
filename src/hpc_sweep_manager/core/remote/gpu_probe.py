@@ -100,12 +100,16 @@ async def probe_gpus(
     (a CPU node), and raises only on connection failure — so callers can
     distinguish "reached it, no GPUs" from "couldn't reach it".
     """
-    async with await create_ssh_connection(host, ssh_key, ssh_port) as conn:
+    conn = await create_ssh_connection(host, ssh_key, ssh_port)
+    try:
         result = await conn.run(NVIDIA_SMI_QUERY, check=False)
-        if result.returncode != 0:
-            logger.debug(
-                f"nvidia-smi unavailable on {host} (rc={result.returncode}): "
-                f"{(result.stderr or '').strip()}"
-            )
-            return []
-        return parse_nvidia_smi_csv(result.stdout or "")
+    finally:  # what `async with conn` does, minus the exit that could (by its type) swallow
+        conn.close()
+        await conn.wait_closed()
+    if result.returncode != 0:
+        logger.debug(
+            f"nvidia-smi unavailable on {host} (rc={result.returncode}): "
+            f"{str(result.stderr or '').strip()}"
+        )
+        return []
+    return parse_nvidia_smi_csv(str(result.stdout or ""))

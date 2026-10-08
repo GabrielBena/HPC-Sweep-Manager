@@ -15,12 +15,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-try:
-    import asyncssh
-
-    ASYNCSSH_AVAILABLE = True
-except ImportError:  # pragma: no cover - asyncssh is a hard runtime dep
-    ASYNCSSH_AVAILABLE = False
+import asyncssh
 
 logger = logging.getLogger(__name__)
 

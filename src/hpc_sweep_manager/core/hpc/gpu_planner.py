@@ -380,7 +380,7 @@ def build_array_submissions(
     return submissions
 
 
-def split_throttle(throttle: int | None, sizes: Sequence[int]) -> list[int | None]:
+def split_throttle(throttle: int | None, sizes: Sequence[int]) -> Sequence[int | None]:
     """Share one sweep-wide ``array_throttle`` across its sub-arrays, in proportion to their
     sizes (each at least 1): a throttle caps the sweep, not each GPU type's array."""
     if not throttle or len(sizes) < 2:

@@ -60,6 +60,12 @@ _RETIRED_KEYS = (
 )
 
 
+def _script_path(hsm_config, detector) -> str:
+    if not (script := hsm_config.get_default_script_path() or detector.detect_train_script()):
+        raise RuntimeError("No training script: set `paths.train_script` in .hsm/config.yaml")
+    return str(script)
+
+
 def _build_local_child(hsm_config, distributed_cfg: dict) -> ComputeSource | None:
     """Construct the local child source from config, or None on failure."""
     from ..common.path_detector import PathDetector
@@ -68,7 +74,7 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> ComputeSource | Non
     try:
         detector = PathDetector()
         python_path = hsm_config.get_default_python_path() or detector.detect_python_path()
-        script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
+        script_path = _script_path(hsm_config, detector)
         project_dir = hsm_config.get_project_root() or str(Path.cwd())
 
         local_max_jobs = distributed_cfg.get("local_max_jobs", 1)
@@ -76,7 +82,7 @@ def _build_local_child(hsm_config, distributed_cfg: dict) -> ComputeSource | Non
         return LocalComputeSource(
             name="local",
             max_parallel_jobs=local_max_jobs,
-            python_path=python_path,
+            python_path=str(python_path or "python"),
             script_path=script_path,
             project_dir=project_dir,
             # Like `--mode local`: the `local:` block's per-task spec and GPU allowlist
@@ -108,7 +114,7 @@ async def _build_ssh_children(hsm_config, remotes: dict) -> list[ComputeSource]:
 
     detector = PathDetector()
     project_dir = hsm_config.get_project_root() or str(Path.cwd())
-    script_path = hsm_config.get_default_script_path() or detector.detect_train_script()
+    script_path = _script_path(hsm_config, detector)
     distributed_cfg = dict(hsm_config.config_data.get("distributed", {}))
     # paths.conda_env is the widest fallback (push_exec.remote_interpreter); the getattr
     # handles FakeConfig in tests.
@@ -387,7 +393,9 @@ class DistributedComputeSource(ComputeSource):
         if busy := [c.name for c in self._child_sources if c.active_jobs]:
             logger.warning(f"Not collecting yet: {', '.join(busy)} still have active jobs")
             return False
-        remotes = [c for c in self._child_sources if hasattr(c, "keep_remote_on_success")]
+        remotes: list[Any] = [
+            c for c in self._child_sources if hasattr(c, "keep_remote_on_success")
+        ]
         why = []
         if any(info.status != "COMPLETED" for info in self._jobs().values()):
             why.append("a task did not complete")

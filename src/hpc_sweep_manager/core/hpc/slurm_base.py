@@ -112,6 +112,7 @@ class SlurmBase(ComputeSource):
     poll_interval = 60.0  # Slurm jobs run for hours: a poll a minute is soon enough
     sweep_dir: Path | None = None  # the local sweep dir, set by setup(): manifest, task states
     sweep_id: str | None = None
+    _pull_excludes: tuple[str, ...] = ()  # a chain's driver sets it: pulls skip checkpoints
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -208,6 +209,7 @@ class SlurmBase(ComputeSource):
         """A chain's chunk already queued, by a driver that stopped between its sbatch and its
         manifest: the next driver adopts it rather than queueing the chunk twice. When squeue
         can't say, or names several, nothing is submitted: a guess could double the chunk."""
+        ids = None
         for attempt in range(QUEUE_TRIES):  # a squeue blip shouldn't stop a launcher at a seam
             if attempt:
                 await asyncio.sleep(QUEUE_RETRY_S)
@@ -286,7 +288,7 @@ class SlurmBase(ComputeSource):
                 return None
             if not index:  # an individual job (an array only has <id>_<i> rows)
                 own = info.task_dir and "_array_size" not in info.params
-                return Path(info.task_dir).name if own else None
+                return Path(info.task_dir).name if own and info.task_dir else None
             if not index.isdigit():  # a collapsed range (123_[4-9]) never ran
                 return None
             i, order = int(index), info.params.get("_global_indices")
@@ -312,9 +314,8 @@ class SlurmBase(ComputeSource):
     async def _off_gpu_nodes(self, spec: ResourceSpec) -> ResourceSpec:
         """A CPU-only job (:func:`cpu_only`) excludes its partition's GPU nodes, unless that is
         every node; an ``--exclude`` given is kept. 24 of ~300 CPU tasks once sat on GPU nodes."""
-        if not cpu_only(spec):
+        if not cpu_only(spec) or not (part := spec.partition):  # cpu_only implies a partition
             return spec
-        part = spec.partition
         if part not in self._gpu_nodes:
             rc, out, _ = await self._sh(["sinfo", "-h", "-N", "-p", part, "-o", "%N %G"])
             if rc != 0:  # not cached: the next job asks again
