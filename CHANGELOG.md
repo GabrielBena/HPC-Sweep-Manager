@@ -6,6 +6,36 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-08
+
+Everything since 0.1.0. Most of it is the 2026-10 maintenance pass (PRs #17–#67), driven by the
+Comp-PVR campaign's field report and a four-angle audit:
+- a Slurm outage can no longer delete a live sweep;
+- polling and submission are batched for shared clusters, with a fair-share gate;
+- the ssh backend runs tasks detached, so a dropped connection loses nothing;
+- every template now runs under bash in the tests;
+- pyright guards `src`.
+
+Before that came resumable chained runs and heterogeneous GPU-type scheduling. **For consumers:**
+read the *For consumers* notes below before upgrading. Defaults that changed print a message where
+they differ.
+
+### Added (resumable chained runs, issue #12, 2026-06-08)
+
+- **A job longer than a pool's walltime cap runs as a chain of checkpointed chunks.**
+  `hsm sweep run --resumable --chunk-walltime 23:00:00 --mode array` (native, or a `--remote`
+  Slurm alias) submits the whole array, and each next chunk depends on the previous one
+  (`--dependency=afterany`). Tasks that are done skip themselves via a `.hsm_done` sentinel,
+  and the chain stops on the sentinels, bounded by `max_chunks` and the failure caps.
+  `hsm sweep advance <id>` drives a chain whose launcher has exited. It composes with typed
+  multi-GPU sub-arrays.
+- **The contract on the training script:**
+  - resume from `$HSM_RESUME_FROM` when it is set;
+  - save to `$HSM_RESUME_TO` on SIGTERM and periodically;
+  - write `$HSM_DONE_SENTINEL` once the whole budget is done.
+
+  See [HPC_EXECUTION.md](docs/user_guide/HPC_EXECUTION.md) and `examples/resumable_probe.py`.
+
 ### Fixed (2026-10 maintenance pass — `docs/dev/maintenance-2026-10.md`)
 
 - **A Slurm outage could delete a live sweep dir (S1).** When `squeue` failed
@@ -424,9 +454,8 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
   which of HSM's overrides each task gets, in order; the default is
   `[wandb.group, output.dir, hydra.run.dir]`. A project without a `wandb` config drops
   `wandb.group` from the list, so `wandb.group=` is no longer forced on every project (a known
-  limitation until now). Unknown names are dropped with a warning; a resumable chain keeps the
-  list it was launched with. An unknown name stops the run: dropping it silently would cost
-  every task its `output.dir` on a typo. **For consumers:** the command gains one trailing
+  limitation until now). A resumable chain keeps the list it was launched with. An unknown
+  name stops the run: dropping it silently would cost every task its `output.dir` on a typo. **For consumers:** the command gains one trailing
   override, and `hsm sweep run` says so until the project sets `hydra_overrides:`. Whatever
   an app writes to Hydra's output dir (or to its cwd, when Hydra changes into the run dir)
   now lands in the task dir and is pulled back with it. A project that sets its own
