@@ -53,8 +53,8 @@ is deleted; the CHANGELOG keeps the record.
 | C7 | *[NEW]* Sweep ids have one-second resolution, so same-second launches share the local and remote dirs, including the cleanup `rm -rf`. | Create the dir exclusively and retry with a suffix. → Collision test. | none | #23 ✓ |
 | X4 | *[NEW]* GPU indices are wrong in two ways, and co-tenants are not avoided:<br>- Slot indices come from nvidia-smi (PCI order), but no template sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so CUDA reads them fastest-first. On anahita, `--gpus 1` lands on nvidia-smi #3.<br>- With no allowlist, the default "all GPUs" joins cards co-tenants are using (`GpuInfo.is_free` is ignored).<br>- `--gpus cpu` leaves `CUDA_VISIBLE_DEVICES` unset.<br>- `max_parallel_jobs` ignores the real slot count, and falling back to CPU slots is silent. | Export `CUDA_DEVICE_ORDER=PCI_BUS_ID`; with no allowlist, use only free GPUs; for cpu, `CUDA_VISIBLE_DEVICES=`; capacity = slot count, and warn on the fallback. → Render and slot tests. | anahita's `local.visible_gpus: [2,3]` is in CUDA order and must be restated in nvidia-smi order | #43 ✓ |
 | C8 | *[NEW]* `hsm remote clean`:<br>- runs an unquoted `rm -rf {target}`;<br>- takes the target from the cwd name, not the project root;<br>- ignores `workdir`;<br>- with `remote_root: ~` plus `--all-projects`, becomes `rm -rf ~`. | Resolve the target from the project, include `workdir`, quote it, and refuse any target outside an HSM-made dir (marker file). → Guard tests. | none | #29 ✓ |
-| G1 | *[NEW]* `hsm remote health --watch` crashes: the module does `import datetime`, then calls `datetime.now()`. | Fix it, plus a smoke test that walks every CLI command. | none | |
-| G2 | *[NEW]* The Jinja env is not `StrictUndefined`, so a missing variable renders as "". That is gotcha #11's class of bug. | `StrictUndefined`, autoescape off; fix the 3 test helpers. | none | |
+| G1 | *[NEW]* `hsm remote health --watch` crashes: the module does `import datetime`, then calls `datetime.now()`. | Fix it, plus a smoke test that walks every CLI command. | none | #65 ✓ |
+| G2 | *[NEW]* The Jinja env is not `StrictUndefined`, so a missing variable renders as "". That is gotcha #11's class of bug. | `StrictUndefined`, autoescape off; fix the 3 test helpers. | none | #65 ✓ |
 
 ## P2: ergonomics and robustness
 
@@ -209,6 +209,6 @@ project's default pool. Tell Comp-PVR its `pre_script` can use `$HSM_CODE_DIR`.
 | cli | C-6 · `exclude`/`include`/`combinations` in the generator; `hsm sweep rerun` | R2, R1 | P2 |
 | cli | C-7 · thin `cli/sweep.py` | consolidation | — |
 | chore | chore-6 (#30 ✓; #36 ✓, #40 ✓: tracker, a docs repair + size test) · dead code, unused dependencies, Makefile, `requirements.txt` | G (deps, dead code) | — |
-| chore | chore-7 · docs refresh, a CLI-docs rot test, no machine paths, slim CLAUDE.md | G (docs) | — |
-| chore | chore-8 · pyright config and fixes, plus the CI gate (after the deletions, so fewer errors) | G1, G2, pyright | — |
+| chore | chore-7 (#64 ✓) · docs refresh, a CLI-docs rot test, no machine paths, slim CLAUDE.md | G (docs) | — |
+| chore | chore-8 (#65 ✓: G1, G2; #66 ✓ · #67 ✓: pyright over src, Gabriel's scope) · pyright config and fixes, plus the CI gate (after the deletions, so fewer errors) | G1, G2, pyright | — |
 | chore | release · `v0.2.0`: CHANGELOG, version in one place, tag | — | — |
