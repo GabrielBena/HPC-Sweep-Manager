@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hpc-sweep-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Automated hyperparameter sweeps on HPC systems using Hydra configs and W&B tracking"
 readme = "README.md"
 license = {text = "MIT"}

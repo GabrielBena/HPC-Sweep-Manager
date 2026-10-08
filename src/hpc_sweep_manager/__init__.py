@@ -1,5 +1,6 @@
 """HPC Sweep Manager - Automated hyperparameter sweeps on HPC systems."""
 
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from .core.common.config import SweepConfig
@@ -9,10 +10,13 @@ from .core.common.path_detector import PathDetector
 __author__ = "Gabriel Bena"
 __email__ = "gabriel.bena@gmail.com"
 
-# Release version; the runtime ``__version__`` appends a short git SHA when
-# imported from a source checkout (see _resolve_version) so users can tell
-# dev builds apart in bug reports during the active refactor.
-_BASE_VERSION = "0.1.0"
+# The release version lives in pyproject.toml alone; the runtime ``__version__`` appends a short
+# git SHA when imported from a source checkout (see _resolve_version), so a dev build is never
+# mistaken for a release in a bug report.
+try:
+    _BASE_VERSION = version("hpc-sweep-manager")
+except PackageNotFoundError:  # a source tree on sys.path that was never installed
+    _BASE_VERSION = "0+unknown"
 
 
 def _git_short_sha() -> str | None:
