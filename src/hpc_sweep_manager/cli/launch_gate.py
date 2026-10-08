@@ -24,6 +24,7 @@ WAIT_EVERY_S, WAIT_AT_MOST_S, PROBE_TIMEOUT_S = 1800, 12 * 3600, 90
 
 
 async def _probe(source: Any, spec: ResourceSpec) -> Share:
+    assert spec.account  # the gate only probes a spec that names its account
     if source.source_type != "ssh_slurm_remote":
         return await probe_share(spec.account, spec.partition or "")
     conn = await source._open_connection()

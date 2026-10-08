@@ -9,21 +9,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
-try:
-    from jinja2 import Environment, FileSystemLoader, Undefined
-
-    class _PrintFailsUndefined(Undefined):
-        """A missing variable can still be tested (``{% if x %}``) but never printed: printed as
-        "", it built commands with holes, gotcha #11's class of bug (G2)."""
-
-        __str__ = Undefined._fail_with_undefined_error
-
-    JINJA2_AVAILABLE = True
-except ImportError:
-    JINJA2_AVAILABLE = False
+from jinja2 import Environment, FileSystemLoader, Undefined
 
 logger = logging.getLogger(__name__)
+
+
+class _PrintFailsUndefined(Undefined):
+    """A missing variable can still be tested (``{% if x %}``) but never printed: printed as "",
+    it built commands with holes, gotcha #11's class of bug (G2)."""
+
+    __str__ = Undefined._fail_with_undefined_error
 
 
 def params_to_hydra_args(params: dict[str, Any]) -> str:
@@ -98,11 +93,6 @@ def render_template(template_name: str, **kwargs) -> str:
     Returns:
         The rendered template as a string.
     """
-    if not JINJA2_AVAILABLE:
-        raise ImportError(
-            "Jinja2 is required for template rendering. Please install it with 'pip install jinja2'"
-        )
-
     # Get the path to the templates directory
     template_dir = Path(__file__).parent.parent.parent / "templates"
 

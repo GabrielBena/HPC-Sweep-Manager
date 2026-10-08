@@ -22,15 +22,21 @@ import difflib
 import json
 import logging
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .chain import ChainConfig, ChainDecision, ChainState, ChunkOutcome, decide_next
 from .compute_source import ComputeSource, SubmissionMode
 from .resource_spec import ResourceSpec, spec_from_legacy_resources
 from .resumable import ResumableConfig, ResumableContext
+
+if TYPE_CHECKING:  # what a resumable chain's driver needs: one of the two Slurm sources
+    from ..hpc.slurm_compute_source import SlurmComputeSource
+    from ..remote.ssh_slurm_compute_source import SSHSlurmComputeSource
+
+    ChainSource = SlurmComputeSource | SSHSlurmComputeSource
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +166,7 @@ def build_compute_source(
     parallel_jobs: int | None = None,
     qos_whitelist: frozenset[str] | None = None,
     remote_alias: str | None = None,
-    gpus_override: None | int | Sequence[int] = None,
+    gpus_override: None | str | int | Sequence[int] = None,
     conda_env_override: str | None = None,
     remote_submission: SubmissionMode | None = None,
     resumable: bool = False,
@@ -432,18 +438,20 @@ async def run_sweep_async(
     )
 
 
-def _cancelled(source: ComputeSource) -> bool:
+def _cancelled(source: ChainSource) -> bool:
     """Whether ``hsm sweep cancel`` marked this chain stopped in its manifest on disk."""
+    if (sweep_dir := getattr(source, "sweep_dir", None)) is None:
+        return False
     try:
-        manifest = json.loads((source.sweep_dir / ".hsm_manifest.json").read_text())
-    except (AttributeError, TypeError, OSError, ValueError):
+        manifest = json.loads((sweep_dir / ".hsm_manifest.json").read_text())
+    except (OSError, ValueError):
         return False
     return bool(((manifest.get("chain") or {}).get("state") or {}).get("failed"))
 
 
 async def run_resumable_sweep_async(
     *,
-    source: ComputeSource,
+    source: ChainSource,
     sweep_dir: Path,
     sweep_id: str,
     params_list: list[dict[str, Any]],
@@ -493,8 +501,7 @@ async def run_resumable_sweep_async(
     # Make every tasks/ pull (the incremental ones in wait_for_all AND the final
     # collect) skip the heavy checkpoint dir — it rides the cheap server-side
     # archive, not the WAN. (No-op attr on the native source.)
-    if hasattr(source, "_pull_excludes"):
-        source._pull_excludes = (f"*/{ckpt_subdir}/",)
+    source._pull_excludes = (f"*/{ckpt_subdir}/",)
 
     if do_setup:
         if not await source.setup(sweep_dir, sweep_id):
@@ -607,6 +614,7 @@ async def run_resumable_sweep_async(
         # A failed probe (None) is no verdict, and the chunk is in the manifest. A live launcher
         # asks again a few polls; a detached `advance` leaves it to its next run, so that two
         # runs never overlap and both submit the next chunk.
+        progress = None
         for attempt in range(PROBE_TRIES if block else 1):
             if attempt:
                 await asyncio.sleep(poll_interval)
@@ -662,6 +670,7 @@ async def run_resumable_sweep_async(
             prev_mtime = progress.checkpoint_mtime
 
         should_archive = getattr(source, "_should_archive", None)
+        archive: Callable[[bool], Awaitable[bool]] | None = getattr(source, "_archive_remote", None)
         if decision is ChainDecision.DONE:
             # DATA-LOSS GUARD: the intermediate pulls exclude the heavy
             # checkpoint dir on the assumption it rides the server-side archive.
@@ -686,9 +695,9 @@ async def run_resumable_sweep_async(
             # Keep the remote for inspection (no rm -rf), but archive it first, as
             # for DONE (gotcha 4b): the finished tasks' checkpoints must outlive the
             # /scratch purge. Only archive_on: never opts out (issue #15).
-            if callable(should_archive) and should_archive(False):
+            if callable(should_archive) and callable(archive) and should_archive(False):
                 try:
-                    await source._archive_remote(True)
+                    await archive(True)
                 except Exception as e:  # noqa: BLE001 — the remote dir is kept either way
                     logger.warning(f"chain {sweep_id}: archive failed ({e}); the remote is kept")
             await _safe_collect(source, defer_cleanup=True)
