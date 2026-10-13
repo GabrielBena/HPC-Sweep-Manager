@@ -64,6 +64,7 @@ class ComputeSource(ABC):
 
     poll_interval: float = 10.0  # seconds between the status polls of a launcher's wait
     hydra_overrides: tuple[str, ...] = tuple(HYDRA_OVERRIDES)  # appended to each task (R3)
+    default_spec: ResourceSpec  # per-job defaults a submit's spec layers over (not distributed)
 
     def __init__(self, name: str, source_type: str, max_parallel_jobs: int):
         self.name = name
