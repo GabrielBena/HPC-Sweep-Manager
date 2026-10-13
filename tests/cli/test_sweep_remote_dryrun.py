@@ -262,6 +262,12 @@ class TestThrottleAndCommand:
         assert "Array throttle 350" in out and "default of 50" in out
         assert "array throttle: 350 at once" in out
 
+    def test_p_with_individual_submissions_says_it_caps_arrays_only(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_project(tmp_path)
+        out = _dry_run(parallel_jobs=10, remote_submission="individual")
+        assert "array_throttle caps job arrays only" in out
+
     def test_the_command_cds_into_the_remote_snapshot(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         _make_project(tmp_path)

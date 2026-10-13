@@ -75,8 +75,8 @@ class TestCollectViaManifest:
         buf = io.StringIO()
         await _collect_via_manifest(sweep_dir, manifest, Console(file=buf, width=200))
         out = buf.getvalue()
-        assert "terminal." in out and "FAILED" not in out
-        assert "Tasks: 1 TIMEOUT, 1 COMPLETED" in out
+        assert "terminal: 1 FAILED." in out  # the job, as sacct sums the array up
+        assert "Tasks: 1 TIMEOUT, 1 COMPLETED" in out  # and every task under it
 
     @pytest.mark.asyncio
     async def test_all_completed_pulls_and_cleans(self, tmp_path, patched):

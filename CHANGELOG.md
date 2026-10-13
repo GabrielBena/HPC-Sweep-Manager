@@ -12,9 +12,9 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 - **`collect` sums an array up per task.** An array where 58 tasks completed and 14 hit the
   walltime read "1 job (72 tasks) terminal: 1 FAILED", and nothing said how many tasks had
-  completed. When `tasks_state.json` holds per-task states, the job line no longer counts jobs.
-  One `Tasks: 58 COMPLETED, 14 TIMEOUT` line follows it. The end of `hsm sweep run` prints the
-  same line when a job did not complete.
+  completed. One `Tasks: 58 COMPLETED, 14 TIMEOUT` line from `tasks_state.json` now follows the
+  job line, which still counts an array once. The end of `hsm sweep run` prints the same line
+  when a job did not complete.
 - **`-p N` throttles a Slurm launch.** For a Slurm launch (native, or a `backend: slurm`
   remote), `-p` was silently ignored, so the only way to throttle one launch was
   `scontrol update … ArrayTaskThrottle` by hand. It now sets that launch's `array_throttle` over

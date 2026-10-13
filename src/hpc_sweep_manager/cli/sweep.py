@@ -642,11 +642,12 @@ def _run_sweep_via_orchestrator(
                 f"[yellow]{len(combinations)} individual sbatch calls: each costs SSH channels "
                 "and a scheduler RPC on the login node; `--mode array` submits one.[/yellow]"
             )
-        if sub_mode == "individual" and effective_spec.array_throttle:
-            console.print(
-                "[yellow]array_throttle caps job arrays only: individual submissions run "
-                "uncapped (use --mode array).[/yellow]"
-            )
+    slurm = source.source_type in ("slurm", "ssh_slurm_remote")
+    if slurm and sub_mode == "individual" and effective_spec.array_throttle:  # -p included
+        console.print(
+            "[yellow]array_throttle caps job arrays only: individual submissions run "
+            "uncapped (use --mode array).[/yellow]"
+        )
     # Echo the chosen entrypoint on every run — auto-detection can pick the
     # wrong train*.py silently (see PathDetector.detect_train_script_candidates).
     console.print(f"[green]Training script: {getattr(source, 'script_path', script_path)}[/green]")
@@ -1276,13 +1277,12 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
             ok = await source.collect_results()
             counts = Counter(terminal.values())
             colour = "green" if set(counts) == {"COMPLETED"} else "red"
-            jobs = ": " + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
-            if load_task_states(sweep_dir):  # the Tasks line below says it per task
-                colour, jobs = "bold", ""
             console.print(
-                f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal{jobs}.[/{colour}]"
+                f"[{colour}]All {len(job_ids)} job(s){task_hint} terminal: "
+                + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+                + f".[/{colour}]"
             )
-            _report_slurm_ends(sweep_dir, console)
+            _report_slurm_ends(sweep_dir, console)  # per task: an array is one job above
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "
