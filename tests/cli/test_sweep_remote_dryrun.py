@@ -26,13 +26,13 @@ from hpc_sweep_manager.cli.sweep import run_sweep
 from hpc_sweep_manager.core.common.config import HSMConfig
 
 
-def _make_project(tmp_path, *, backend="slurm", spec=None):
+def _make_project(tmp_path, *, backend="slurm", spec=None, **remote_keys):
     """Minimal project: train script, sweep config, one registered remote."""
     (tmp_path / "train.py").write_text("print('hi')\n")
     sweeps = tmp_path / "sweeps"
     sweeps.mkdir()
     (sweeps / "sweep.yaml").write_text(yaml.safe_dump({"sweep": {"grid": {"lr": [0.1, 0.2, 0.3]}}}))
-    remote = {"host": "uzh", "backend": backend}
+    remote = {"host": "uzh", "backend": backend, **remote_keys}
     if spec is not None:
         remote["spec"] = spec
     (tmp_path / ".hsm").mkdir()
@@ -46,7 +46,7 @@ def _make_project(tmp_path, *, backend="slurm", spec=None):
     )
 
 
-def _dry_run(*, remote_alias="uzh", mode="remote", remote_submission=None):
+def _dry_run(*, remote_alias="uzh", mode="remote", remote_submission=None, parallel_jobs=None):
     """Run a dry-run and return the rendered console text."""
     buf = io.StringIO()
     run_sweep(
@@ -58,7 +58,7 @@ def _dry_run(*, remote_alias="uzh", mode="remote", remote_submission=None):
         walltime=None,
         resources=None,
         group=None,
-        parallel_jobs=None,
+        parallel_jobs=parallel_jobs,
         no_progress=True,
         console=Console(file=buf, width=200),
         logger=logging.getLogger("test"),
@@ -243,3 +243,33 @@ class TestRemoteModeReconciliation:
         assert calls == {}
         assert result.exit_code == 1
         assert "can't be combined" in result.output
+
+
+class TestThrottleAndCommand:
+    """Field report 2026-10-13: `-p` was ignored for a Slurm remote, an old 350 cap became the
+    throttle without a word, and the shown command cd'd into the local project."""
+
+    def test_p_sets_this_launchs_array_throttle(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_project(tmp_path, spec={"array_throttle": 50})
+        out = _dry_run(parallel_jobs=60)
+        assert "array throttle: 60 at once" in out and "shared-account default" not in out
+
+    def test_a_throttle_above_the_fair_share_default_warns(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_project(tmp_path, max_parallel_jobs=350)
+        out = _dry_run()
+        assert "Array throttle 350" in out and "default of 50" in out
+        assert "array throttle: 350 at once" in out
+
+    def test_p_with_individual_submissions_says_it_caps_arrays_only(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_project(tmp_path)
+        out = _dry_run(parallel_jobs=10, remote_submission="individual")
+        assert "array_throttle caps job arrays only" in out
+
+    def test_the_command_cds_into_the_remote_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        _make_project(tmp_path)
+        out = _dry_run()
+        assert "cd <this sweep's code snapshot on uzh> &&" in out and f"cd {tmp_path}" not in out

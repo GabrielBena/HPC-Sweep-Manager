@@ -6,6 +6,25 @@ All notable changes to HPC-Sweep-Manager are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-13
+
+### Fixed (first live use of 0.2.0, Comp-PVR on uzh)
+
+- **`collect` sums an array up per task.** An array where 58 tasks completed and 14 hit the
+  walltime read "1 job (72 tasks) terminal: 1 FAILED", and nothing said how many tasks had
+  completed. One `Tasks: 58 COMPLETED, 14 TIMEOUT` line from `tasks_state.json` now follows the
+  job line, which still counts an array once. The end of `hsm sweep run` prints the same line
+  when a job did not complete.
+- **`-p N` throttles a Slurm launch.** For a Slurm launch (native, or a `backend: slurm`
+  remote), `-p` was silently ignored, so the only way to throttle one launch was
+  `scontrol update … ArrayTaskThrottle` by hand. It now sets that launch's `array_throttle` over
+  the spec's, and a resumable chain keeps it.
+- **A throttle above the fair-share default warns.** A remote's old `max_parallel_jobs` (350,
+  say) silently became `--array=…%350`. A throttle above 50 that `-p` didn't set now prints a
+  warning.
+- **The dry run's command `cd`s where the task runs.** For a remote run it showed the local
+  project dir; it now says the sweep's code snapshot on the remote.
+
 ## [0.2.0] — 2026-10-08
 
 Everything since 0.1.0. Most of it is the 2026-10 maintenance pass (PRs #17–#67), driven by the

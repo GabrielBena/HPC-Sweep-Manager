@@ -277,9 +277,16 @@ class TestSummary:
         console = Console(record=True, width=300)
         assert _report_slurm_ends(tmp_path, console) == ["task_2", "task_3", "task_4"]
         text = console.export_text()
-        assert "Slurm ended: 1 TIMEOUT, 1 OUT_OF_MEMORY, 1 FAILED" in text
+        assert "Tasks: 1 TIMEOUT, 1 OUT_OF_MEMORY, 1 FAILED, 1 COMPLETED" in text
         assert "Infra suspect (failed in < 60 s): task_4" in text
         assert "--exclude=u24-cpu-07" in text
+
+    def test_all_done_is_one_green_line(self, tmp_path):
+        states = {f"task_{i}": _state("COMPLETED", "0:0", "n1", 600) for i in range(1, 4)}
+        (tmp_path / "tasks_state.json").write_text(json.dumps(states))
+        console = Console(record=True, width=300)
+        assert _report_slurm_ends(tmp_path, console) == []
+        assert console.export_text() == "Tasks: 3 COMPLETED\n"
 
     def test_a_cancel_is_not_infra_suspect(self, tmp_path):
         states = {"task_1": _state("CANCELLED", "0:0", "None assigned", 0)}

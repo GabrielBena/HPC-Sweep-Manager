@@ -7,6 +7,7 @@ fake rsync, so the re-attach → sacct-classify → pull/archive flow runs offli
 from __future__ import annotations
 
 import io
+import json
 from functools import partialmethod
 
 import pytest
@@ -61,6 +62,22 @@ def patched(monkeypatch):
 
 
 class TestCollectViaManifest:
+    @pytest.mark.asyncio
+    async def test_an_array_is_summed_up_per_task(self, tmp_path, patched):
+        # Field report 2026-10-09: 58 done + 14 TIMEOUT read "1 job: 1 FAILED", no COMPLETED.
+        conn, _ = patched
+        conn.add("sacct", Result(0, stdout="1|FAILED\n"))  # the array, as sacct sums it up
+        sweep_dir = tmp_path / "sweeps" / "outputs" / "sw1"
+        sweep_dir.mkdir(parents=True, exist_ok=True)
+        manifest = _manifest(tmp_path, job_ids=["1"])
+        states = {"task_1": {"state": "COMPLETED"}, "task_2": {"state": "TIMEOUT", "elapsed_s": 9}}
+        (sweep_dir / "tasks_state.json").write_text(json.dumps(states))
+        buf = io.StringIO()
+        await _collect_via_manifest(sweep_dir, manifest, Console(file=buf, width=200))
+        out = buf.getvalue()
+        assert "terminal: 1 FAILED." in out  # the job, as sacct sums the array up
+        assert "Tasks: 1 TIMEOUT, 1 COMPLETED" in out  # and every task under it
+
     @pytest.mark.asyncio
     async def test_all_completed_pulls_and_cleans(self, tmp_path, patched):
         conn, rsync_calls = patched

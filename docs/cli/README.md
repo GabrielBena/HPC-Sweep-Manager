@@ -57,7 +57,8 @@ hsm sweep run [OPTIONS]
   --walltime TEXT                    HH:MM:SS (overrides the typed `local:` / `slurm:` block walltime).
   --resources TEXT                   Scheduler resource string (slurm `--flag=value` or PBS `select=...`).
   --group TEXT                       W&B group name for this sweep.
-  -p, --parallel-jobs INTEGER        Max concurrent jobs (local / remote slot count).
+  -p, --parallel-jobs INTEGER        At most N tasks at once: local slots, or this launch's
+                                     Slurm array throttle (over spec.array_throttle).
   --no-progress                      Suppress progress callback prints.
   --force                            Launch as asked, even on a hot shared account
                                      (skips the fair-share prompt; see QUEUE.md).

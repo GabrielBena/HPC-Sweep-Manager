@@ -20,6 +20,8 @@ import asyncio
 
 from ..core.common.compute_source import SubmissionMode
 from ..core.common.config import HSMConfig, config_warnings, resolve_sweep_dir
+from ..core.common.resource_spec import ResourceSpec
+from ..core.common.sweep_analysis import load_task_states
 from ..core.common.sweep_orchestrator import (
     SUPPORTED_MODES as _ORCHESTRATOR_MODES,
 )
@@ -31,6 +33,7 @@ from ..core.common.sweep_orchestrator import (
 )
 from ..core.common.templating import params_to_hydra_args, task_overrides
 from ..core.common.yaml_loader import load_yaml
+from ..core.hpc.fair_share import DEFAULT_THROTTLE
 from ..core.hpc.slurm_base import cpu_only
 from .common import common_options
 from .launch_gate import fair_share_gate
@@ -221,8 +224,6 @@ def _render_placement(
     never abort a real submission.
     """
     import math
-
-    from ..core.hpc.fair_share import DEFAULT_THROTTLE
 
     try:
         gpus_per_task = spec.gpus or 0
@@ -455,13 +456,11 @@ def _fmt_num(x: float) -> str:
 
 
 def _report_slurm_ends(sweep_dir: Path, console: Console) -> list[str]:
-    """Print how Slurm ended the tasks that did not complete (``tasks_state.json``), TIMEOUT and
-    OUT_OF_MEMORY counted apart, and return them; a task with ``.hsm_done`` is done whatever Slurm
-    says. A few FAILED/NODE_FAIL tasks within a minute, while others ran longer, are flagged
+    """Print how Slurm ended every task (``tasks_state.json``), TIMEOUT and OUT_OF_MEMORY counted
+    apart, and return the tasks that did not complete; a task with ``.hsm_done`` is done whatever
+    Slurm says. A few FAILED/NODE_FAIL tasks within a minute, while others ran longer, are flagged
     "infra suspect" with an ``--exclude`` of their nodes; a sweep-wide fast failure is a bug."""
     from collections import Counter
-
-    from ..core.common.sweep_analysis import load_task_states
 
     states = load_task_states(sweep_dir)
     ended = {
@@ -469,9 +468,11 @@ def _report_slurm_ends(sweep_dir: Path, console: Console) -> list[str]:
         for t, s in states.items()
         if s.get("state") != "COMPLETED" and not (sweep_dir / "tasks" / t / ".hsm_done").exists()
     }
-    if ended:
-        counts = Counter(s.get("state") for s in ended.values()).most_common()
-        console.print("Slurm ended: " + ", ".join(f"{n} {st}" for st, n in counts), style="red")
+    if states:  # per task, where the job line counts an array once (gotcha #7)
+        counts = Counter(s.get("state") for s in ended.values())
+        counts["COMPLETED"] = len(states) - len(ended)
+        listed = ", ".join(f"{n} {st}" for st, n in counts.most_common() if n)
+        console.print(f"Tasks: {listed}", style="red" if ended else "green")
     quick = sorted(
         t
         for t, s in ended.items()
@@ -590,6 +591,17 @@ def _run_sweep_via_orchestrator(
     # --gres / account / qos instead of the empty pre-merge CLI spec. No-op for
     # local/native (default_spec == spec); falls back for distributed.
     effective_spec = getattr(source, "default_spec", None) or spec
+    if source.source_type in ("slurm", "ssh_slurm_remote"):
+        if parallel_jobs is not None:  # this launch's arrays, over the spec's (as the gate does)
+            throttle = ResourceSpec(array_throttle=max(parallel_jobs, 1))
+            source.default_spec = effective_spec = effective_spec.merge(throttle)
+            spec = spec.merge(throttle)
+        elif (n := effective_spec.array_throttle) and n > DEFAULT_THROTTLE:
+            console.print(
+                f"[yellow]Array throttle {n} (spec.array_throttle, or the remote's "
+                f"max_parallel_jobs) is above the shared-account default of {DEFAULT_THROTTLE}; "
+                "`-p N` sets this launch's.[/yellow]"
+            )
 
     # Multi-gpu_type specs split into one Slurm array per type — only array
     # submission supports that. Fail here (before any dry-run/submission)
@@ -630,11 +642,12 @@ def _run_sweep_via_orchestrator(
                 f"[yellow]{len(combinations)} individual sbatch calls: each costs SSH channels "
                 "and a scheduler RPC on the login node; `--mode array` submits one.[/yellow]"
             )
-        if sub_mode == "individual" and effective_spec.array_throttle:
-            console.print(
-                "[yellow]array_throttle caps job arrays only: individual submissions run "
-                "uncapped (use --mode array).[/yellow]"
-            )
+    slurm = source.source_type in ("slurm", "ssh_slurm_remote")
+    if slurm and sub_mode == "individual" and effective_spec.array_throttle:  # -p included
+        console.print(
+            "[yellow]array_throttle caps job arrays only: individual submissions run "
+            "uncapped (use --mode array).[/yellow]"
+        )
     # Echo the chosen entrypoint on every run — auto-detection can pick the
     # wrong train*.py silently (see PathDetector.detect_train_script_candidates).
     console.print(f"[green]Training script: {getattr(source, 'script_path', script_path)}[/green]")
@@ -734,7 +747,12 @@ def _run_sweep_via_orchestrator(
                 # them (with placeholders) so the shown command matches what runs.
                 suffix = task_overrides(source.hydra_overrides, group or "<sweep_id>", "<task_dir>")
                 console.print("\n[bold]Command (task 1, as the wrapper runs it):[/bold]")
-                console.print(f"  cd {project_dir} && \\")
+                where = project_dir
+                if resolved_mode == "remote":  # the task runs in the sweep's snapshot there
+                    where = (
+                        f"<this sweep's code snapshot on {getattr(source, 'host', remote_alias)}>"
+                    )
+                console.print(f"  cd {where} && \\")
                 console.print(
                     f"  {run_prefix} {src_script} {params_to_hydra_args(combinations[0])} {suffix}"
                 )
@@ -1098,7 +1116,13 @@ def sweep_cmd(ctx):
 @click.option("--walltime", help="Job walltime (overrides config default)")
 @click.option("--resources", help="Job resources (overrides config default)")
 @click.option("--group", help="W&B group name for this sweep")
-@click.option("--parallel-jobs", "-p", type=int, help="Maximum parallel jobs")
+@click.option(
+    "--parallel-jobs",
+    "-p",
+    type=int,
+    help="At most N tasks at once: local slots, or this launch's Slurm array throttle "
+    "(over spec.array_throttle).",
+)
 @click.option("--no-progress", is_flag=True, help="Disable progress tracking")
 @click.option(
     "--resumable",
@@ -1258,7 +1282,7 @@ async def _collect_via_manifest(sweep_dir: Path, manifest: dict, console: Consol
                 + ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
                 + f".[/{colour}]"
             )
-            _report_slurm_ends(sweep_dir, console)
+            _report_slurm_ends(sweep_dir, console)  # per task: an array is one job above
             archived = " + archived" if source.archive_dir else ""
             console.print(
                 f"Pulled{archived} → {sweep_dir / 'tasks'} "
@@ -1587,7 +1611,6 @@ def _print_task_errors(sweep_dir: Path, tasks: list[str], console: Console) -> N
     """Why each failed task ended: its ``Status:``/``Exit Code:`` lines, how Slurm ended it
     (``tasks_state.json``), and the tail of its newest non-empty log: an ssh task's
     ``tasks/<task>/hsm.log``, a local or Slurm task's ``logs/*.err``."""
-    from ..core.common.sweep_analysis import load_task_states
 
     states = load_task_states(sweep_dir)
     for task in tasks[:10]:
